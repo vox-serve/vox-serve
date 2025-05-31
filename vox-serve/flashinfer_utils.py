@@ -216,6 +216,7 @@ def top_k_sampling(logits, top_k, temperature):
     samples = flashinfer.sampling.top_k_sampling_from_probs(
         probs=probs, 
         top_k=top_k, 
+        deterministic=True,
     )
 
     return samples
@@ -227,6 +228,7 @@ def top_p_sampling(logits, top_p, temperature):
     samples = flashinfer.sampling.top_p_sampling_from_probs(
         probs=probs, 
         top_p=top_p, 
+        deterministic=True,
     )
 
     return samples

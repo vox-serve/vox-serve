@@ -1,21 +1,19 @@
 from typing import Callable, List, Optional, Tuple, Union
-import os
-import wave 
+import numpy as np
+import torch
+import asyncio
+import threading
+import queue
+import wave
 
 import torch
-import torch.utils.checkpoint
 from torch import nn
 from transformers.activations import ACT2FN
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
-from transformers.utils import (
-    LossKwargs,
-    logging,
-)
 from transformers import LlamaConfig, LlamaPreTrainedModel
 
+from .tokenizer.snac import SNAC
 from .flashinfer_utils import FlashInferWrapper, top_p_sampling
-
-logger = logging.get_logger(__name__)
 
 
 class SpeechLlamaConfig(LlamaConfig):
@@ -363,13 +361,15 @@ class OrpheusModel:
         self.model_name = self._map_model_params(model_name)
         self.model = LlamaForCausalLM.from_pretrained(model_name)
         self.model.to(dtype).to(device)
+        self.device = device
         self.dtype = dtype
         # self.engine_kwargs = engine_kwargs  # vLLM engine kwargs
         # self.engine = self._setup_engine()
         self.available_voices = ["zoe", "zac","jess", "leo", "mia", "julia", "leah"]
         
         # Use provided tokenizer path or default to model_name
-        self.tokenizer = self._load_tokenizer(tokenizer_path)
+        self.text_tokenizer = self._load_tokenizer(tokenizer_path)
+        self.audio_tokenizer = SNAC.from_pretrained("hubertsiuzdak/snac_24khz").eval().to(device)
 
         self.num_attention_heads = self.model.config.num_attention_heads 
         self.num_key_value_heads = self.model.config.num_key_value_heads
@@ -429,18 +429,18 @@ class OrpheusModel:
         else:
             if voice:
                 adapted_prompt = f"{voice}: {prompt}"
-                prompt_tokens = self.tokenizer(adapted_prompt, return_tensors="pt")
+                prompt_tokens = self.text_tokenizer(adapted_prompt, return_tensors="pt")
                 start_token = torch.tensor([[ 128259]], dtype=torch.int64)
                 end_tokens = torch.tensor([[128009, 128260, 128261, 128257]], dtype=torch.int64)
                 all_input_ids = torch.cat([start_token, prompt_tokens.input_ids, end_tokens], dim=1)
-                prompt_string = self.tokenizer.decode(all_input_ids[0])
+                prompt_string = self.text_tokenizer.decode(all_input_ids[0])
                 return all_input_ids, prompt_string
             else:
-                prompt_tokens = self.tokenizer(prompt, return_tensors="pt")
+                prompt_tokens = self.text_tokenizer(prompt, return_tensors="pt")
                 start_token = torch.tensor([[ 128259]], dtype=torch.int64)
                 end_tokens = torch.tensor([[128009, 128260, 128261, 128257]], dtype=torch.int64)
                 all_input_ids = torch.cat([start_token, prompt_tokens.input_ids, end_tokens], dim=1)
-                prompt_string = self.tokenizer.decode(all_input_ids[0])
+                prompt_string = self.text_tokenizer.decode(all_input_ids[0])
                 return all_input_ids, prompt_string
     
     def preprocess(self, prompt, voice="tara", model_type="larger"):
@@ -465,12 +465,10 @@ class OrpheusModel:
         return output_ids
     
     def postprocess(self, output_ids, output_filepath="output.wav"):
-        # TODO: tokenizer should have independent class
-        from .tokenizer import tokens_decoder_sync
         def token_gen(output_ids):
             # This function yields tokens from the output_ids starting after the input_ids
             for token_id in output_ids:
-                yield self.tokenizer.decode([token_id])
+                yield self.text_tokenizer.decode([token_id])
 
         with wave.open(output_filepath, "wb") as wf:
             wf.setnchannels(1)
@@ -479,12 +477,137 @@ class OrpheusModel:
 
             total_frames = 0
             chunk_counter = 0
-            for audio_chunk in tokens_decoder_sync(token_gen(output_ids)): # output streaming
+            for audio_chunk in self.tokens_decoder_sync(token_gen(output_ids)): # output streaming
                 chunk_counter += 1
                 frame_count = len(audio_chunk) // (wf.getsampwidth() * wf.getnchannels())
                 total_frames += frame_count
                 wf.writeframes(audio_chunk)
             duration = total_frames / wf.getframerate()
+    
+    def convert_to_audio(self, multiframe, count):
+        frames = []
+        if len(multiframe) < 7:
+            return
+        
+        codes_0 = torch.tensor([], device=self.device, dtype=torch.int32)
+        codes_1 = torch.tensor([], device=self.device, dtype=torch.int32)
+        codes_2 = torch.tensor([], device=self.device, dtype=torch.int32)
+
+        num_frames = len(multiframe) // 7
+        frame = multiframe[:num_frames*7]
+
+        for j in range(num_frames):
+            i = 7*j
+            if codes_0.shape[0] == 0:
+                codes_0 = torch.tensor([frame[i]], device=self.device, dtype=torch.int32)
+            else:
+                codes_0 = torch.cat([codes_0, torch.tensor([frame[i]], device=self.device, dtype=torch.int32)])
+
+            if codes_1.shape[0] == 0:
+                codes_1 = torch.tensor([frame[i+1]], device=self.device, dtype=torch.int32)
+                codes_1 = torch.cat([codes_1, torch.tensor([frame[i+4]], device=self.device, dtype=torch.int32)])
+            else:
+                codes_1 = torch.cat([codes_1, torch.tensor([frame[i+1]], device=self.device, dtype=torch.int32)])
+                codes_1 = torch.cat([codes_1, torch.tensor([frame[i+4]], device=self.device, dtype=torch.int32)])
+            
+            if codes_2.shape[0] == 0:
+                codes_2 = torch.tensor([frame[i+2]], device=self.device, dtype=torch.int32)
+                codes_2 = torch.cat([codes_2, torch.tensor([frame[i+3]], device=self.device, dtype=torch.int32)])
+                codes_2 = torch.cat([codes_2, torch.tensor([frame[i+5]], device=self.device, dtype=torch.int32)])
+                codes_2 = torch.cat([codes_2, torch.tensor([frame[i+6]], device=self.device, dtype=torch.int32)])
+            else:
+                codes_2 = torch.cat([codes_2, torch.tensor([frame[i+2]], device=self.device, dtype=torch.int32)])
+                codes_2 = torch.cat([codes_2, torch.tensor([frame[i+3]], device=self.device, dtype=torch.int32)])
+                codes_2 = torch.cat([codes_2, torch.tensor([frame[i+5]], device=self.device, dtype=torch.int32)])
+                codes_2 = torch.cat([codes_2, torch.tensor([frame[i+6]], device=self.device, dtype=torch.int32)])
+
+        codes = [codes_0.unsqueeze(0), codes_1.unsqueeze(0), codes_2.unsqueeze(0)]
+        # check that all tokens are between 0 and 4096 otherwise return *
+        if torch.any(codes[0] < 0) or torch.any(codes[0] > 4096) or torch.any(codes[1] < 0) or torch.any(codes[1] > 4096) or torch.any(codes[2] < 0) or torch.any(codes[2] > 4096):
+            return
+
+        with torch.inference_mode():
+            audio_hat = self.audio_tokenizer.decode(codes)
+        
+        audio_slice = audio_hat[:, :, 2048:4096]
+        detached_audio = audio_slice.detach().cpu()
+        audio_np = detached_audio.numpy()
+        audio_int16 = (audio_np * 32767).astype(np.int16)
+        audio_bytes = audio_int16.tobytes()
+        return audio_bytes
+
+    def turn_token_into_id(self, token_string, index):
+        # Strip whitespace
+        token_string = token_string.strip()
+        
+        # Find the last token in the string
+        last_token_start = token_string.rfind("<custom_token_")
+        
+        if last_token_start == -1:
+            print("No token found in the string")
+            return None
+        
+        # Extract the last token
+        last_token = token_string[last_token_start:]
+        
+        # Process the last token
+        if last_token.startswith("<custom_token_") and last_token.endswith(">"):
+            try:
+                number_str = last_token[14:-1]
+                return int(number_str) - 10 - ((index % 7) * 4096)
+            except ValueError:
+                return None
+        else:
+            return None
+  
+    
+    async def tokens_decoder(self, token_gen):
+        buffer = []
+        count = 0
+        async for token_sim in token_gen:       
+            token = self.turn_token_into_id(token_sim, count)
+            if token is None:
+                pass
+            else:
+                if token > 0:
+                    buffer.append(token)
+                    count += 1
+
+                    if count % 7 == 0 and count > 27:
+                        buffer_to_proc = buffer[-28:]
+                        audio_samples = self.convert_to_audio(buffer_to_proc, count)
+                        if audio_samples is not None:
+                            yield audio_samples
+
+
+    def tokens_decoder_sync(self, syn_token_gen):
+
+        audio_queue = queue.Queue()
+
+        # Convert the synchronous token generator into an async generator.
+        async def async_token_gen():
+            for token in syn_token_gen:
+                yield token
+
+        async def async_producer():
+            # tokens_decoder.tokens_decoder is assumed to be an async generator that processes tokens.
+            async for audio_chunk in self.tokens_decoder(async_token_gen()):
+                audio_queue.put(audio_chunk)
+            audio_queue.put(None)  # Sentinel
+
+        def run_async():
+            asyncio.run(async_producer())
+
+        thread = threading.Thread(target=run_async)
+        thread.start()
+
+        while True:
+            audio = audio_queue.get()
+            if audio is None:
+                break
+            yield audio
+
+        thread.join()
 
 if __name__ == "__main__":
     from transformers import AutoTokenizer
