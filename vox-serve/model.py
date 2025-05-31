@@ -485,6 +485,7 @@ class OrpheusModel:
             duration = total_frames / wf.getframerate()
     
     def convert_to_audio(self, multiframe, count):
+        print(len(multiframe))
         frames = []
         if len(multiframe) < 7:
             return
@@ -528,6 +529,8 @@ class OrpheusModel:
 
         with torch.inference_mode():
             audio_hat = self.audio_tokenizer.decode(codes)
+            # len(codes)=3 codes[0].shape=torch.Size([1, 4]) codes[1].shape=torch.Size([1, 8]) codes[2].shape=torch.Size([1, 16]) 
+            # audio_hat.shape=torch.Size([1, 1, 8192])
         
         audio_slice = audio_hat[:, :, 2048:4096]
         detached_audio = audio_slice.detach().cpu()
