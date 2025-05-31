@@ -13,7 +13,7 @@ from transformers.utils import (
 )
 from transformers import LlamaConfig, LlamaPreTrainedModel
 
-from .flashinfer_utils import FlashInferWrapper, top_k_top_p_sampling
+from .flashinfer_utils import FlashInferWrapper, top_p_sampling
 
 logger = logging.get_logger(__name__)
 
@@ -458,8 +458,9 @@ class OrpheusModel:
             attn_wrapper=attn_wrapper,
             kv_cache=kv_cache,
         )
-        # TODO: sampling
-        output_ids = torch.argmax(logits, dim=-1)
+        # TODO: repetition penalty
+        # output_ids = torch.argmax(logits, dim=-1)
+        output_ids = top_p_sampling(logits, top_p=0.8, temperature=0.6)
 
         return output_ids
     

@@ -3,7 +3,6 @@ import time
 import numpy as np 
 import torch
 import torch.cuda.nvtx as nvtx
-from transformers import AutoTokenizer, EncodecFeatureExtractor
 
 from .flashinfer_utils import FlashInferPrefillWrapper, FlashInferDecodeWrapper
 from .model import OrpheusModel
@@ -82,81 +81,6 @@ class ModelWorker:
         # initially, each batch is allocated one page
         self.paged_kv_indices = torch.arange(max_batch_size).to(self.device).to(torch.int32)
         self.paged_kv_last_page_len = torch.ones(max_batch_size).to(self.device).to(torch.int32)
-        
-        # self.graph_args = {
-        #     "input_ids": torch.zeros(max_batch_size).to(self.device).to(torch.int32),
-        #     "audio_input_ids": torch.zeros(self.num_audio_codebooks, max_batch_size).to(self.device).to(torch.int32),
-        #     "position_ids": torch.zeros(max_batch_size).to(self.device).to(torch.int32),
-        #     "exec_mask": torch.zeros(max_batch_size).to(self.device).to(torch.bool),
-        #     "output": None,
-        #     "mimi_input_values": torch.zeros(max_batch_size, 1, 1920).to(self.device).to(self.dtype),
-        #     "mimi_exec_mask": torch.zeros(max_batch_size).to(self.device).to(torch.bool),
-        #     "mimi_reset_mask": torch.zeros(max_batch_size).to(self.device).to(torch.bool),
-        # }
-        # # warm up
-        # for _ in range(5):
-        #     self.decode_wrapper.plan(
-        #         # torch.arange(max_batch_size + 1, device=self.device, dtype=torch.int32),
-        #         torch.arange(max_batch_size + 1, device=self.device, dtype=torch.int32),
-        #         torch.arange(self.max_num_pages, device=self.device, dtype=torch.int32),
-        #         torch.ones(max_batch_size, device=self.device, dtype=torch.int32),
-        #         dtype=self.dtype,
-        #     )
-        #     torch.cuda.synchronize()
-        #     self.model.forward(
-        #         input_ids=self.graph_args["input_ids"],
-        #         audio_input_ids=self.graph_args["audio_input_ids"],
-        #         position_ids=self.graph_args["position_ids"],
-        #         exec_mask=self.graph_args["exec_mask"],
-        #         attn_wrapper=self.decode_wrapper,
-        #         kv_cache=self.kv_cache,
-        #         repetition_cache=self.repetition_cache,
-        #         top_p=self.top_p,
-        #         top_k=self.top_k,
-        #         temperature=self.temperature,
-        #         repetition_window=self.repetition_window,
-        #         repetition_ngram=self.repetition_ngram,
-        #         repetition_scale=self.repetition_scale,
-        #     )
-        #     self.mimi_model.encode(
-        #         self.graph_args["mimi_input_values"],
-        #         self.graph_args["mimi_exec_mask"],
-        #         self.graph_args["mimi_reset_mask"],
-        #     )
-        
-        # torch.cuda.synchronize()
-        # self.decode_graph = torch.cuda.CUDAGraph()
-        # with torch.cuda.graph(self.decode_graph):
-        #     self.graph_args["decode_outputs"] = self.model.forward(
-        #         input_ids=self.graph_args["input_ids"],
-        #         audio_input_ids=self.graph_args["audio_input_ids"],
-        #         position_ids=self.graph_args["position_ids"],
-        #         exec_mask=self.graph_args["exec_mask"],
-        #         attn_wrapper=self.decode_wrapper,
-        #         kv_cache=self.kv_cache,
-        #         repetition_cache=self.repetition_cache,
-        #         top_p=self.top_p,
-        #         top_k=self.top_k,
-        #         temperature=self.temperature,
-        #         repetition_window=self.repetition_window,
-        #         repetition_ngram=self.repetition_ngram,
-        #         repetition_scale=self.repetition_scale,
-        #     )
-        # torch.cuda.synchronize()
-        # self.decode_graph.replay()
-
-        # torch.cuda.synchronize()
-        # self.mimi_graph = torch.cuda.CUDAGraph()
-        # with torch.cuda.graph(self.mimi_graph):
-        #     self.graph_args["mimi_outputs"] = self.mimi_model.encode(
-        #         self.graph_args["mimi_input_values"],
-        #         self.graph_args["mimi_exec_mask"],
-        #         self.graph_args["mimi_reset_mask"],
-        #     )
-        # self.mimi_graph.replay()
-        # torch.cuda.synchronize()
-
-        # self.kv_cache.zero_() 
     
     def __call__(
         self,
@@ -188,8 +112,6 @@ class ModelWorker:
         self.paged_kv_indices = torch.tensor([0]).to(self.device).to(torch.int32)
         self.paged_kv_last_page_len = torch.tensor([input_ids.shape[0]]).to(self.device).to(torch.int32)
 
-        print(f"{self.qo_indptr=} {self.paged_kv_indptr=} {self.paged_kv_indices=} {self.paged_kv_last_page_len=}")
-
         self.prefill_wrapper.plan(
             self.qo_indptr, 
             self.paged_kv_indptr, 
@@ -206,7 +128,6 @@ class ModelWorker:
             attn_wrapper=self.prefill_wrapper,
             kv_cache=self.kv_cache,
         )
-        print(f"{input_ids.shape=} {output_ids.shape=}")
 
         results = [output_ids[-1].item()]
         position_ids = torch.tensor([input_ids.shape[0] - 1], device=self.device, dtype=torch.int32)
@@ -216,8 +137,6 @@ class ModelWorker:
             # decode plan 
             self.paged_kv_last_page_len[0] += 1
             position_ids[0] += 1
-
-            print(f"{self.qo_indptr=} {self.paged_kv_indptr=} {self.paged_kv_indices=} {self.paged_kv_last_page_len=}")
 
             self.decode_wrapper.plan(
                 self.paged_kv_indptr, 
