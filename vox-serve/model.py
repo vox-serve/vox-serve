@@ -500,53 +500,40 @@ class OrpheusModel:
     def convert_to_audio(self, multiframe):
         if len(multiframe) < 7:
             return
-        
-        codes_0 = torch.tensor([], device=self.device, dtype=torch.int32)
-        codes_1 = torch.tensor([], device=self.device, dtype=torch.int32)
-        codes_2 = torch.tensor([], device=self.device, dtype=torch.int32)
 
-        num_frames = len(multiframe) // 7
-        frame = multiframe[:num_frames*7]
+        # 1) Turn the list of length=28 into a (4×7) tensor
+        mf = torch.tensor(multiframe, device=self.device, dtype=torch.int32).view(4, 7)
 
-        for j in range(num_frames):
-            i = 7*j
-            if codes_0.shape[0] == 0:
-                codes_0 = torch.tensor([frame[i]], device=self.device, dtype=torch.int32)
-            else:
-                codes_0 = torch.cat([codes_0, torch.tensor([frame[i]], device=self.device, dtype=torch.int32)])
+        # 2) codes_0: take column 0 from each of the 4 rows → shape (4,)
+        codes_0 = mf[:, 0]           # [f0[0], f1[0], f2[0], f3[0]]
+        #    then add a batch‐dim → (1, 4)
+        codes_0 = codes_0.unsqueeze(0)
 
-            if codes_1.shape[0] == 0:
-                codes_1 = torch.tensor([frame[i+1]], device=self.device, dtype=torch.int32)
-                codes_1 = torch.cat([codes_1, torch.tensor([frame[i+4]], device=self.device, dtype=torch.int32)])
-            else:
-                codes_1 = torch.cat([codes_1, torch.tensor([frame[i+1]], device=self.device, dtype=torch.int32)])
-                codes_1 = torch.cat([codes_1, torch.tensor([frame[i+4]], device=self.device, dtype=torch.int32)])
-            
-            if codes_2.shape[0] == 0:
-                codes_2 = torch.tensor([frame[i+2]], device=self.device, dtype=torch.int32)
-                codes_2 = torch.cat([codes_2, torch.tensor([frame[i+3]], device=self.device, dtype=torch.int32)])
-                codes_2 = torch.cat([codes_2, torch.tensor([frame[i+5]], device=self.device, dtype=torch.int32)])
-                codes_2 = torch.cat([codes_2, torch.tensor([frame[i+6]], device=self.device, dtype=torch.int32)])
-            else:
-                codes_2 = torch.cat([codes_2, torch.tensor([frame[i+2]], device=self.device, dtype=torch.int32)])
-                codes_2 = torch.cat([codes_2, torch.tensor([frame[i+3]], device=self.device, dtype=torch.int32)])
-                codes_2 = torch.cat([codes_2, torch.tensor([frame[i+5]], device=self.device, dtype=torch.int32)])
-                codes_2 = torch.cat([codes_2, torch.tensor([frame[i+6]], device=self.device, dtype=torch.int32)])
+        # 3) codes_1: for each row i, take [col 1, col 4] → gives shape (4, 2)
+        #    then .reshape(-1) flattens row‐by‐row: [f0[1], f0[4], f1[1], f1[4], …]
+        codes_1 = mf[:, [1, 4]].reshape(-1)    # shape (8,)
+        codes_1 = codes_1.unsqueeze(0)         # → (1, 8)
 
-        codes = [codes_0.unsqueeze(0), codes_1.unsqueeze(0), codes_2.unsqueeze(0)]
-        # check that all tokens are between 0 and 4096 otherwise return *
-        if torch.any(codes[0] < 0) or torch.any(codes[0] > 4096) or torch.any(codes[1] < 0) or torch.any(codes[1] > 4096) or torch.any(codes[2] < 0) or torch.any(codes[2] > 4096):
-            return
+        # 4) codes_2: for each row i, take [col 2, col 3, col 5, col 6] → shape (4, 4)
+        #    then flatten row‐by‐row: [f0[2],f0[3],f0[5],f0[6], f1[2],…]
+        codes_2 = mf[:, [2, 3, 5, 6]].reshape(-1)  # shape (16,)
+        codes_2 = codes_2.unsqueeze(0)             # → (1, 16)
 
+        codes = [codes_0, codes_1, codes_2]
+
+        # 5) Range‐check every code
+        for c in codes:
+            if torch.any(c < 0) or torch.any(c > 4096):
+                return
+
+        # 6) Decode under inference_mode (all shapes are now fixed)
         with torch.inference_mode():
             audio_hat = self.audio_tokenizer.decode(codes)
-            # len(codes)=3 codes[0].shape=torch.Size([1, 4]) codes[1].shape=torch.Size([1, 8]) codes[2].shape=torch.Size([1, 16]) 
-            # audio_hat.shape=torch.Size([1, 1, 8192])
-        
-        audio_slice = audio_hat[:, :, 2048:4096]
-        detached_audio = audio_slice.detach().cpu()
-        audio_np = detached_audio.numpy()
-        audio_int16 = (audio_np * 32767).astype(np.int16)
+            #    audio_hat.shape == [1, 1, 8192]
+
+        # 7) Slice [2048:4096], move to CPU, convert to int16, return bytes
+        audio_slice = audio_hat[:, :, 2048:4096]            # (1, 1, 2048)
+        arr = audio_slice.detach().cpu().numpy()            # (1, 1, 2048)
+        audio_int16 = (arr * 32767).astype(np.int16)        # still (1, 1, 2048)
         audio_bytes = audio_int16.tobytes()
         return audio_bytes
-
