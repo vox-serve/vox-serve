@@ -85,7 +85,7 @@ class ModelWorker:
     def __call__(
         self,
         prompt: str,
-    ) -> str:
+    ):
         """
         Process a list of inference requests.
         
@@ -131,6 +131,7 @@ class ModelWorker:
 
         results = [output_ids[-1].item()]
         position_ids = torch.tensor([input_ids.shape[0] - 1], device=self.device, dtype=torch.int32)
+        token_buffer = [self.model.postprocess([output_ids[-1].item()])]
 
         # decode for-loop
         for _ in range(512):
@@ -154,14 +155,32 @@ class ModelWorker:
                 kv_cache=self.kv_cache,
             )
             results.append(output_ids[-1].item())
-        
-        print(results)
-        self.model.postprocess(results)
+            token_buffer.append(self.model.postprocess([output_ids[-1].item()]))
+
+            if len(token_buffer) % 7 == 0 and len(token_buffer) > 27:
+                audio_samples = self.model.convert_to_audio(token_buffer[-28:])
+                if audio_samples is not None: 
+                    yield audio_samples 
 
 
 if __name__ == "__main__":
+    import wave 
+
     worker = ModelWorker("canopylabs/orpheus-3b-0.1-ft", max_batch_size=1)
     start_time = time.time()
-    worker("Man, the way social media has, um, completely changed how we interact is just wild, right?")
+    prompt = "Man, the way social media has, um, completely changed how we interact is just wild, right?"
+    with wave.open("output.wav", "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(24000)
+
+        total_frames = 0
+        chunk_counter = 0
+        for audio_chunk in worker(prompt):
+            chunk_counter += 1
+            frame_count = len(audio_chunk) // (wf.getsampwidth() * wf.getnchannels())
+            total_frames += frame_count
+            wf.writeframes(audio_chunk)
+        
     end_time = time.time()
     print(f"Processing time: {end_time - start_time:.2f} seconds")

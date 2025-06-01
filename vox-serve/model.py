@@ -464,29 +464,40 @@ class OrpheusModel:
 
         return output_ids
     
-    def postprocess(self, output_ids, output_filepath="output.wav"):
-        def token_gen(output_ids):
-            # This function yields tokens from the output_ids starting after the input_ids
-            for token_id in output_ids:
-                yield self.text_tokenizer.decode([token_id])
-
-        with wave.open(output_filepath, "wb") as wf:
-            wf.setnchannels(1)
-            wf.setsampwidth(2)
-            wf.setframerate(24000)
-
-            total_frames = 0
-            chunk_counter = 0
-            for audio_chunk in self.tokens_decoder_sync(token_gen(output_ids)): # output streaming
-                chunk_counter += 1
-                frame_count = len(audio_chunk) // (wf.getsampwidth() * wf.getnchannels())
-                total_frames += frame_count
-                wf.writeframes(audio_chunk)
-            duration = total_frames / wf.getframerate()
+    def decode_text_token(self, token_id):
+        return self.text_tokenizer.decode(token_id)
     
-    def convert_to_audio(self, multiframe, count):
-        print(len(multiframe))
-        frames = []
+    def postprocess(self, output_ids):
+        """Modoel's output ids to audio ids"""
+        text = self.decode_text_token(output_ids)
+        return self.turn_token_into_id(text) 
+    
+    def turn_token_into_id(self, token_string):
+        # Strip whitespace
+        token_string = token_string.strip()
+        
+        # Find the last token in the string
+        last_token_start = token_string.rfind("<custom_token_")
+        
+        if last_token_start == -1:
+            print("No token found in the string")
+            return None
+        
+        # Extract the last token
+        last_token = token_string[last_token_start:]
+        
+        # Process the last token
+        if last_token.startswith("<custom_token_") and last_token.endswith(">"):
+            try:
+                number_str = last_token[14:-1]
+                # return int(number_str) - 10 - ((index % 7) * 4096)
+                return (int(number_str) - 10) % 4096
+            except ValueError:
+                return None
+        else:
+            return None
+
+    def convert_to_audio(self, multiframe):
         if len(multiframe) < 7:
             return
         
@@ -539,108 +550,3 @@ class OrpheusModel:
         audio_bytes = audio_int16.tobytes()
         return audio_bytes
 
-    def turn_token_into_id(self, token_string, index):
-        # Strip whitespace
-        token_string = token_string.strip()
-        
-        # Find the last token in the string
-        last_token_start = token_string.rfind("<custom_token_")
-        
-        if last_token_start == -1:
-            print("No token found in the string")
-            return None
-        
-        # Extract the last token
-        last_token = token_string[last_token_start:]
-        
-        # Process the last token
-        if last_token.startswith("<custom_token_") and last_token.endswith(">"):
-            try:
-                number_str = last_token[14:-1]
-                return int(number_str) - 10 - ((index % 7) * 4096)
-            except ValueError:
-                return None
-        else:
-            return None
-  
-    
-    async def tokens_decoder(self, token_gen):
-        buffer = []
-        count = 0
-        async for token_sim in token_gen:       
-            token = self.turn_token_into_id(token_sim, count)
-            if token is None:
-                pass
-            else:
-                if token > 0:
-                    buffer.append(token)
-                    count += 1
-
-                    if count % 7 == 0 and count > 27:
-                        buffer_to_proc = buffer[-28:]
-                        audio_samples = self.convert_to_audio(buffer_to_proc, count)
-                        if audio_samples is not None:
-                            yield audio_samples
-
-
-    def tokens_decoder_sync(self, syn_token_gen):
-
-        audio_queue = queue.Queue()
-
-        # Convert the synchronous token generator into an async generator.
-        async def async_token_gen():
-            for token in syn_token_gen:
-                yield token
-
-        async def async_producer():
-            # tokens_decoder.tokens_decoder is assumed to be an async generator that processes tokens.
-            async for audio_chunk in self.tokens_decoder(async_token_gen()):
-                audio_queue.put(audio_chunk)
-            audio_queue.put(None)  # Sentinel
-
-        def run_async():
-            asyncio.run(async_producer())
-
-        thread = threading.Thread(target=run_async)
-        thread.start()
-
-        while True:
-            audio = audio_queue.get()
-            if audio is None:
-                break
-            yield audio
-
-        thread.join()
-
-if __name__ == "__main__":
-    from transformers import AutoTokenizer
-    model = LlamaForCausalLM.from_pretrained("canopylabs/orpheus-3b-0.1-ft")
-    model.to("cuda")
-    from IPython import embed; embed()
-    tokenizer = AutoTokenizer.from_pretrained("canopylabs/orpheus-3b-0.1-ft")
-    print(model)
-    prompt = '''Man, the way social media has, um, completely changed how we interact is just wild, right? Like, we're all connected 24/7 but somehow people feel more alone than ever. And don't even get me started on how it's messing with kids' self-esteem and mental health and whatnot.'''
-    input_ids, prompt = orpheus_format_prompt(prompt)
-    output_ids = model.generate(input_ids.to("cuda"), max_length=2048, forced_eos_token_id=[49158], temperature=0.6, top_p=0.8, repetition_penalty=1.3)
-    from tokenizer import tokens_decoder_sync
-    import wave
-    def token_gen(output_ids, input_ids):
-        # This function yields tokens from the output_ids starting after the input_ids
-        for token_id in output_ids[0, input_ids.shape[1]:]:
-            yield tokenizer.decode(token_id)
-
-    with wave.open("output.wav", "wb") as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)
-        wf.setframerate(24000)
-
-        total_frames = 0
-        chunk_counter = 0
-        for audio_chunk in tokens_decoder_sync(token_gen(output_ids, input_ids)): # output streaming
-            chunk_counter += 1
-            frame_count = len(audio_chunk) // (wf.getsampwidth() * wf.getnchannels())
-            total_frames += frame_count
-            wf.writeframes(audio_chunk)
-        duration = total_frames / wf.getframerate()
-    
-    from IPython import embed; embed()
