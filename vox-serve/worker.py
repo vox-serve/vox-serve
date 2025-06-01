@@ -1,5 +1,6 @@
 import time
-from typing import List
+from typing import List, Dict
+import queue
 
 import numpy as np 
 import torch
@@ -79,28 +80,156 @@ class ModelWorker:
 
         self.qo_indptr = torch.arange(max_batch_size + 1).to(self.device).to(torch.int32)
         self.paged_kv_indptr = torch.arange(max_batch_size + 1).to(self.device).to(torch.int32)
-        # initially, each batch is allocated one page
         self.paged_kv_indices = torch.arange(max_batch_size).to(self.device).to(torch.int32)
         self.paged_kv_last_page_len = torch.ones(max_batch_size).to(self.device).to(torch.int32)
-    
-    def _prepare_prefill(self):
-        """Prepare LM prefill kernel"""
-        pass 
-    
-    def _prepare_decode(self):
-        """Prepare LM decode kernel"""
-        pass 
 
-    def _prepare_detokenize(self):
-        """Prepare audio detokenizer"""
+        # Initialize empty pages
+        self.empty_pages = queue.Queue()
+        for i in range(self.max_num_pages):
+            self.empty_pages.put(i)
+    
+    def _prepare_lm_inputs(self, requests: List[Request]):
+        """Prepare inputs for the LM step."""
+        qo_indptr = [0] 
+        paged_kv_indptr = [0] 
+        paged_kv_indices = [] 
+        paged_kv_last_page_len = [] 
+
+        input_ids = [] 
+        position_ids = []
+
+        for req in requests:
+            if not req.done_lm_prefill:
+                # prefill request
+                req.input_tokens, _ = self.model.preprocess(req.prompt)
+                
+                n_pages_to_allocate = (len(req.input_tokens) + self.page_size - 1) // self.page_size
+                req.kv_token_len = len(req.input_tokens)
+
+                req.kv_pages = [self.empty_pages.get() for _ in range(n_pages_to_allocate)]
+                req.kv_last_page_len = len(req.input_tokens) % self.page_size
+                if req.kv_last_page_len == 0:
+                    req.kv_last_page_len = self.page_size
+
+                qo_indptr.append(qo_indptr[-1] + len(req.input_tokens))
+                paged_kv_indptr.append(paged_kv_indptr[-1] + len(req.kv_pages))
+                paged_kv_indices.extend(req.kv_pages)
+                paged_kv_last_page_len.append(req.kv_last_page_len)
+
+                input_ids.extend(req.input_tokens)
+                position_ids.extend([i for i in range(len(req.input_tokens))])
+            
+                req.next_position_id = len(req.input_tokens) + 1
+                req.done_lm_prefill = True
+
+            else:
+                # decode request
+                next_input_token = req.lm_output_tokens[-1]
+
+                req.kv_token_len += 1
+                req.kv_last_page_len += 1
+                if req.kv_last_page_len > self.page_size:
+                    req.kv_pages.append(self.empty_pages.get())
+                    req.kv_last_page_len = 1
+                
+                qo_indptr.append(qo_indptr[-1] + 1)
+                paged_kv_indptr.append(paged_kv_indptr[-1] + len(req.kv_pages))
+                paged_kv_indices.extend(req.kv_pages)
+                paged_kv_last_page_len.append(req.kv_last_page_len)
+
+                input_ids.append(next_input_token)
+                position_ids.append(req.next_position_id)
+
+                req.next_position_id += 1
+        
+        return qo_indptr, paged_kv_indptr, paged_kv_indices, paged_kv_last_page_len, input_ids, position_ids
+
+    def _process_lm_outputs(
+        self, 
+        requests: List[Request], 
+        output_ids: torch.Tensor, 
+        qo_indptr: List[int] = None, 
+        is_decode: bool = False,
+    ):
+        """
+        Process the output IDs from the model and update the requests.
+        """
+        if not is_decode:
+            # prefill
+            assert qo_indptr is not None 
+            for i, qo_idx in enumerate(qo_indptr):
+                requests[i].lm_output_tokens.append(output_ids[qo_idx - 1].item())
+        else:
+            # decode
+            for i, req in enumerate(requests):
+                req.lm_output_tokens.append(output_ids[i].item())
+        
+        return
     
     def run_lm_prefill(self, requests: List[Request]):
-        self._prepare_prefill()
-        pass 
+        qo_indptr, paged_kv_indptr, paged_kv_indices, paged_kv_last_page_len, input_ids, position_ids = (
+            self._prepare_lm_inputs(requests)
+        )
+
+        input_ids = torch.tensor(input_ids, device=self.device, dtype=torch.int32)
+        position_ids = torch.tensor(position_ids, device=self.device, dtype=torch.int32)
+        
+        qo_indptr_tensor = torch.tensor(qo_indptr, device=self.device, dtype=torch.int32)
+        paged_kv_indptr_tensor = torch.tensor(paged_kv_indptr, device=self.device, dtype=torch.int32)
+        paged_kv_indices_tensor = torch.tensor(paged_kv_indices, device=self.device, dtype=torch.int32)
+        paged_kv_last_page_len_tensor = torch.tensor(paged_kv_last_page_len, device=self.device, dtype=torch.int32)
+
+        self.prefill_wrapper.plan(
+            qo_indptr_tensor, 
+            paged_kv_indptr_tensor, 
+            paged_kv_indices_tensor, 
+            paged_kv_last_page_len_tensor, 
+            torch.bfloat16,
+        )
+        torch.cuda.synchronize()
+
+        # prefill run 
+        output_ids = self.model.forward(
+            input_ids=input_ids,
+            position_ids=position_ids,
+            attn_wrapper=self.prefill_wrapper,
+            kv_cache=self.kv_cache,
+        )
+
+        self._process_lm_outputs(requests, output_ids, qo_indptr, is_decode=False)
+        return 
     
     def run_lm_decode(self, requests: List[Request]):
-        self._prepare_decode()
-        pass
+        qo_indptr, paged_kv_indptr, paged_kv_indices, paged_kv_last_page_len, input_ids, position_ids = (
+            self._prepare_lm_inputs(requests)
+        )
+
+        input_ids = torch.tensor(input_ids, device=self.device, dtype=torch.int32)
+        position_ids = torch.tensor(position_ids, device=self.device, dtype=torch.int32)
+        
+        # qo_indptr_tensor = torch.tensor(qo_indptr, device=self.device, dtype=torch.int32)
+        paged_kv_indptr_tensor = torch.tensor(paged_kv_indptr, device=self.device, dtype=torch.int32)
+        paged_kv_indices_tensor = torch.tensor(paged_kv_indices, device=self.device, dtype=torch.int32)
+        paged_kv_last_page_len_tensor = torch.tensor(paged_kv_last_page_len, device=self.device, dtype=torch.int32)
+
+        self.decode_wrapper.plan(
+            paged_kv_indptr_tensor, 
+            paged_kv_indices_tensor, 
+            paged_kv_last_page_len_tensor, 
+            torch.bfloat16,
+        )
+        torch.cuda.synchronize()
+
+        # prefill run 
+        output_ids = self.model.forward(
+            input_ids=input_ids,
+            position_ids=position_ids,
+            attn_wrapper=self.prefill_wrapper,
+            kv_cache=self.kv_cache,
+        )
+
+        self._process_lm_outputs(requests, output_ids, is_decode=True)
+        return 
 
     def run_detokenize(self, requests: List[Request]):
         self._prepare_detokenize()

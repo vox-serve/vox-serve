@@ -448,7 +448,7 @@ class OrpheusModel:
         """Prepare the prompt for the model, formatting it according to Orpheus specifications."""
         # self.validate_voice(voice)
         input_ids, prompt_string = self.orpheus_format_prompt(prompt, voice, model_type)
-        return input_ids[0], prompt_string
+        return input_ids[0].tolist(), prompt_string
     
     def forward(self, input_ids, position_ids, attn_wrapper, kv_cache):
         """Forward pass through the model."""
