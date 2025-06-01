@@ -469,33 +469,10 @@ class OrpheusModel:
     
     def postprocess(self, output_ids):
         """Modoel's output ids to audio ids"""
-        text = self.decode_text_token(output_ids)
-        return self.turn_token_into_id(text) 
+        return self.turn_token_into_id(output_ids[0]) 
     
-    def turn_token_into_id(self, token_string):
-        # Strip whitespace
-        token_string = token_string.strip()
-        
-        # Find the last token in the string
-        last_token_start = token_string.rfind("<custom_token_")
-        
-        if last_token_start == -1:
-            print("No token found in the string")
-            return None
-        
-        # Extract the last token
-        last_token = token_string[last_token_start:]
-        
-        # Process the last token
-        if last_token.startswith("<custom_token_") and last_token.endswith(">"):
-            try:
-                number_str = last_token[14:-1]
-                # return int(number_str) - 10 - ((index % 7) * 4096)
-                return (int(number_str) - 10) % 4096
-            except ValueError:
-                return None
-        else:
-            return None
+    def turn_token_into_id(self, output_ids):
+        return (output_ids - 128256 - 10) % 4096
 
     def convert_to_audio(self, multiframe):
         if len(multiframe) < 7:
