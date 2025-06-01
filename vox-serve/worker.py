@@ -1,4 +1,5 @@
 import time
+from typing import List
 
 import numpy as np 
 import torch
@@ -6,7 +7,7 @@ import torch.cuda.nvtx as nvtx
 
 from .flashinfer_utils import FlashInferPrefillWrapper, FlashInferDecodeWrapper
 from .model import OrpheusModel
-
+from .requests import Request
 
 class ModelWorker:
 
@@ -81,6 +82,29 @@ class ModelWorker:
         # initially, each batch is allocated one page
         self.paged_kv_indices = torch.arange(max_batch_size).to(self.device).to(torch.int32)
         self.paged_kv_last_page_len = torch.ones(max_batch_size).to(self.device).to(torch.int32)
+    
+    def _prepare_prefill(self):
+        """Prepare LM prefill kernel"""
+        pass 
+    
+    def _prepare_decode(self):
+        """Prepare LM decode kernel"""
+        pass 
+
+    def _prepare_detokenize(self):
+        """Prepare audio detokenizer"""
+    
+    def run_lm_prefill(self, requests: List[Request]):
+        self._prepare_prefill()
+        pass 
+    
+    def run_lm_decode(self, requests: List[Request]):
+        self._prepare_decode()
+        pass
+
+    def run_detokenize(self, requests: List[Request]):
+        self._prepare_detokenize()
+        pass 
     
     def __call__(
         self,

@@ -13,7 +13,8 @@ from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from transformers import LlamaConfig, LlamaPreTrainedModel
 
 from .tokenizer.snac import SNAC
-from .flashinfer_utils import FlashInferWrapper, top_p_sampling
+from .flashinfer_utils import FlashInferWrapper
+from .sampling import top_p_sampling
 
 
 class SpeechLlamaConfig(LlamaConfig):
