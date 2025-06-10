@@ -247,3 +247,17 @@ class ModelWorker:
                 req.is_audio_available = False
         
         return
+
+    def free_kv_cache(self, request: Request):
+        """
+        Free the KV cache pages that was used by the request.
+        """
+        if hasattr(request, 'kv_pages') and request.kv_pages:
+            # Return all allocated pages back to the empty pages queue
+            for page_idx in request.kv_pages:
+                self.empty_pages.put(page_idx)
+            
+            # Clear the request's page allocations
+            request.kv_pages = []
+            request.kv_token_len = 0
+            request.kv_last_page_len = 0

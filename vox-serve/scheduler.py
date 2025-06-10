@@ -63,6 +63,7 @@ class Scheduler:
             
             # send completion notification for finished requests
             if req.done_all:
+                self.model_worker.free_kv_cache(req)
                 completion_message = {
                     'status': 'completed',
                     'reason': 'position_limit_exceeded'
