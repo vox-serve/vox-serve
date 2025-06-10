@@ -1,8 +1,11 @@
 import torch 
+import time
 import zmq 
+import json
 
 from .requests import Request 
 from .worker import ModelWorker
+from .sampling import SamplingConfig
 
 class Scheduler:
     def __init__(
@@ -33,6 +36,10 @@ class Scheduler:
         # get new requests 
         requests, is_prefill = self._prepare_requests()
 
+        if len(requests) == 0:
+            time.sleep(0.1)
+            return
+
         # run either prefill or decode of LM 
         if is_prefill:
             self.model_worker.run_lm_prefill(requests)
@@ -43,6 +50,11 @@ class Scheduler:
         self.model_worker.run_detokenize(requests)
 
         # return results to clients
+        for req in requests:
+            if req.is_audio_available:
+                self.result_socket.send(req.output_audio[-1])
+        
+        return
     
     def run_forever(self):
         """
@@ -66,8 +78,21 @@ class Scheduler:
                 message_payload = self.request_socket.recv(flags=zmq.NOBLOCK)
                 delimiter_pos = message_payload.find(b'|') 
                 if delimiter_pos != -1:
-                    # TODO: actually implement here
-                    new_request = message_payload.decode('utf-8')
+                    # Parse JSON request data
+                    json_data = message_payload[:delimiter_pos].decode('utf-8')
+                    request_dict = json.loads(json_data)
+                    
+                    # Create Request object from deserialized data
+                    new_request = Request(
+                        request_id=request_dict['request_id'],
+                        prompt=request_dict['prompt'],
+                    )
+
+                    print(f"{new_request=}")
+                    
+                    # Store voice information as attribute (not part of Request dataclass)
+                    # new_request.voice = request_dict.get('voice', 'tara')
+                    
                     self.active_requests.append(new_request)
                 else:
                     print(f"[WARNING] Received malformed audio message: {message_payload[:50]}...")
@@ -77,6 +102,9 @@ class Scheduler:
                 print(f"[ERROR] Error receiving requests: {str(e)}")
                 import traceback
                 print(f"[ERROR] Traceback: {traceback.format_exc()}")
+        
+        # Filter out completed requests
+        self.active_requests = [req for req in self.active_requests if not req.done_all]
         
         is_prefill = False 
         for req in self.active_requests:

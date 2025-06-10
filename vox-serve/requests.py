@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Union, List
 
 import numpy as np 
@@ -12,20 +12,20 @@ class Request:
     """
     request_id: str 
     prompt: str
-    sampling_config: SamplingConfig
-
-    input_tokens: List[int]
-    lm_output_tokens: List[List[int]] | List[int] = []
-    output_audio: List[np.ndarray] = []
+    sampling_config: SamplingConfig = None
 
     # next_position_id == len(input_tokens) + len(lm_output_tokens) + 1
-    next_position_id: int
+    next_position_id: int = None
 
     # KV cache data 
-    kv_pages: List[int] 
-    kv_token_len: int 
-    kv_last_page_len: int
+    kv_pages: List[int] = None
+    kv_token_len: int = None
+    kv_last_page_len: int = None
     # kv_token_len == (len(kv_pages) - 1) * page_size + kv_last_page_len
+
+    input_tokens: List[int] = None
+    lm_output_tokens: List[List[int]] | List[int] = field(default_factory=list)
+    output_audio: List[np.ndarray] = field(default_factory=list)
 
     # progress status
     done_lm_prefill: bool = False

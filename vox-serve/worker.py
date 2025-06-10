@@ -154,10 +154,11 @@ class ModelWorker:
         """
         Process the output IDs from the model and update the requests.
         """
+        output_ids = self.model.postprocess(output_ids)
         if not is_decode:
             # prefill
             assert qo_indptr is not None 
-            for i, qo_idx in enumerate(qo_indptr):
+            for i, qo_idx in enumerate(qo_indptr[1:]):
                 requests[i].lm_output_tokens.append(output_ids[qo_idx - 1].item())
         else:
             # decode
@@ -224,7 +225,7 @@ class ModelWorker:
         output_ids = self.model.forward(
             input_ids=input_ids,
             position_ids=position_ids,
-            attn_wrapper=self.prefill_wrapper,
+            attn_wrapper=self.decode_wrapper,
             kv_cache=self.kv_cache,
         )
 
@@ -232,8 +233,18 @@ class ModelWorker:
         return 
 
     def run_detokenize(self, requests: List[Request]):
-        self._prepare_detokenize()
-        pass 
+        # naive implementation for now 
+
+        for req in requests:
+            if len(req.lm_output_tokens) % 7 == 0 and len(req.lm_output_tokens) > 27:
+                audio_samples = self.model.convert_to_audio(req.lm_output_tokens[-28:])
+                if audio_samples is not None:
+                    req.output_audio.append(audio_samples)
+                    req.is_audio_available = True
+                else:
+                    req.is_audio_available = False
+        
+        return
     
     def __call__(
         self,
@@ -257,7 +268,7 @@ class ModelWorker:
         """
         # prefill plan 
         input_ids, _ = self.model.preprocess(prompt)
-        input_ids = input_ids.to(self.device).to(torch.int32)
+        input_ids = torch.tensor(input_ids).to(self.device).to(torch.int32)
 
         self.qo_indptr = torch.tensor([0, input_ids.shape[0]]).to(self.device).to(torch.int32)
         self.paged_kv_indptr = torch.tensor([0, 1]).to(self.device).to(torch.int32)
@@ -274,6 +285,8 @@ class ModelWorker:
         )
         torch.cuda.synchronize()
 
+        print(f"{input_ids=}")
+
         # prefill run 
         output_ids = self.model.forward(
             input_ids=input_ids,
@@ -284,7 +297,7 @@ class ModelWorker:
 
         results = [output_ids[-1].item()]
         position_ids = torch.tensor([input_ids.shape[0] - 1], device=self.device, dtype=torch.int32)
-        token_buffer = [self.model.postprocess([output_ids[-1].item()])]
+        token_buffer = [self.model.postprocess(output_ids)[-1].item()]
 
         # decode for-loop
         for _ in range(512):
@@ -308,7 +321,7 @@ class ModelWorker:
                 kv_cache=self.kv_cache,
             )
             results.append(output_ids[-1].item())
-            token_buffer.append(self.model.postprocess([output_ids[-1].item()]))
+            token_buffer.append(self.model.postprocess(output_ids)[-1].item())
 
             if len(token_buffer) % 7 == 0 and len(token_buffer) > 27:
                 audio_samples = self.model.convert_to_audio(token_buffer[-28:])

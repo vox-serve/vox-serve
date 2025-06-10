@@ -470,7 +470,7 @@ class OrpheusModel:
     
     def postprocess(self, output_ids):
         """Modoel's output ids to audio ids"""
-        return self.turn_token_into_id(output_ids[0]) 
+        return self.turn_token_into_id(output_ids) 
     
     def turn_token_into_id(self, output_ids):
         return (output_ids - 128256 - 10) % 4096

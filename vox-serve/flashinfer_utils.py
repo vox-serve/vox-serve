@@ -128,6 +128,8 @@ class FlashInferDecodeWrapper():
         paged_kv_indptr_buffer=None,
         paged_kv_indices_buffer=None,
         paged_kv_last_page_len_buffer=None,
+        use_cuda_graph=False, 
+        use_tensor_cores=False,
     ):
         self.device = device
         # self.attn_buffer = torch.empty(256 * 1024 * 1024, dtype=torch.uint8, device=device)
@@ -135,8 +137,8 @@ class FlashInferDecodeWrapper():
 
         self.attn_wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
             attn_buffer, "NHD", 
-            use_cuda_graph=True, 
-            use_tensor_cores=True,
+            use_cuda_graph=use_cuda_graph, 
+            use_tensor_cores=use_tensor_cores,
             paged_kv_indptr_buffer=paged_kv_indptr_buffer,
             paged_kv_indices_buffer=paged_kv_indices_buffer,
             paged_kv_last_page_len_buffer=paged_kv_last_page_len_buffer,
