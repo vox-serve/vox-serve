@@ -12,9 +12,10 @@ from transformers.activations import ACT2FN
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from transformers import LlamaConfig, LlamaPreTrainedModel
 
-from .tokenizer.snac import SNAC
-from .flashinfer_utils import FlashInferWrapper
-from .sampling import top_p_sampling
+from ..tokenizer.snac import SNAC
+from ..flashinfer_utils import FlashInferWrapper
+from ..sampling import top_p_sampling
+from .base import BaseLM
 
 
 class SpeechLlamaConfig(LlamaConfig):
@@ -357,13 +358,12 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
 
 
 
-class OrpheusModel:
+class OrpheusModel(BaseLM):
     def __init__(self, model_name, dtype=torch.bfloat16, device="cuda:0", tokenizer_path="canopylabs/orpheus-3b-0.1-ft"):
+        super().__init__(model_name, device, dtype)
         self.model_name = self._map_model_params(model_name)
         self.model = LlamaForCausalLM.from_pretrained(model_name)
         self.model.to(dtype).to(device)
-        self.device = device
-        self.dtype = dtype
         # self.engine_kwargs = engine_kwargs  # vLLM engine kwargs
         # self.engine = self._setup_engine()
         self.available_voices = ["zoe", "zac","jess", "leo", "mia", "julia", "leah"]
@@ -372,10 +372,30 @@ class OrpheusModel:
         self.text_tokenizer = self._load_tokenizer(tokenizer_path)
         self.audio_tokenizer = SNAC.from_pretrained("hubertsiuzdak/snac_24khz").eval().to(device)
 
-        self.num_attention_heads = self.model.config.num_attention_heads 
-        self.num_key_value_heads = self.model.config.num_key_value_heads
-        self.num_hidden_layers = self.model.config.num_hidden_layers
-        self.hidden_size = self.model.config.hidden_size
+        self._num_attention_heads = self.model.config.num_attention_heads 
+        self._num_key_value_heads = self.model.config.num_key_value_heads
+        self._num_hidden_layers = self.model.config.num_hidden_layers
+        self._hidden_size = self.model.config.hidden_size
+
+    @property
+    def num_attention_heads(self) -> int:
+        """Number of attention heads in the model."""
+        return self._num_attention_heads
+    
+    @property
+    def num_key_value_heads(self) -> int:
+        """Number of key-value heads in the model."""
+        return self._num_key_value_heads
+    
+    @property
+    def num_hidden_layers(self) -> int:
+        """Number of hidden layers in the model."""
+        return self._num_hidden_layers
+    
+    @property
+    def hidden_size(self) -> int:
+        """Hidden size of the model."""
+        return self._hidden_size
 
     def _load_tokenizer(self, tokenizer_path):
         """Load tokenizer from local path or HuggingFace hub"""
@@ -416,6 +436,7 @@ class OrpheusModel:
             return model_name
     
     def validate_voice(self, voice):
+        """Validate if the given voice is supported by the model."""
         if voice:
             if voice not in self.available_voices:
                 raise ValueError(f"Voice {voice} is not available for model {self.model_name}")
