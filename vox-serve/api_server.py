@@ -6,8 +6,10 @@ import time
 import subprocess
 import signal
 import atexit
-from typing import Optional
+import threading
+from typing import Optional, Dict, List
 from pathlib import Path
+from collections import defaultdict, deque
 
 import zmq
 import numpy as np
@@ -54,6 +56,11 @@ class APIServer:
         self.timeout_seconds = timeout_seconds
         self.scheduler_process = None
         
+        # Concurrent request tracking
+        self.pending_requests: Dict[str, Dict] = {}  # request_id -> {chunks: [], event: threading.Event()}
+        self.request_lock = threading.Lock()
+        self.running = True
+        
         # Start scheduler process
         self._start_scheduler()
         
@@ -70,8 +77,12 @@ class APIServer:
         self.result_socket.connect(f"ipc://{result_socket_path}")
         
         # Set socket timeouts for faster shutdown
-        self.result_socket.setsockopt(zmq.RCVTIMEO, int(timeout_seconds * 1000))
+        self.result_socket.setsockopt(zmq.RCVTIMEO, 1000)  # 1 second timeout for message processing
         self.request_socket.setsockopt(zmq.SNDTIMEO, 1000)  # 1 second send timeout
+        
+        # Start background message processing thread
+        self.message_thread = threading.Thread(target=self._process_messages, daemon=True)
+        self.message_thread.start()
         
         # Register cleanup on exit
         atexit.register(self.cleanup)
@@ -95,8 +106,41 @@ class APIServer:
             print(f"Failed to start scheduler: {e}")
             raise RuntimeError(f"Could not start scheduler process: {e}")
     
+    def _process_messages(self):
+        """Background thread to process incoming messages from scheduler"""
+        while self.running:
+            try:
+                # Receive message from scheduler (request_id|TYPE|data)
+                message = self.result_socket.recv()
+                
+                # Parse message format: request_id|TYPE|data
+                parts = message.split(b'|', 2)
+                if len(parts) >= 3:
+                    request_id = parts[0].decode('utf-8')
+                    message_type = parts[1].decode('utf-8')
+                    data = parts[2]
+                    
+                    # Route message to the appropriate request
+                    with self.request_lock:
+                        if request_id in self.pending_requests:
+                            if message_type == 'AUDIO':
+                                # Handle audio chunk
+                                self.pending_requests[request_id]['chunks'].append(data)
+                            elif message_type == 'COMPLETION':
+                                # Handle completion notification
+                                completion_info = json.loads(data.decode('utf-8'))
+                                print(f"Request {request_id} completed: {completion_info}")
+                                self.pending_requests[request_id]['event'].set()
+                
+            except zmq.Again:
+                # Timeout, continue loop
+                continue
+            except Exception as e:
+                if self.running:  # Only log if we're still supposed to be running
+                    print(f"Error in message processing: {e}")
+                continue
+    
     def _stop_scheduler(self):
-        """Stop the scheduler process"""
         if self.scheduler_process and self.scheduler_process.is_alive():
             print("Stopping scheduler process...")
             try:
@@ -126,48 +170,39 @@ class APIServer:
         """
         request_id = str(uuid.uuid4())
         
-        # Serialize Request object to JSON
-        request_dict = {
-            'request_id': request_id,
-            'prompt': text,
-            'voice': voice,
-        }
-        
-        request_json = json.dumps(request_dict)
-        message = f"{request_json}|audio_data_placeholder".encode('utf-8')
+        # Register this request for concurrent processing
+        completion_event = threading.Event()
+        with self.request_lock:
+            self.pending_requests[request_id] = {
+                'chunks': [],
+                'event': completion_event
+            }
         
         try:
+            # Serialize Request object to JSON
+            request_dict = {
+                'request_id': request_id,
+                'prompt': text,
+                'voice': voice,
+            }
+            
+            request_json = json.dumps(request_dict)
+            message = f"{request_json}|audio_data_placeholder".encode('utf-8')
+            
             # Send request to scheduler
             self.request_socket.send(message)
             
-            # Collect audio chunks
-            audio_chunks = []
-            start_time = time.time()
+            # Wait for completion or timeout
+            if not completion_event.wait(timeout=self.timeout_seconds):
+                raise HTTPException(status_code=500, detail="Generation timed out")
             
-            while True:
-                try:
-                    # Receive audio chunk from scheduler
-                    audio_bytes = self.result_socket.recv()
-                    
-                    # Convert bytes back to numpy array (int16, 2048 samples)
-                    # audio_chunk = np.frombuffer(audio_bytes, dtype=np.int16)
-                    audio_chunks.append(audio_bytes)
-                    
-                    # Check for timeout
-                    if time.time() - start_time > self.timeout_seconds:
-                        break
-                        
-                except zmq.Again:
-                    # Timeout occurred, assume generation is complete
-                    break
-                except Exception as e:
-                    raise HTTPException(status_code=500, detail=f"Error receiving audio: {str(e)}")
+            # Retrieve collected audio chunks
+            with self.request_lock:
+                audio_chunks = self.pending_requests[request_id]['chunks'][:]
+                del self.pending_requests[request_id]
             
             if not audio_chunks:
                 raise HTTPException(status_code=500, detail="No audio generated")
-            
-            # Concatenate all audio chunks
-            # full_audio = np.concatenate(audio_chunks)
             
             # Save to WAV file
             output_file = self.output_dir / f"{request_id}.wav"
@@ -181,11 +216,22 @@ class APIServer:
             return str(output_file)
             
         except Exception as e:
+            # Clean up on error
+            with self.request_lock:
+                self.pending_requests.pop(request_id, None)
+            if isinstance(e, HTTPException):
+                raise
             raise HTTPException(status_code=500, detail=f"Generation failed: {str(e)}")
     
     def cleanup(self):
         """Clean up ZMQ resources and stop scheduler"""
         print("Cleaning up API server...")
+        
+        # Stop background message processing
+        self.running = False
+        if hasattr(self, 'message_thread') and self.message_thread.is_alive():
+            self.message_thread.join(timeout=1)
+        
         try:
             if hasattr(self, 'request_socket'):
                 self.request_socket.close()

@@ -49,10 +49,28 @@ class Scheduler:
         # run detokenization if needed
         self.model_worker.run_detokenize(requests)
 
+        # check for request completion and mark as done
+        for req in requests:
+            if req.next_position_id is not None and req.next_position_id > 512:
+                req.done_all = True
+
         # return results to clients
         for req in requests:
             if req.is_audio_available:
-                self.result_socket.send(req.output_audio[-1])
+                # Send audio chunk message: request_id|AUDIO|audio_data
+                message = req.request_id.encode('utf-8') + b'|AUDIO|' + req.output_audio[-1]
+                self.result_socket.send(message)
+            
+            # send completion notification for finished requests
+            if req.done_all:
+                completion_message = {
+                    'status': 'completed',
+                    'reason': 'position_limit_exceeded'
+                }
+                # Send completion message: request_id|COMPLETION|json_data
+                completion_payload = (req.request_id.encode('utf-8') + b'|COMPLETION|' + 
+                                    json.dumps(completion_message).encode('utf-8'))
+                self.result_socket.send(completion_payload)
         
         return
     
