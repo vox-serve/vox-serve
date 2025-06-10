@@ -468,11 +468,8 @@ class OrpheusModel:
     def decode_text_token(self, token_id):
         return self.text_tokenizer.decode(token_id)
     
-    def postprocess(self, output_ids):
-        """Modoel's output ids to audio ids"""
-        return self.turn_token_into_id(output_ids) 
-    
     def turn_token_into_id(self, output_ids):
+        """Modoel's output ids to audio ids"""
         return (output_ids - 128256 - 10) % 4096
 
     def convert_to_audio(self, multiframe):
@@ -481,6 +478,7 @@ class OrpheusModel:
 
         # 1) Turn the list of length=28 into a (4×7) tensor
         mf = torch.tensor(multiframe, device=self.device, dtype=torch.int32).view(4, 7)
+        mf = self.turn_token_into_id(mf)
 
         # 2) codes_0: take column 0 from each of the 4 rows → shape (4,)
         codes_0 = mf[:, 0]           # [f0[0], f1[0], f2[0], f3[0]]

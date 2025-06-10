@@ -154,7 +154,7 @@ class ModelWorker:
         """
         Process the output IDs from the model and update the requests.
         """
-        output_ids = self.model.postprocess(output_ids)
+        # output_ids = self.model.postprocess(output_ids)
         if not is_decode:
             # prefill
             assert qo_indptr is not None 
@@ -243,6 +243,8 @@ class ModelWorker:
                     req.is_audio_available = True
                 else:
                     req.is_audio_available = False
+            else:
+                req.is_audio_available = False
         
         return
     

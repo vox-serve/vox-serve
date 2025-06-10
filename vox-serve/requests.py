@@ -25,7 +25,7 @@ class Request:
 
     input_tokens: List[int] = None
     lm_output_tokens: List[List[int]] | List[int] = field(default_factory=list)
-    output_audio: List[np.ndarray] = field(default_factory=list)
+    output_audio: List[bytes] = field(default_factory=list)
 
     # progress status
     done_lm_prefill: bool = False
