@@ -69,8 +69,9 @@ class APIServer:
         self.request_socket.connect(f"ipc://{request_socket_path}")
         self.result_socket.connect(f"ipc://{result_socket_path}")
         
-        # Set socket timeout
+        # Set socket timeouts for faster shutdown
         self.result_socket.setsockopt(zmq.RCVTIMEO, int(timeout_seconds * 1000))
+        self.request_socket.setsockopt(zmq.SNDTIMEO, 1000)  # 1 second send timeout
         
         # Register cleanup on exit
         atexit.register(self.cleanup)
@@ -100,11 +101,11 @@ class APIServer:
             print("Stopping scheduler process...")
             try:
                 self.scheduler_process.terminate()
-                self.scheduler_process.join(timeout=5)
+                self.scheduler_process.join(timeout=1)  # Reduced timeout
                 if self.scheduler_process.is_alive():
                     print("Scheduler didn't terminate gracefully, forcing kill...")
                     self.scheduler_process.kill()
-                    self.scheduler_process.join()
+                    self.scheduler_process.join(timeout=1)  # Quick final join
             except Exception as e:
                 print(f"Error stopping scheduler: {e}")
             print("Scheduler process stopped")
@@ -191,7 +192,7 @@ class APIServer:
             if hasattr(self, 'result_socket'):
                 self.result_socket.close()
             if hasattr(self, 'context'):
-                self.context.term()
+                self.context.term(linger=0)  # Don't wait for pending messages
         except Exception as e:
             print(f"Error cleaning up ZMQ: {e}")
         
@@ -254,7 +255,8 @@ def signal_handler(signum, frame):
     print(f"\nReceived signal {signum}, shutting down...")
     if api_server is not None:
         api_server.cleanup()
-    exit(0)
+    import os
+    os._exit(0)  # Force immediate exit
 
 
 if __name__ == "__main__":
@@ -278,7 +280,7 @@ if __name__ == "__main__":
     try:
         print("Starting vox-serve API server...")
         print("Scheduler and API server will be available shortly...")
-        uvicorn.run(app, host="0.0.0.0", port=8000)
+        uvicorn.run(app, host="0.0.0.0", port=8000, access_log=False)
     except KeyboardInterrupt:
         print("\nShutdown requested by user")
     finally:
