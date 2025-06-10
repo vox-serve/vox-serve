@@ -7,14 +7,14 @@ import subprocess
 import signal
 import atexit
 import threading
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Iterator
 from pathlib import Path
 from collections import defaultdict, deque
 
 import zmq
 import numpy as np
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from .scheduler import Scheduler
@@ -154,6 +154,85 @@ class APIServer:
                 print(f"Error stopping scheduler: {e}")
             print("Scheduler process stopped")
     
+    def stream_audio_chunks(self, text: str, voice: str = "tara") -> Iterator[bytes]:
+        """
+        Generate audio from text and yield audio chunks as they arrive.
+        
+        Args:
+            text: Input text to synthesize
+            voice: Voice to use for synthesis
+            
+        Yields:
+            Audio chunks as bytes
+            
+        Raises:
+            HTTPException: If generation fails or times out
+        """
+        request_id = str(uuid.uuid4())
+        
+        # Register this request for concurrent processing
+        completion_event = threading.Event()
+        with self.request_lock:
+            self.pending_requests[request_id] = {
+                'chunks': [],
+                'event': completion_event,
+                'streaming': True,
+                'consumed_chunks': 0
+            }
+        
+        try:
+            # Serialize Request object to JSON
+            request_dict = {
+                'request_id': request_id,
+                'prompt': text,
+                'voice': voice,
+            }
+            
+            request_json = json.dumps(request_dict)
+            message = f"{request_json}|audio_data_placeholder".encode('utf-8')
+            
+            # Send request to scheduler
+            self.request_socket.send(message)
+            
+            # Stream chunks as they arrive
+            start_time = time.time()
+            while not completion_event.is_set():
+                if time.time() - start_time > self.timeout_seconds:
+                    raise HTTPException(status_code=500, detail="Generation timed out")
+                
+                # Check for new chunks
+                with self.request_lock:
+                    request_data = self.pending_requests.get(request_id)
+                    if request_data:
+                        available_chunks = len(request_data['chunks'])
+                        consumed = request_data['consumed_chunks']
+                        
+                        # Yield any new chunks
+                        for i in range(consumed, available_chunks):
+                            yield request_data['chunks'][i]
+                        
+                        request_data['consumed_chunks'] = available_chunks
+                
+                # Small sleep to avoid busy waiting
+                time.sleep(0.01)
+            
+            # Yield any remaining chunks after completion
+            with self.request_lock:
+                request_data = self.pending_requests.get(request_id)
+                if request_data:
+                    consumed = request_data['consumed_chunks']
+                    for i in range(consumed, len(request_data['chunks'])):
+                        yield request_data['chunks'][i]
+                    del self.pending_requests[request_id]
+            
+        except Exception as e:
+            # Clean up on error
+            with self.request_lock:
+                self.pending_requests.pop(request_id, None)
+            if isinstance(e, HTTPException):
+                raise
+            raise HTTPException(status_code=500, detail=f"Generation failed: {str(e)}")
+
     def generate_audio(self, text: str, voice: str = "tara") -> str:
         """
         Generate audio from text and return path to the audio file.
@@ -274,6 +353,55 @@ async def generate(request: GenerateRequest):
             path=audio_file,
             media_type="audio/wav",
             filename=f"{request_id}.wav"
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/generate-stream")
+async def generate_stream(request: GenerateRequest):
+    """
+    Generate speech from text and stream audio chunks as they are generated.
+    
+    Args:
+        request: Generation request containing text and optional voice
+        
+    Returns:
+        Streaming audio response with WAV format chunks
+    """
+    if api_server is None:
+        raise HTTPException(status_code=503, detail="Server not ready")
+    
+    try:
+        def audio_stream():
+            # WAV header for 24kHz mono 16-bit audio
+            wav_header = io.BytesIO()
+            with wave.open(wav_header, 'wb') as wf:
+                wf.setnchannels(1)  # Mono
+                wf.setsampwidth(2)  # 16-bit
+                wf.setframerate(24000)  # 24kHz
+                wf.writeframes(b'')  # Empty data for header
+            
+            # Get header bytes and correct the chunk size for streaming
+            wav_header.seek(0)
+            header_bytes = wav_header.read()
+            
+            # Send WAV header first
+            yield header_bytes
+            
+            # Stream audio chunks
+            for chunk in api_server.stream_audio_chunks(request.text, request.voice):
+                yield chunk
+        
+        return StreamingResponse(
+            audio_stream(),
+            media_type="audio/wav",
+            headers={
+                "Content-Disposition": f"attachment; filename=stream_{uuid.uuid4().hex[:8]}.wav",
+                "Cache-Control": "no-cache"
+            }
         )
     except HTTPException:
         raise
