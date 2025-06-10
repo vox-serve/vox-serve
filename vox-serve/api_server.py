@@ -35,9 +35,6 @@ class GenerateRequest(BaseModel):
     voice: Optional[str] = "tara"
     
 
-class GenerateResponse(BaseModel):
-    audio_file: str
-    request_id: str
     
 
 class APIServer:
@@ -208,25 +205,28 @@ app = FastAPI(title="Vox-Serve API", description="Text-to-Speech API using Orphe
 api_server = None
 
 
-@app.post("/generate", response_model=GenerateResponse)
+@app.post("/generate")
 async def generate(request: GenerateRequest):
     """
-    Generate speech from text.
+    Generate speech from text and return audio file directly.
     
     Args:
         request: Generation request containing text and optional voice
         
     Returns:
-        Response with audio file path and request ID
+        Audio file as direct response
     """
     if api_server is None:
         raise HTTPException(status_code=503, detail="Server not ready")
     
     try:
         audio_file = api_server.generate_audio(request.text, request.voice)
-        return GenerateResponse(
-            audio_file=audio_file,
-            request_id=Path(audio_file).stem
+        request_id = Path(audio_file).stem
+        
+        return FileResponse(
+            path=audio_file,
+            media_type="audio/wav",
+            filename=f"{request_id}.wav"
         )
     except HTTPException:
         raise
@@ -234,30 +234,6 @@ async def generate(request: GenerateRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/audio/{request_id}")
-async def get_audio(request_id: str):
-    """
-    Download generated audio file.
-    
-    Args:
-        request_id: ID of the generation request
-        
-    Returns:
-        Audio file as response
-    """
-    if api_server is None:
-        raise HTTPException(status_code=503, detail="Server not ready")
-    
-    audio_file = api_server.output_dir / f"{request_id}.wav"
-    
-    if not audio_file.exists():
-        raise HTTPException(status_code=404, detail="Audio file not found")
-    
-    return FileResponse(
-        path=str(audio_file),
-        media_type="audio/wav",
-        filename=f"{request_id}.wav"
-    )
 
 
 @app.get("/health")
