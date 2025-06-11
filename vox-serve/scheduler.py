@@ -51,7 +51,7 @@ class Scheduler:
 
         # check for request completion and mark as done
         for req in requests:
-            if req.next_position_id is not None and req.next_position_id > 512:
+            if self.model_worker.is_finished(req):
                 req.done_all = True
 
         # return results to clients

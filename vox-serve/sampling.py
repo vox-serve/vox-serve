@@ -9,6 +9,14 @@ class SamplingConfig:
     temperature: float
     repetition_penalty: float
 
+def greedy_sampling(logits):
+    """
+    Greedy sampling from logits.
+    Returns the index of the maximum logit.
+    """
+    samples = torch.argmax(logits, dim=-1)
+    return samples
+
 def top_k_sampling(logits, top_k, temperature):
     logits = logits / temperature
     probs = torch.softmax(logits, dim=-1)

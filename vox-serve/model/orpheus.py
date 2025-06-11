@@ -376,6 +376,14 @@ class OrpheusModel(BaseLM):
         self._num_key_value_heads = self.model.config.num_key_value_heads
         self._num_hidden_layers = self.model.config.num_hidden_layers
         self._hidden_size = self.model.config.hidden_size
+        self.vocab_size = self.model.config.vocab_size
+
+        self.stop_token_id = 49158
+        self.temperature = 0.6 
+        self.top_p = 0.8 
+        self.max_tokens = 1200 
+        self.repetition_penalty=1.3
+
 
     @property
     def num_attention_heads(self) -> int:
@@ -482,7 +490,7 @@ class OrpheusModel(BaseLM):
         )
         # TODO: repetition penalty
         # output_ids = torch.argmax(logits, dim=-1)
-        output_ids = top_p_sampling(logits, top_p=0.8, temperature=0.6)
+        output_ids = top_p_sampling(logits, top_p=self.top_p, temperature=self.temperature)
 
         return output_ids
     
@@ -492,6 +500,9 @@ class OrpheusModel(BaseLM):
     def turn_token_into_id(self, output_ids):
         """Modoel's output ids to audio ids"""
         return (output_ids - 128256 - 10) % 4096
+    
+    def is_stop_id(self, token_id):
+        return token_id == self.stop_token_id
 
     def convert_to_audio(self, multiframe):
         if len(multiframe) < 7:

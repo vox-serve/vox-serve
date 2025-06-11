@@ -261,3 +261,9 @@ class ModelWorker:
             request.kv_pages = []
             request.kv_token_len = 0
             request.kv_last_page_len = 0
+
+    def is_finished(self, request: Request):
+        return (
+            self.model.is_stop_id(request.lm_output_tokens[-1]) 
+            or request.next_position_id > self.model.max_tokens
+        )
