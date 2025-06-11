@@ -434,8 +434,31 @@ def signal_handler(signum, frame):
 
 
 if __name__ == "__main__":
+    import argparse
     import uvicorn
     import multiprocessing as mp
+    
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description="Vox-Serve Text-to-Speech API Server")
+    parser.add_argument(
+        "--model", 
+        type=str, 
+        default="canopylabs/orpheus-3b-0.1-ft",
+        help="Model name or path to use for text-to-speech synthesis (default: canopylabs/orpheus-3b-0.1-ft)"
+    )
+    parser.add_argument(
+        "--host",
+        type=str,
+        default="0.0.0.0",
+        help="Host to bind the server to (default: 0.0.0.0)"
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8000,
+        help="Port to bind the server to (default: 8000)"
+    )
+    args = parser.parse_args()
     
     # Set multiprocessing start method for CUDA compatibility
     try:
@@ -444,17 +467,17 @@ if __name__ == "__main__":
         # Already set, ignore
         pass
     
-    # Initialize API server instance
-    api_server = APIServer()
+    # Initialize API server instance with specified model
+    api_server = APIServer(model_name=args.model)
     
     # Register signal handlers for graceful shutdown
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
     try:
-        print("Starting vox-serve API server...")
+        print(f"Starting vox-serve API server with model: {args.model}")
         print("Scheduler and API server will be available shortly...")
-        uvicorn.run(app, host="0.0.0.0", port=8000, access_log=False)
+        uvicorn.run(app, host=args.host, port=args.port, access_log=False)
     except KeyboardInterrupt:
         print("\nShutdown requested by user")
     finally:

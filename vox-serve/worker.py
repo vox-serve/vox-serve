@@ -7,7 +7,7 @@ import torch
 import torch.cuda.nvtx as nvtx
 
 from .flashinfer_utils import FlashInferPrefillWrapper, FlashInferDecodeWrapper
-from .model import OrpheusModel
+from .model import load_model
 from .requests import Request
 
 class ModelWorker:
@@ -23,7 +23,7 @@ class ModelWorker:
     ):
 
         # Load model
-        self.model = OrpheusModel("canopylabs/orpheus-3b-0.1-ft", device="cuda")
+        self.model = load_model(model_name, device="cuda")
         self.device = "cuda:0"
 
         # Store sampling and repetition parameters
