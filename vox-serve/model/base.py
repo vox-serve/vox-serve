@@ -81,7 +81,7 @@ class BaseLM(ABC):
         pass
     
     @abstractmethod
-    def convert_to_audio(self, token_sequence: List[int]) -> Optional[bytes]:
+    def postprocess(self, token_sequence: List[int]) -> Optional[bytes]:
         """
         Convert model output tokens to audio bytes.
         

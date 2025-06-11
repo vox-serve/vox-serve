@@ -505,7 +505,7 @@ class OrpheusModel(BaseLM):
     def is_stop_id(self, token_id):
         return token_id == self.stop_token_id
 
-    def convert_to_audio(self, multiframe):
+    def postprocess(self, multiframe):
         if len(multiframe) < 7:
             return
 

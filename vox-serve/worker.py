@@ -257,7 +257,7 @@ class ModelWorker:
 
         for req in requests:
             if len(req.lm_output_tokens) % 7 == 0 and len(req.lm_output_tokens) > 27:
-                audio_samples = self.model.convert_to_audio(req.lm_output_tokens[-28:])
+                audio_samples = self.model.postprocess(req.lm_output_tokens[-28:])
                 if audio_samples is not None:
                     req.output_audio.append(audio_samples)
                     req.is_audio_available = True
