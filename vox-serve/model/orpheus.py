@@ -14,7 +14,7 @@ from transformers import LlamaConfig, LlamaPreTrainedModel
 
 from ..tokenizer.snac import SNAC
 from ..flashinfer_utils import FlashInferWrapper
-from ..sampling import top_p_sampling
+from ..sampling import top_p_sampling, apply_repetition_penalty
 from .base import BaseLM
 
 
@@ -479,7 +479,7 @@ class OrpheusModel(BaseLM):
         input_ids, prompt_string = self.orpheus_format_prompt(prompt, voice, model_type)
         return input_ids[0].tolist(), prompt_string
     
-    def forward(self, input_ids, position_ids, attn_wrapper, kv_cache):
+    def forward(self, input_ids, position_ids, attn_wrapper, kv_cache, repetition_cache):
         """Forward pass through the model."""
         inputs_embeds = self.model.embed_tokens(input_ids)
         logits = self.model(
@@ -488,8 +488,9 @@ class OrpheusModel(BaseLM):
             attn_wrapper=attn_wrapper,
             kv_cache=kv_cache,
         )
-        # TODO: repetition penalty
-        # output_ids = torch.argmax(logits, dim=-1)
+        
+        logits = apply_repetition_penalty(logits, repetition_cache, self.repetition_penalty)
+
         output_ids = top_p_sampling(logits, top_p=self.top_p, temperature=self.temperature)
 
         return output_ids

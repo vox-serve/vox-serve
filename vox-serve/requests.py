@@ -36,3 +36,5 @@ class Request:
     # future optimization 
     is_pressing: bool = False 
     
+    # cache for calculating repetition penalty, boolean list of length vocab_size
+    repetition_cache: List[bool] = None

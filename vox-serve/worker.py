@@ -98,6 +98,8 @@ class ModelWorker:
         input_ids = [] 
         position_ids = []
 
+        repetition_cache_all = []
+
         for req in requests:
             if not req.done_lm_prefill:
                 # prefill request
@@ -122,6 +124,11 @@ class ModelWorker:
                 req.next_position_id = len(req.input_tokens) + 1
                 req.done_lm_prefill = True
 
+                req.repetition_cache = [False for _ in range(self.model.vocab_size)]
+                for token in req.input_tokens:
+                    req.repetition_cache[token] = True
+                repetition_cache_all.append(req.repetition_cache)
+
             else:
                 # decode request
                 next_input_token = req.lm_output_tokens[-1]
@@ -141,8 +148,19 @@ class ModelWorker:
                 position_ids.append(req.next_position_id)
 
                 req.next_position_id += 1
+
+                req.repetition_cache[next_input_token] = True
+                repetition_cache_all.append(req.repetition_cache)
         
-        return qo_indptr, paged_kv_indptr, paged_kv_indices, paged_kv_last_page_len, input_ids, position_ids
+        return (
+            qo_indptr, 
+            paged_kv_indptr, 
+            paged_kv_indices, 
+            paged_kv_last_page_len, 
+            input_ids, 
+            position_ids,
+            repetition_cache_all
+        )
 
     def _process_lm_outputs(
         self, 
@@ -168,9 +186,8 @@ class ModelWorker:
         return
     
     def run_lm_prefill(self, requests: List[Request]):
-        qo_indptr, paged_kv_indptr, paged_kv_indices, paged_kv_last_page_len, input_ids, position_ids = (
-            self._prepare_lm_inputs(requests)
-        )
+        qo_indptr, paged_kv_indptr, paged_kv_indices, paged_kv_last_page_len, \
+        input_ids, position_ids, repetition_cache = self._prepare_lm_inputs(requests)
 
         input_ids = torch.tensor(input_ids, device=self.device, dtype=torch.int32)
         position_ids = torch.tensor(position_ids, device=self.device, dtype=torch.int32)
@@ -179,6 +196,7 @@ class ModelWorker:
         paged_kv_indptr_tensor = torch.tensor(paged_kv_indptr, device=self.device, dtype=torch.int32)
         paged_kv_indices_tensor = torch.tensor(paged_kv_indices, device=self.device, dtype=torch.int32)
         paged_kv_last_page_len_tensor = torch.tensor(paged_kv_last_page_len, device=self.device, dtype=torch.int32)
+        repetition_cache_tensor = torch.tensor(repetition_cache, device=self.device, dtype=torch.bool)
 
         self.prefill_wrapper.plan(
             qo_indptr_tensor, 
@@ -195,15 +213,15 @@ class ModelWorker:
             position_ids=position_ids,
             attn_wrapper=self.prefill_wrapper,
             kv_cache=self.kv_cache,
+            repetition_cache=repetition_cache_tensor,
         )
 
         self._process_lm_outputs(requests, output_ids, qo_indptr, is_decode=False)
         return 
     
     def run_lm_decode(self, requests: List[Request]):
-        qo_indptr, paged_kv_indptr, paged_kv_indices, paged_kv_last_page_len, input_ids, position_ids = (
-            self._prepare_lm_inputs(requests)
-        )
+        qo_indptr, paged_kv_indptr, paged_kv_indices, paged_kv_last_page_len, \
+        input_ids, position_ids, repetition_cache = self._prepare_lm_inputs(requests)
 
         input_ids = torch.tensor(input_ids, device=self.device, dtype=torch.int32)
         position_ids = torch.tensor(position_ids, device=self.device, dtype=torch.int32)
@@ -212,6 +230,7 @@ class ModelWorker:
         paged_kv_indptr_tensor = torch.tensor(paged_kv_indptr, device=self.device, dtype=torch.int32)
         paged_kv_indices_tensor = torch.tensor(paged_kv_indices, device=self.device, dtype=torch.int32)
         paged_kv_last_page_len_tensor = torch.tensor(paged_kv_last_page_len, device=self.device, dtype=torch.int32)
+        repetition_cache_tensor = torch.tensor(repetition_cache, device=self.device, dtype=torch.bool)
 
         self.decode_wrapper.plan(
             paged_kv_indptr_tensor, 
@@ -227,6 +246,7 @@ class ModelWorker:
             position_ids=position_ids,
             attn_wrapper=self.decode_wrapper,
             kv_cache=self.kv_cache,
+            repetition_cache=repetition_cache_tensor,
         )
 
         self._process_lm_outputs(requests, output_ids, is_decode=True)

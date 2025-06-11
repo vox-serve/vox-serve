@@ -2,6 +2,8 @@ from abc import ABC, abstractmethod
 from typing import List, Tuple, Optional, Any
 import torch
 
+from ..flashinfer_utils import FlashInferWrapper
+
 
 class BaseLM(ABC):
     """
@@ -60,8 +62,9 @@ class BaseLM(ABC):
         self, 
         input_ids: torch.Tensor, 
         position_ids: torch.Tensor, 
-        attn_wrapper: Any, 
-        kv_cache: torch.Tensor
+        attn_wrapper: FlashInferWrapper, 
+        kv_cache: torch.Tensor,
+        repetition_cache: torch.Tensor,
     ) -> torch.Tensor:
         """
         Forward pass through the model.
