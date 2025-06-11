@@ -18,39 +18,6 @@ from ..sampling import top_p_sampling, apply_repetition_penalty
 from .base import BaseLM
 
 
-class SpeechLlamaConfig(LlamaConfig):
-
-    def __init__(
-        self,
-        audio_vocab_size: int = 2049,
-        num_audio_codebooks: int = 8,
-        audio_pad_token_id: int = 2048,
-        audio_token_frame_rate: float = 12.5,
-        audio_token_time_dropout: float = 0.0,
-        audio_token_codebook_dropout: float = 0.0,
-        max_num_codebook_dropout: int = 6,
-        text_pad_token_id: int = 128256,  # <|pad|> token id
-        text_end_of_pad_token_id: int = 128257,  # <|end_of_pad|> token id
-        **kwargs,
-    ):
-        self.audio_vocab_size = audio_vocab_size
-        self.num_audio_codebooks = num_audio_codebooks
-        self.audio_pad_token_id = audio_pad_token_id
-        self.audio_token_frame_rate = audio_token_frame_rate
-
-        self.audio_token_time_dropout = audio_token_time_dropout
-        self.audio_token_codebook_dropout = audio_token_codebook_dropout
-        self.max_num_codebook_dropout = max_num_codebook_dropout
-
-        self.text_pad_token_id = text_pad_token_id
-        self.text_end_of_pad_token_id = text_end_of_pad_token_id
-
-        if max_num_codebook_dropout > num_audio_codebooks:
-            raise ValueError(f"{max_num_codebook_dropout=} should be less than or equal to {num_audio_codebooks=}")
-
-        super().__init__(**kwargs)
-
-
 class LlamaRMSNorm(nn.Module):
     def __init__(self, hidden_size, eps=1e-6):
         """
