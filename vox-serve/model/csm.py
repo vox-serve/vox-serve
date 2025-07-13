@@ -322,10 +322,7 @@ class CsmDepthDecoderModel(nn.Module):
         attn_wrapper: FlashInferWrapper, 
         kv_cache: torch.Tensor,
     ):
-
-        inputs_embeds = self.inputs_embeds_projector(inputs_embeds)
-        
-        hidden_states = inputs_embeds
+        hidden_states = self.inputs_embeds_projector(inputs_embeds)
 
         # create position embeddings to be shared across the decoder layers
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
@@ -376,11 +373,12 @@ class CsmDepthDecoderForCausalLM(nn.Module):
     
     def forward(
         self,
-        inputs_ids: torch.Tensor, # [bs]
+        inputs_embeds: torch.Tensor, # [bs]
         position_ids: torch.LongTensor, # [bs]
         attn_wrapper: FlashInferWrapper, 
         kv_cache: torch.Tensor,
     ):
+        return self.model(inputs_embeds, position_ids, attn_wrapper, kv_cache)
 
 
 class CsmForConditionalGeneration(CsmPreTrainedModel):
@@ -410,14 +408,16 @@ class CsmForConditionalGeneration(CsmPreTrainedModel):
 
     def forward_depth(
         self,
-        inputs_ids: torch.Tensor, # [bs, n_codebook]
+        inputs_embeds: torch.Tensor, # [bs]
         position_ids: torch.LongTensor, # [bs]
         attn_wrapper: FlashInferWrapper, 
         kv_cache: torch.Tensor,
     ):
-        
-        
+        outputs = self.depth_decoder(inputs_embeds, position_ids, attn_wrapper, kv_cache)
 
+        logits = self.depth_decoder.codebooks_head(outputs, cache_position=position_ids)
+        return logits
+        
 
 class CSMModel(BaseLM):
     def __init__(self, model_name, dtype=torch.bfloat16, device="cuda:0", tokenizer_path="canopylabs/orpheus-3b-0.1-ft"):
@@ -481,12 +481,22 @@ class CSMModel(BaseLM):
         input_ids, prompt_string = self.orpheus_format_prompt(prompt, voice, model_type)
         return input_ids[0].tolist(), prompt_string
     
-    def forward(self, input_ids, position_ids, attn_wrapper, kv_cache, repetition_cache):
+    def forward(
+        self, 
+        input_ids: torch.LongTensor, 
+        position_ids: torch.LongTensor, 
+        attn_wrapper: FlashInferWrapper, 
+        kv_cache: torch.Tensor, 
+        repetition_cache: Optional[torch.Tensor] = None,
+        depth_attn_wrapper: Optional[FlashInferWrapper] = None,
+        depth_kv_cache: Optional[torch.Tensor] = None,
+    ):
         """Forward pass through the model."""
         # input_ids: [bs, n_codebook]
         text_embeds = self.embed_text_tokens(input_ids[:, -1:])
         audio_embeds = self.embed_audio_tokens_all(input_ids[:, :-1])
         inputs_embeds = torch.cat([text_embeds, audio_embeds], dim=1) # [bs, 33]
+        # TODO: embed masking here
         inputs_embeds = inputs_embeds.sum(dim=1)
 
         backbone_logits = self.model.forward_backbone(
@@ -497,14 +507,50 @@ class CSMModel(BaseLM):
         )
         
         # logits = apply_repetition_penalty(logits, repetition_cache, self.repetition_penalty)
-
-        backbone_ids = top_k_sampling(backbone_logits, top_p=self.top_k, temperature=self.temperature)
-
+        
         # select last token for each request for prefill 
         if getattr(attn_wrapper, "qo_indptr", None) is not None:
-            backbone_ids = backbone_ids[attn_wrapper.qo_indptr[:-1] - 1]
+            backbone_logits = backbone_logits[attn_wrapper.qo_indptr[:-1] - 1]
+
+        backbone_ids = top_k_sampling(backbone_logits, top_p=self.top_k, temperature=self.temperature)
         
         c0_embed = self.embed_audio_tokens_single(backbone_ids, 0)
+        curr_h = torch.cat([backbone_logits[:, None, :], c0_embed[:, None, :]], dim=1).view(-1, c0_embed.shape[-1]) 
+
+        depth_position_ids = torch.tensor([0, 1] * c0_embed.shape[0], device=c0_embed.device)
+        depth_qo_indptr = torch.arange(c0_embed.shape[0] + 1, device=curr_h.device) * 2
+        depth_kv_indptr = torch.arange(c0_embed.shape[0] + 1, device=curr_h.device)
+        depth_kv_indices = torch.arange(c0_embed.shape[0], device=curr_h.device)
+        depth_kv_last_page_len = torch.tensor([2] * c0_embed.shape[0], device=curr_h.device)
+        depth_kv_cache.zero_()
+
+        output_ids = output_ids[:, None]
+
+        for i in range(1, self.model.config.num_codebooks):
+            depth_attn_wrapper.plan(
+                qo_indptr=depth_qo_indptr,
+                paged_kv_indptr=depth_kv_indptr, 
+                paged_kv_indices=depth_kv_indices, 
+                paged_kv_last_page_len=depth_kv_last_page_len,
+                dtype=self.dtype,
+            )
+            torch.cuda.synchronize()
+
+            depth_logits = self.model.forward_depth(
+                inputs_embeds=curr_h,
+                position_ids=depth_position_ids,
+                attn_wrapper=depth_attn_wrapper,
+                kv_cache=depth_kv_cache,
+            )
+            depth_ids = top_k_sampling(depth_logits, top_p=self.top_k, temperature=self.temperature)
+            ci_embed = self.embed_audio_tokens_single(depth_ids, i)
+            curr_h = ci_embed
+
+            output_ids = torch.cat([output_ids, depth_ids[:, None]], dim=1)
+
+            depth_position_ids = torch.tensor([i + 1] * ci_embed.shape[0], device=ci_embed.device)
+            depth_qo_indptr = torch.arange(c0_embed.shape[0] + 1, device=curr_h.device)
+            depth_kv_last_page_len += 1
         
 
         return output_ids
