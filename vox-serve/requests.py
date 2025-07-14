@@ -38,3 +38,4 @@ class Request:
     
     # cache for calculating repetition penalty, boolean list of length vocab_size
     repetition_cache: List[bool] = None
+    tokens_mask: List[bool] = None

@@ -83,6 +83,29 @@ class ModelWorker:
         self.paged_kv_indices = torch.arange(max_batch_size).to(self.device).to(torch.int32)
         self.paged_kv_last_page_len = torch.ones(max_batch_size).to(self.device).to(torch.int32)
 
+        self.has_depth_transformer = self.model.has_depth_transformer
+        if self.has_depth_transformer:
+            self.depth_attn_wrapper = FlashInferPrefillWrapper(
+                attn_buffer=self.flashinfer_buffer,
+                n_qo_head=self.model.depth_num_attention_heads,
+                n_kv_head=self.model.depth_num_key_value_heads,
+                n_state=self.model.depth_hidden_size,
+                page_size=self.page_size,
+            )
+            self.depth_kv_cache = torch.zeros(
+                self.model.depth_num_hidden_layers,
+                self.max_num_pages,
+                2, # K/V
+                self.model.depth_n_codebooks,
+                self.model.depth_num_key_value_heads, # kv heads
+                self.model.depth_hidden_size // self.model.depth_num_attention_heads, # head dim
+                dtype=torch.bfloat16,
+                device="cuda",
+            )
+        else:
+            self.depth_attn_wrapper = None
+            self.depth_kv_cache = None
+
         # Initialize empty pages
         self.empty_pages = queue.Queue()
         for i in range(self.max_num_pages):
@@ -103,7 +126,7 @@ class ModelWorker:
         for req in requests:
             if not req.done_lm_prefill:
                 # prefill request
-                req.input_tokens, _ = self.model.preprocess(req.prompt)
+                req.input_tokens, req.tokens_mask = self.model.preprocess(req.prompt)
                 
                 n_pages_to_allocate = (len(req.input_tokens) + self.page_size - 1) // self.page_size
                 req.kv_token_len = len(req.input_tokens)
@@ -125,8 +148,8 @@ class ModelWorker:
                 req.done_lm_prefill = True
 
                 req.repetition_cache = [False for _ in range(self.model.vocab_size)]
-                for token in req.input_tokens:
-                    req.repetition_cache[token] = True
+                # for token in req.input_tokens:
+                #     req.repetition_cache[token] = True
                 repetition_cache_all.append(req.repetition_cache)
 
             else:
@@ -149,7 +172,7 @@ class ModelWorker:
 
                 req.next_position_id += 1
 
-                req.repetition_cache[next_input_token] = True
+                # req.repetition_cache[next_input_token] = True
                 repetition_cache_all.append(req.repetition_cache)
         
         return (
@@ -214,6 +237,9 @@ class ModelWorker:
             attn_wrapper=self.prefill_wrapper,
             kv_cache=self.kv_cache,
             repetition_cache=repetition_cache_tensor,
+            depth_attn_wrapper=self.depth_attn_wrapper,
+            depth_kv_cache=self.depth_kv_cache,
+            tokens_mask=torch.tensor(requests[0].tokens_mask, device=self.device, dtype=torch.bool),
         )
 
         self._process_lm_outputs(requests, output_ids, qo_indptr, is_decode=False)
@@ -240,6 +266,10 @@ class ModelWorker:
         )
         torch.cuda.synchronize()
 
+        curr_tokens_mask = torch.cat(
+            [torch.ones_like(input_ids).bool(), torch.zeros(1, 1).bool().to(self.device)], dim=1
+        ).unsqueeze(1)
+
         # prefill run 
         output_ids = self.model.forward(
             input_ids=input_ids,
@@ -247,6 +277,9 @@ class ModelWorker:
             attn_wrapper=self.decode_wrapper,
             kv_cache=self.kv_cache,
             repetition_cache=repetition_cache_tensor,
+            depth_attn_wrapper=self.depth_attn_wrapper,
+            depth_kv_cache=self.depth_kv_cache,
+            tokens_mask=curr_tokens_mask,
         )
 
         self._process_lm_outputs(requests, output_ids, is_decode=True)

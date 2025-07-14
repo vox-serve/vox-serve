@@ -19,6 +19,11 @@ class BaseLM(ABC):
         self.dtype = dtype
     
     @property
+    def has_depth_transformer(self) -> bool:
+        """Indicates if the model has a depth transformer."""
+        return False
+    
+    @property
     @abstractmethod
     def num_attention_heads(self) -> int:
         """Number of attention heads in the model."""
