@@ -355,7 +355,7 @@ class CsmCodebooksHead(nn.Module):
             codebook_idxs = cache_position - 1
             codebook_weight = self.weight[codebook_idxs]
 
-        print(f"{hidden_states.shape=}, {cache_position=}") # [seq_len, 1024], [0, 1]
+        # print(f"{hidden_states.shape=}, {cache_position=}") # [seq_len, 1024], [0, 1]
         hidden_states = [
             nn.functional.linear(hidden_states[codebook_idx, :], codebook_weight[codebook_idx].T)
             for codebook_idx in range(codebook_weight.shape[0])
@@ -447,6 +447,8 @@ class CSMModel(BaseLM):
 
         self.top_k = 50
         self.temperature = 0.9
+        self.stop_token_id = 0
+        self.max_tokens = 1200 
 
 
     @property
@@ -566,6 +568,9 @@ class CSMModel(BaseLM):
 
         return torch.cat(frame_tokens, dim=0), torch.cat(frame_masks, dim=0)
     
+    def is_stop_id(self, token_id):
+        return token_id == self.stop_token_id
+    
     def preprocess(self, prompt, speaker=0, context=None):
         """Prepare the prompt for the model, formatting it according to CSM specifications."""
         # TODO: no context for now 
@@ -586,14 +591,17 @@ class CSMModel(BaseLM):
     ):
         """Forward pass through the model."""
         # input_ids: [bs, n_codebook]
+        # print(f"{input_ids=} {input_ids.shape=}")
         text_embeds = self.embed_text_tokens(input_ids[:, -1:])
         audio_embeds = self.embed_audio_tokens_all(input_ids[:, :-1])
         # print(f"{input_ids=} {input_ids.shape=}, {text_embeds.shape=}, {audio_embeds.shape=}") # [bs, 33], [bs, 1, 2048], [bs, 32, 2048]
-        print(f"{tokens_mask.shape=}, {tokens_mask=}") # [bs, 33]
-        inputs_embeds = torch.cat([text_embeds, audio_embeds], dim=1) # [bs, 33, 2048]
+        # print(f"{text_embeds=} {audio_embeds=}") # [bs, 1, 2048], [bs, 32, 2048]
+        # print(f"{tokens_mask.shape=}, {tokens_mask=}") # [bs, 33]
+        inputs_embeds = torch.cat([audio_embeds, text_embeds], dim=1) # [bs, 33, 2048]
         inputs_embeds = inputs_embeds * tokens_mask[:, :, None]
         inputs_embeds = inputs_embeds.sum(dim=1)
 
+        # print(f"{inputs_embeds=}")
         backbone_logits, backbone_last_hidden = self.model.forward_backbone(
             inputs_embeds=inputs_embeds,
             position_ids=position_ids,
@@ -612,7 +620,7 @@ class CSMModel(BaseLM):
         
         c0_embed = self.embed_audio_tokens_single(backbone_ids, 0)
         # backbone_ids.shape=torch.Size([1])
-        print(f"{backbone_last_hidden.shape=}, {c0_embed.shape=}") # [bs, 2048], [bs, 2048]
+        # print(f"{backbone_last_hidden.shape=}, {c0_embed.shape=}") # [bs, 2048], [bs, 2048]
         curr_h = torch.cat([backbone_last_hidden[:, None, :], c0_embed[:, None, :]], dim=1).view(-1, c0_embed.shape[-1]) 
 
         depth_position_ids = torch.tensor([0, 1] * c0_embed.shape[0], device=c0_embed.device)
@@ -634,25 +642,27 @@ class CSMModel(BaseLM):
             )
             torch.cuda.synchronize()
 
-            print(f"{curr_h.shape=} {depth_position_ids.shape=}, {depth_position_ids=}") # [bs, 2048], [bs, 2]
+            # print(f"{curr_h=}")
+            # print(f"{curr_h.shape=} {depth_position_ids.shape=}, {depth_position_ids=}") # [bs, 2048], [bs, 2]
             depth_logits = self.model.forward_depth(
                 inputs_embeds=curr_h,
                 position_ids=depth_position_ids,
                 attn_wrapper=depth_attn_wrapper,
                 kv_cache=depth_kv_cache,
             )
-            print(f"{depth_logits.shape=}")
+            # print(f"{depth_logits.shape=}")
             depth_ids = top_k_sampling(depth_logits, top_k=self.top_k, temperature=self.temperature)
             depth_ids = depth_ids.view(-1, c0_embed.shape[0])[-1, :]
             ci_embed = self.embed_audio_tokens_single(depth_ids, i)
             curr_h = ci_embed
-            print(f"{depth_ids.shape=} {depth_ids=}")
+            # print(f"{depth_ids.shape=} {depth_ids=}")
             output_ids = torch.cat([output_ids, depth_ids[:, None]], dim=1) # (bs, N)
 
             depth_position_ids = torch.tensor([i + 1] * c0_embed.shape[0], device=c0_embed.device)
             depth_qo_indptr = torch.arange(c0_embed.shape[0] + 1, device=curr_h.device)
             depth_kv_last_page_len += 1
         
+        # output_ids = torch.cat([output_ids, torch.zeros(1, 1, device=output_ids.device, dtype=torch.long)], dim=1) # text stream is 0
         print(f"{output_ids.shape=} {output_ids=}") # [bs, 33]
         return output_ids
     
@@ -662,9 +672,15 @@ class CSMModel(BaseLM):
     def is_stop_id(self, token_id):
         return token_id == self.stop_token_id
 
-    def postprocess(self, multiframe):
+    def postprocess(self, tokens_list):
         # mimi decoder
-        pass
+        print(torch.tensor(tokens_list).shape) # (seq_len, 32)
+        audio = self.audio_tokenizer.decode(torch.tensor(tokens_list, device="cuda").transpose(1, 0)[None, :, :])
+        audio = audio.detach().cpu().numpy() 
+        audio_int16 = (audio * 32767).astype(np.int16) 
+        audio_bytes = audio_int16.tobytes()
+        # TODO: watermarking
+        return audio_bytes
 
 
 if __name__ == "__main__":

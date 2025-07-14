@@ -196,15 +196,17 @@ class ModelWorker:
         Process the output IDs from the model and update the requests.
         """
         # output_ids = self.model.postprocess(output_ids)
-        if not is_decode:
-            # prefill
-            assert qo_indptr is not None 
-            for i, qo_idx in enumerate(qo_indptr[1:]):
-                requests[i].lm_output_tokens.append(output_ids[qo_idx - 1].item())
-        else:
-            # decode
-            for i, req in enumerate(requests):
-                req.lm_output_tokens.append(output_ids[i].item())
+        for i, req in enumerate(requests):
+            req.lm_output_tokens.append(output_ids[i].tolist())
+        # if not is_decode:
+        #     # prefill
+        #     assert qo_indptr is not None 
+        #     for i, qo_idx in enumerate(qo_indptr[1:]):
+        #         requests[i].lm_output_tokens.append(output_ids[qo_idx - 1].item())
+        # else:
+        #     # decode
+        #     for i, req in enumerate(requests):
+        #         req.lm_output_tokens.append(output_ids[i].item())
         
         return
     
@@ -268,7 +270,11 @@ class ModelWorker:
 
         curr_tokens_mask = torch.cat(
             [torch.ones_like(input_ids).bool(), torch.zeros(1, 1).bool().to(self.device)], dim=1
-        ).unsqueeze(1)
+        )
+
+        input_ids = torch.cat(
+            [input_ids, torch.zeros(1, 1, device=self.device, dtype=torch.long)], dim=1
+        ) # text stream is 0
 
         # prefill run 
         output_ids = self.model.forward(
@@ -288,12 +294,26 @@ class ModelWorker:
     def run_detokenize(self, requests: List[Request]):
         # naive implementation for now 
 
+        # # For orpheus:
+        # for req in requests:
+        #     if len(req.lm_output_tokens) % 7 == 0 and len(req.lm_output_tokens) > 27:
+        #         audio_samples = self.model.postprocess(req.lm_output_tokens[-28:])
+        #         if audio_samples is not None:
+        #             req.output_audio.append(audio_samples)
+        #             req.is_audio_available = True
+        #         else:
+        #             req.is_audio_available = False
+        #     else:
+        #         req.is_audio_available = False
+
+        # for csm
         for req in requests:
-            if len(req.lm_output_tokens) % 7 == 0 and len(req.lm_output_tokens) > 27:
-                audio_samples = self.model.postprocess(req.lm_output_tokens[-28:])
+            if len(req.lm_output_tokens) > 10:
+                audio_samples = self.model.postprocess(req.lm_output_tokens)
                 if audio_samples is not None:
                     req.output_audio.append(audio_samples)
                     req.is_audio_available = True
+                    req.done_all = True
                 else:
                     req.is_audio_available = False
             else:

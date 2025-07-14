@@ -460,6 +460,9 @@ class OrpheusModel(BaseLM):
 
         output_ids = top_p_sampling(logits, top_p=self.top_p, temperature=self.temperature)
 
+        if getattr(attn_wrapper, "qo_indptr", None) is not None:
+            output_ids = output_ids[attn_wrapper.qo_indptr[:-1] - 1]
+
         return output_ids
     
     def decode_text_token(self, token_id):
