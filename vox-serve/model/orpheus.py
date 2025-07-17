@@ -475,7 +475,12 @@ class OrpheusModel(BaseLM):
     def is_stop_id(self, token_id):
         return token_id == self.stop_token_id
 
-    def postprocess(self, multiframe):
+    def postprocess(self, tokens_list, next_audio_decode_idx, done_all):
+        do_detokenize = (len(tokens_list) % 7 == 0 and len(tokens_list) >= 28) or done_all
+        if not do_detokenize:
+            return None, None
+        
+        multiframe = tokens_list[next_audio_decode_idx:]
         if len(multiframe) < 7:
             return
 
@@ -515,4 +520,4 @@ class OrpheusModel(BaseLM):
         arr = audio_slice.detach().cpu().numpy()            # (1, 1, 2048)
         audio_int16 = (arr * 32767).astype(np.int16)        # still (1, 1, 2048)
         audio_bytes = audio_int16.tobytes()
-        return audio_bytes
+        return audio_bytes, next_audio_decode_idx + 7
