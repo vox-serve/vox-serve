@@ -452,6 +452,7 @@ class CSMModel(BaseLM):
 
         self._set_default_context()
 
+        self._load_watermarker()
 
     @property
     def has_depth_transformer(self) -> bool:
@@ -631,6 +632,15 @@ class CSMModel(BaseLM):
             "tokens_mask": tokens_mask,
         }
     
+    def _load_watermarker(self):
+        import silentcipher
+        self.watermark_model = silentcipher.get_model(
+            model_type="44.1k",
+            device=self.device,
+        )
+        # TODO: This should be specified at server start time
+        self.watermark_key = [11, 91, 60, 147, 209]
+    
     def is_stop_id(self, token_id):
         return token_id[-1] == self.stop_token_id
     
@@ -746,11 +756,21 @@ class CSMModel(BaseLM):
         # mimi decoder
         print(torch.tensor(tokens_list_to_process).shape) # (seq_len, 32)
         audio = self.audio_tokenizer.decode(torch.tensor(tokens_list_to_process, device="cuda").transpose(1, 0)[None, :, :])
+        print(f"{audio.shape=}") # (1, 1, N)
+        audio = self.watermark(audio[0, 0])
         audio = audio.detach().cpu().numpy() 
         audio_int16 = (audio * 32767).astype(np.int16) 
         audio_bytes = audio_int16.tobytes()
         # TODO: watermarking
         return audio_bytes, len(tokens_list)
+    
+    def watermark(self, audio):
+        import torchaudio
+        audio_array_44khz = torchaudio.functional.resample(audio, orig_freq=self.audio_tokenizer.sample_rate, new_freq=44100)
+        encoded, _ = self.watermark_model.encode_wav(audio_array_44khz, 44100, self.watermark_key, calc_sdr=False, message_sdr=36)
+        output_sample_rate = min(44100, self.audio_tokenizer.sample_rate)
+        encoded = torchaudio.functional.resample(encoded, orig_freq=44100, new_freq=output_sample_rate)
+        return encoded
 
 
 if __name__ == "__main__":
