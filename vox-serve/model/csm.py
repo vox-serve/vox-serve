@@ -736,15 +736,21 @@ class CSMModel(BaseLM):
     def decode_text_token(self, token_id):
         return self.text_tokenizer.decode(token_id)
 
-    def postprocess(self, tokens_list):
+    def postprocess(self, tokens_list, next_audio_decode_idx, done_all):
+        # TODO: 10 is arbitrary number here
+        do_detokenize = len(tokens_list) - next_audio_decode_idx > 10 or done_all
+        if not do_detokenize:
+            return None, None
+        
+        tokens_list_to_process = tokens_list[next_audio_decode_idx:]
         # mimi decoder
-        print(torch.tensor(tokens_list).shape) # (seq_len, 32)
-        audio = self.audio_tokenizer.decode(torch.tensor(tokens_list, device="cuda").transpose(1, 0)[None, :, :])
+        print(torch.tensor(tokens_list_to_process).shape) # (seq_len, 32)
+        audio = self.audio_tokenizer.decode(torch.tensor(tokens_list_to_process, device="cuda").transpose(1, 0)[None, :, :])
         audio = audio.detach().cpu().numpy() 
         audio_int16 = (audio * 32767).astype(np.int16) 
         audio_bytes = audio_int16.tobytes()
         # TODO: watermarking
-        return audio_bytes
+        return audio_bytes, len(tokens_list)
 
 
 if __name__ == "__main__":

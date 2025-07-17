@@ -308,15 +308,13 @@ class ModelWorker:
 
         # for csm
         for req in requests:
-            do_detokenize = len(req.lm_output_tokens) - req.next_audio_decode_idx > 10 or req.done_all
-            if do_detokenize:
-                audio_samples = self.model.postprocess(req.lm_output_tokens[req.next_audio_decode_idx:])
-                if audio_samples is not None:
-                    req.output_audio.append(audio_samples)
-                    req.next_audio_decode_idx = len(req.lm_output_tokens)
-                    req.is_audio_available = True
-                else:
-                    req.is_audio_available = False
+            audio_samples, next_audio_decode_idx = self.model.postprocess(
+                req.lm_output_tokens, req.next_audio_decode_idx, req.done_all
+            )
+            if audio_samples is not None:
+                req.output_audio.append(audio_samples)
+                req.next_audio_decode_idx = next_audio_decode_idx
+                req.is_audio_available = True
             else:
                 req.is_audio_available = False
         
