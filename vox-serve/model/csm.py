@@ -569,7 +569,7 @@ class CSMModel(BaseLM):
         return torch.cat(frame_tokens, dim=0), torch.cat(frame_masks, dim=0)
     
     def is_stop_id(self, token_id):
-        return token_id == self.stop_token_id
+        return token_id[0] == self.stop_token_id
     
     def preprocess(self, prompt, speaker=0, context=None):
         """Prepare the prompt for the model, formatting it according to CSM specifications."""
@@ -668,9 +668,6 @@ class CSMModel(BaseLM):
     
     def decode_text_token(self, token_id):
         return self.text_tokenizer.decode(token_id)
-    
-    def is_stop_id(self, token_id):
-        return token_id == self.stop_token_id
 
     def postprocess(self, tokens_list):
         # mimi decoder
