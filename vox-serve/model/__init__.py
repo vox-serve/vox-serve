@@ -3,12 +3,14 @@ import torch
 
 from .base import BaseLM
 from .orpheus import OrpheusModel
-
+from .csm import CSMModel
 
 # Registry mapping model name patterns to model classes
 MODEL_REGISTRY: Dict[str, Type[BaseLM]] = {
     "orpheus": OrpheusModel,
     "canopylabs/orpheus-3b-0.1-ft": OrpheusModel,
+    "csm": CSMModel,
+    "sesame/csm-1b": CSMModel,
 }
 
 

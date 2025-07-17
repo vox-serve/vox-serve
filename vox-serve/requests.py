@@ -29,7 +29,7 @@ class Request:
 
     # progress status
     done_lm_prefill: bool = False
-    is_ready_detokenize: bool = False 
+    next_audio_decode_idx: int = 0
     is_audio_available: bool = False 
     done_all: bool = False
 
@@ -38,3 +38,4 @@ class Request:
     
     # cache for calculating repetition penalty, boolean list of length vocab_size
     repetition_cache: List[bool] = None
+    tokens_mask: List[bool] = None
