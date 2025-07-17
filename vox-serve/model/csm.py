@@ -450,6 +450,8 @@ class CSMModel(BaseLM):
         self.stop_token_id = 0
         self.max_tokens = 1200 
 
+        self._set_default_context()
+
 
     @property
     def has_depth_transformer(self) -> bool:
@@ -568,15 +570,80 @@ class CSMModel(BaseLM):
 
         return torch.cat(frame_tokens, dim=0), torch.cat(frame_masks, dim=0)
     
+    def _set_default_context(self):
+        # Example from https://github.com/SesameAILabs/csm/blob/main/run_csm.py
+        # Default prompts are available at https://hf.co/sesame/csm-1b
+        from huggingface_hub import hf_hub_download
+        import torchaudio
+
+        prompt_filepath_conversational_a = hf_hub_download(
+            repo_id="sesame/csm-1b",
+            filename="prompts/conversational_a.wav"
+        )
+        prompt_filepath_conversational_b = hf_hub_download(
+            repo_id="sesame/csm-1b",
+            filename="prompts/conversational_b.wav"
+        )
+
+        def load_prompt_audio(audio_path: str, target_sample_rate: int) -> torch.Tensor:
+            audio_tensor, sample_rate = torchaudio.load(audio_path)
+            audio_tensor = audio_tensor.squeeze(0)
+            # Resample is lazy so we can always call it
+            audio_tensor = torchaudio.functional.resample(
+                audio_tensor, orig_freq=sample_rate, new_freq=target_sample_rate
+            )
+            return audio_tensor
+
+        SPEAKER_PROMPTS = {
+            "conversational_a": {
+                "text": (
+                    "like revising for an exam I'd have to try and like keep up the momentum because I'd "
+                    "start really early I'd be like okay I'm gonna start revising now and then like "
+                    "you're revising for ages and then I just like start losing steam I didn't do that "
+                    "for the exam we had recently to be fair that was a more of a last minute scenario "
+                    "but like yeah I'm trying to like yeah I noticed this yesterday that like Mondays I "
+                    "sort of start the day with this not like a panic but like a"
+                ),
+                "audio": load_prompt_audio(prompt_filepath_conversational_a, self.audio_tokenizer.sample_rate)
+            },
+            "conversational_b": {
+                "text": (
+                    "like a super Mario level. Like it's very like high detail. And like, once you get "
+                    "into the park, it just like, everything looks like a computer game and they have all "
+                    "these, like, you know, if, if there's like a, you know, like in a Mario game, they "
+                    "will have like a question block. And if you like, you know, punch it, a coin will "
+                    "come out. So like everyone, when they come into the park, they get like this little "
+                    "bracelet and then you can go punching question blocks around."
+                ),
+                "audio": load_prompt_audio(prompt_filepath_conversational_b, self.audio_tokenizer.sample_rate)
+            }
+        }
+
+        tokens, tokens_mask = [], []
+        for speaker, prompt in SPEAKER_PROMPTS.items():
+            text_tokens, text_mask = self._tokenize_text_segment(prompt["text"], speaker=0 if speaker == "conversational_a" else 1)
+            audio_tokens, audio_mask = self._tokenize_audio(prompt["audio"])
+            tokens.append(torch.cat([text_tokens, audio_tokens], dim=0))
+            tokens_mask.append(torch.cat([text_mask, audio_mask], dim=0))
+
+        self.default_context = {
+            "tokens": tokens,
+            "tokens_mask": tokens_mask,
+        }
+    
     def is_stop_id(self, token_id):
-        return token_id[0] == self.stop_token_id
+        return token_id[-1] == self.stop_token_id
     
     def preprocess(self, prompt, speaker=0, context=None):
         """Prepare the prompt for the model, formatting it according to CSM specifications."""
-        # TODO: no context for now 
-        gen_segment_tokens, gen_segment_tokens_mask = self._tokenize_text_segment(prompt, speaker)
-        print(f"{gen_segment_tokens.shape=}, {gen_segment_tokens_mask.shape=}") # [seq_len, 33]
-        return gen_segment_tokens.tolist(), gen_segment_tokens_mask.tolist()
+        # TODO: add reference context to API argument
+        prompt_tokens, prompt_tokens_mask = self._tokenize_text_segment(prompt, speaker)
+        if context is None:
+            prompt_tokens = torch.cat(self.default_context["tokens"] + [prompt_tokens], dim=0)
+            prompt_tokens_mask = torch.cat(self.default_context["tokens_mask"] + [prompt_tokens_mask], dim=0)
+        
+        print(f"{prompt_tokens=}, {prompt_tokens_mask=}") # [seq_len, 33]
+        return prompt_tokens.tolist(), prompt_tokens_mask.tolist()
     
     def forward(
         self, 
