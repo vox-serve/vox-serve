@@ -35,7 +35,6 @@ class ModelWorker:
         # Tensor to store offset values for each client
         self.offsets = torch.zeros(max_batch_size, dtype=torch.int32, device=self.device)
 
-        # Now, due to sliding window, only 1 page per client
         self.max_num_pages = max_batch_size
         self.page_size = 2048
 
@@ -126,7 +125,10 @@ class ModelWorker:
         for req in requests:
             if not req.done_lm_prefill:
                 # prefill request
-                req.input_tokens, req.tokens_mask = self.model.preprocess(req.prompt)
+                # csm
+                # req.input_tokens, req.tokens_mask = self.model.preprocess(req.prompt)
+                # zonos
+                req.input_tokens, req.prefix_conditioning = self.model.preprocess(req.prompt)
                 
                 n_pages_to_allocate = (len(req.input_tokens) + self.page_size - 1) // self.page_size
                 req.kv_token_len = len(req.input_tokens)
@@ -239,9 +241,10 @@ class ModelWorker:
             attn_wrapper=self.prefill_wrapper,
             kv_cache=self.kv_cache,
             repetition_cache=repetition_cache_tensor,
-            depth_attn_wrapper=self.depth_attn_wrapper,
-            depth_kv_cache=self.depth_kv_cache,
-            tokens_mask=torch.tensor(requests[0].tokens_mask, device=self.device, dtype=torch.bool),
+            # depth_attn_wrapper=self.depth_attn_wrapper,
+            # depth_kv_cache=self.depth_kv_cache,
+            # tokens_mask=torch.tensor(requests[0].tokens_mask, device=self.device, dtype=torch.bool),
+            prefix_conditioning=requests[0].prefix_conditioning if requests else None,
         )
 
         self._process_lm_outputs(requests, output_ids, qo_indptr, is_decode=False)
@@ -268,13 +271,14 @@ class ModelWorker:
         )
         torch.cuda.synchronize()
 
-        curr_tokens_mask = torch.cat(
-            [torch.ones_like(input_ids).bool(), torch.zeros(1, 1).bool().to(self.device)], dim=1
-        )
+        # For CSM
+        # curr_tokens_mask = torch.cat(
+        #     [torch.ones_like(input_ids).bool(), torch.zeros(1, 1).bool().to(self.device)], dim=1
+        # )
 
-        input_ids = torch.cat(
-            [input_ids, torch.zeros(1, 1, device=self.device, dtype=torch.long)], dim=1
-        ) # text stream is 0
+        # input_ids = torch.cat(
+        #     [input_ids, torch.zeros(1, 1, device=self.device, dtype=torch.long)], dim=1
+        # ) # text stream is 0
 
         # prefill run 
         output_ids = self.model.forward(
@@ -283,9 +287,9 @@ class ModelWorker:
             attn_wrapper=self.decode_wrapper,
             kv_cache=self.kv_cache,
             repetition_cache=repetition_cache_tensor,
-            depth_attn_wrapper=self.depth_attn_wrapper,
-            depth_kv_cache=self.depth_kv_cache,
-            tokens_mask=curr_tokens_mask,
+            # depth_attn_wrapper=self.depth_attn_wrapper,
+            # depth_kv_cache=self.depth_kv_cache,
+            # tokens_mask=curr_tokens_mask,
         )
 
         self._process_lm_outputs(requests, output_ids, is_decode=True)

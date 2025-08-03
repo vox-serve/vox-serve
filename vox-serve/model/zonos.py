@@ -217,9 +217,9 @@ class ZonosAttention(nn.Module):
         kv_size = self.num_heads_kv * self.head_dim
         query_states, key_states, value_states = self.in_proj(hidden_states).split([q_size, kv_size, kv_size], dim=-1)
 
-        query_states = query_states.view(-1, self.num_heads, self.head_dim)
-        key_states = key_states.view(-1, self.num_heads_kv, self.head_dim)
-        value_states = value_states.view(-1, self.num_heads_kv, self.head_dim)
+        query_states = query_states.view(-1, self.num_heads, self.head_dim).transpose(0, 1)
+        key_states = key_states.view(-1, self.num_heads_kv, self.head_dim).transpose(0, 1)
+        value_states = value_states.view(-1, self.num_heads_kv, self.head_dim).transpose(0, 1)
 
         cos, sin = position_embeddings
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
@@ -623,6 +623,7 @@ class ZonosForCausalLM(nn.Module):
         self.heads = nn.ModuleList([nn.Linear(dim, 1025, bias=False) for _ in range(self.autoencoder.num_codebooks)])
 
     def embed_tokens(self, input_ids):
+        print(f"{input_ids.shape=}")
         return sum(emb(input_ids[:, i]) for i, emb in enumerate(self.embeddings))
     
     # def get_input_embeddings(self):
@@ -649,7 +650,7 @@ class ZonosForCausalLM(nn.Module):
 
 
 class ZonosModel(BaseLM):
-    def __init__(self, model_name, dtype=torch.bfloat16, device="cuda:0", tokenizer_path="canopylabs/orpheus-3b-0.1-ft"):
+    def __init__(self, model_name, dtype=torch.bfloat16, device="cuda:0"):
         # TODO: Zonos hybrid model is not yet supported
         super().__init__(model_name, device, dtype)
         config_path = hf_hub_download(repo_id=model_name, filename="config.json", revision=None)
@@ -663,7 +664,11 @@ class ZonosModel(BaseLM):
         with safetensors.safe_open(model_path, framework="pt") as f:
             for k in f.keys():
                 if k in self.model.state_dict():
+                    if self.model.state_dict()[k].shape != f.get_tensor(k).shape:
+                        raise ValueError(f"Shape mismatch for weight '{k}': expected {self.model.state_dict()[k].shape}, got {f.get_tensor(k).shape}")
                     self.model.state_dict()[k].copy_(f.get_tensor(k))
+                else:
+                    raise KeyError(f"Missing weight '{k}' in the model state_dict")
 
         # Use provided tokenizer path or default to model_name
         # self.text_tokenizer = self._load_tokenizer(tokenizer_path)
@@ -690,11 +695,12 @@ class ZonosModel(BaseLM):
         self.vocab_size = 1026 # self.model.config.backbone.vocab_size
 
         self.n_codebooks = 9
-        self.logit_bias = torch.zeros(self.n_codebooks, 1026, dtype=dtype, device=device)
+        self.logit_bias = torch.zeros(self.n_codebooks, 1025, dtype=dtype, device=device)
         self.logit_bias[1:, self.eos_token_id] = -torch.inf # only allow codebook 0 to predict EOS
 
         self.top_p = 1.0 
         self.temperature = 1.0
+        self.max_tokens = 1200 
 
         # if config.pad_vocab_to_multiple_of:
         #     self.register_load_state_dict_post_hook(self._pad_embeddings_and_heads)
@@ -839,9 +845,12 @@ class ZonosModel(BaseLM):
     ):
         """Forward pass through the model."""
         inputs_embeds = self.model.embed_tokens(input_ids)
+        print(f"{position_ids=}")
 
         if prefix_conditioning is not None:
+            print(f"{prefix_conditioning.shape=}, {prefix_conditioning=}") # should be [len, 2048]
             inputs_embeds[:prefix_conditioning.shape[0]] = prefix_conditioning
+            print(f"{inputs_embeds.shape=} {inputs_embeds=}")
 
         if cfg_scale != 1.0:
             inputs_embeds = inputs_embeds.repeat(2, 1) # for generation with CFG
@@ -853,6 +862,7 @@ class ZonosModel(BaseLM):
             attn_wrapper=attn_wrapper,
             kv_cache=kv_cache,
         )
+        print(f"{logits.shape=} {logits}")
         logits += self.logit_bias
         
         # logits = apply_repetition_penalty(logits, repetition_cache, self.repetition_penalty)
@@ -872,8 +882,8 @@ class ZonosModel(BaseLM):
         return token_id == self.eos_token_id
 
     def postprocess(self, tokens_list, next_audio_decode_idx, done_all):
-        print(tokens_list)
-        if len(tokens_list) == 100:
+        print(tokens_list[-1])
+        if len(tokens_list) == 10:
             # revert delay patterns
             seq_len = len(tokens_list)
             n_q = len(tokens_list[0])
