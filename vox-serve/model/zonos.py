@@ -4,11 +4,10 @@ import numpy as np
 import torch
 import re
 import unicodedata
+import json 
 
 import inflect
-from kanjize import number2kanji
 from phonemizer.backend import EspeakBackend
-from sudachipy import Dictionary, SplitMode
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -18,7 +17,7 @@ from transformers import LlamaConfig, LlamaPreTrainedModel
 from huggingface_hub import hf_hub_download
 import safetensors
 
-from ..tokenizer.snac import SNAC
+from ..tokenizer.dac import DAC
 from ..flashinfer_utils import FlashInferWrapper
 from ..sampling import top_p_sampling, apply_repetition_penalty
 from .base import BaseLM
@@ -451,7 +450,8 @@ def tokenize_phonemes(phonemes: list[str]) -> tuple[torch.Tensor, list[int]]:
     return torch.tensor(phoneme_ids), lengths
 
 
-def normalize_jp_text(text: str, tokenizer=Dictionary(dict="full").create()) -> str:
+def normalize_jp_text(text: str, tokenizer) -> str:
+    from kanjize import number2kanji
     text = unicodedata.normalize("NFKC", text)
     text = re.sub(r"\d+", lambda m: number2kanji(int(m[0])), text)
     final_text = " ".join([x.reading_form() for x in tokenizer.tokenize(text, SplitMode.A)])
@@ -462,7 +462,8 @@ def clean(texts: list[str], languages: list[str]) -> list[str]:
     texts_out = []
     for text, language in zip(texts, languages):
         if "ja" in language:
-            text = normalize_jp_text(text)
+            from sudachipy import Dictionary, SplitMode
+            text = normalize_jp_text(text, tokenizer=Dictionary(dict="full").create())
         else:
             text = normalize_numbers(text)
         texts_out.append(text)
@@ -610,10 +611,13 @@ supported_language_codes = [
 class ZonosForCausalLM(nn.Module):
 
     def __init__(self, config: ZonosConfig):
-        super().__init__(config)
+        super().__init__()
+        self.config = config
         dim = config.backbone.d_model
 
-        self.backbone = ZonosBackboneModel(config)
+        self.autoencoder = DAC()
+
+        self.backbone = ZonosBackboneModel(config.backbone)
         self.embeddings = nn.ModuleList([nn.Embedding(1026, dim) for _ in range(self.autoencoder.num_codebooks)])
         self.prefix_conditioner = ZonosPrefixConditioner(config.prefix_conditioner, dim)
         self.heads = nn.ModuleList([nn.Linear(dim, 1025, bias=False) for _ in range(self.autoencoder.num_codebooks)])
@@ -651,9 +655,10 @@ class ZonosModel(BaseLM):
         config_path = hf_hub_download(repo_id=model_name, filename="config.json", revision=None)
         model_path = hf_hub_download(repo_id=model_name, filename="model.safetensors", revision=None)
 
-        self.config = ZonosConfig.from_dict(torch.load(config_path))
+        self.config = ZonosConfig.from_dict(json.load(open(config_path)))
         self.model = ZonosForCausalLM(self.config)
         self.model.to(dtype).to(device)
+        self.model.autoencoder.dac.to(dtype).to(device)
 
         with safetensors.safe_open(model_path, framework="pt") as f:
             for k in f.keys():
@@ -661,14 +666,13 @@ class ZonosModel(BaseLM):
                     self.model.state_dict()[k].copy_(f.get_tensor(k))
 
         # Use provided tokenizer path or default to model_name
-        self.text_tokenizer = self._load_tokenizer(tokenizer_path)
+        # self.text_tokenizer = self._load_tokenizer(tokenizer_path)
         # self.audio_tokenizer = SNAC.from_pretrained("hubertsiuzdak/snac_24khz").eval().to(device)
 
         dim = self.config.backbone.d_model
         self.eos_token_id = self.config.eos_token_id
         self.masked_token_id = self.config.masked_token_id
 
-        self.autoencoder = DACAutoencoder()
         # self.prefix_conditioner = PrefixConditioner(config.prefix_conditioner, dim)
         self.spk_clone_model = None
 
@@ -679,11 +683,11 @@ class ZonosModel(BaseLM):
         self._cg_inference_params = None
         self._cg_scale = None
 
-        self._num_attention_heads = self.model.config.num_attention_heads 
-        self._num_key_value_heads = self.model.config.num_key_value_heads
-        self._num_hidden_layers = self.model.config.num_hidden_layers
-        self._hidden_size = self.model.config.hidden_size
-        self.vocab_size = self.model.config.vocab_size
+        self._num_attention_heads = self.model.config.backbone.attn_cfg["num_heads"]
+        self._num_key_value_heads = self.model.config.backbone.attn_cfg["num_heads_kv"]
+        self._num_hidden_layers = self.model.config.backbone.n_layer
+        self._hidden_size = self.model.config.backbone.d_model
+        self.vocab_size = 1026 # self.model.config.backbone.vocab_size
 
         self.n_codebooks = 9
         self.logit_bias = torch.zeros(self.n_codebooks, 1026, dtype=dtype, device=device)
@@ -796,7 +800,7 @@ class ZonosModel(BaseLM):
         return cond_dict
     
     def _prepare_conditioning(self, cond_dict: dict, uncond_dict: dict | None = None) -> torch.Tensor:
-        return self.model.prefix_conditioner(cond_dict)
+        return self.model.prefix_conditioner(cond_dict)[0]
 
         # TODO: uncond_dict for generation with CFG
 
@@ -818,8 +822,8 @@ class ZonosModel(BaseLM):
 
         # TODO: add API support for audio prefix
         prefix_tokens = torch.cat([
-            torch.zeros(prefix_conditioning.shape[0], dtype=torch.long),
-            torch.full(1, self.masked_token_id, dtype=torch.long), 
+            torch.zeros(prefix_conditioning.shape[0], 9, dtype=torch.long),
+            torch.full((1, 9), self.masked_token_id, dtype=torch.long), 
         ], dim=0)
         return prefix_tokens.tolist(), prefix_conditioning
     
@@ -868,4 +872,12 @@ class ZonosModel(BaseLM):
         return token_id == self.eos_token_id
 
     def postprocess(self, tokens_list, next_audio_decode_idx, done_all):
-        pass
+        print(tokens_list)
+        if len(tokens_list) == 100:
+            # revert delay patterns
+            seq_len = len(tokens_list)
+            n_q = len(tokens_list[0])
+            codes = torch.stack([codes[:, k, k + 1 : seq_len - n_q + k + 1] for k in range(n_q)], dim=1)
+            wavs = self.model.autoencoder.decode(codes)
+            return wavs, 200
+        return None, None
