@@ -19,6 +19,7 @@ from huggingface_hub import hf_hub_download
 import safetensors
 
 from ..tokenizer.dac import DAC
+from ..encoder.zonos import ZonosSpeakerEmbeddingLDA
 from ..flashinfer_utils import FlashInferWrapper
 from ..sampling import min_p_sampling, apply_repetition_penalty
 from .base import BaseLM
@@ -663,6 +664,7 @@ class ZonosModel(BaseLM):
         self.model = ZonosForCausalLM(self.config)
         self.model.to(dtype).to(device)
         self.model.autoencoder.dac.to(dtype).to(device)
+        self.speaker_encoder = ZonosSpeakerEmbeddingLDA(device=device)
         self.device = device
 
         with safetensors.safe_open(model_path, framework="pt") as f:
@@ -698,6 +700,7 @@ class ZonosModel(BaseLM):
         self.temperature = 1.0
         self.max_tokens = 1200 
 
+        self._get_default_speaker_embedding()
 
     @property
     def num_attention_heads(self) -> int:
@@ -719,6 +722,17 @@ class ZonosModel(BaseLM):
         """Hidden size of the model."""
         return self._hidden_size
 
+    def _get_default_speaker_embedding(self, device: torch.device | str = "cuda") -> torch.Tensor:
+        from ..utils import download_github_file
+        try:
+            wav, sr = torchaudio.load(
+                download_github_file("Zyphra", "Zonos", "assets/exampleaudio.mp3")
+            )
+            _, spk_embedding = self.speaker_encoder(wav.to(self.device), sr)
+            self.default_speaker_embedding = spk_embedding.unsqueeze(0).bfloat16()
+        except:
+            print("Failed to load default speaker embedding, using random embedding instead.")
+            self.default_speaker_embedding = None
 
     def _make_cond_dict(
         self,
@@ -767,6 +781,9 @@ class ZonosModel(BaseLM):
         By default, it will generate a random speaker embedding
         """
         assert language.lower() in supported_language_codes, "Please pick a supported language"
+
+        if speaker is None:
+            speaker = self.default_speaker_embedding
 
         language_code_to_id = {lang: i for i, lang in enumerate(supported_language_codes)}
 
