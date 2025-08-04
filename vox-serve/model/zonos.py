@@ -11,6 +11,7 @@ from phonemizer.backend import EspeakBackend
 import torch
 from torch import nn
 from torch.nn import functional as F
+import torchaudio
 from transformers.activations import ACT2FN
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from transformers import LlamaConfig, LlamaPreTrainedModel
@@ -19,7 +20,7 @@ import safetensors
 
 from ..tokenizer.dac import DAC
 from ..flashinfer_utils import FlashInferWrapper
-from ..sampling import top_p_sampling, apply_repetition_penalty
+from ..sampling import top_p_sampling, top_k_sampling, apply_repetition_penalty
 from .base import BaseLM
 
 
@@ -217,15 +218,18 @@ class ZonosAttention(nn.Module):
         kv_size = self.num_heads_kv * self.head_dim
         query_states, key_states, value_states = self.in_proj(hidden_states).split([q_size, kv_size, kv_size], dim=-1)
 
-        query_states = query_states.view(-1, self.num_heads, self.head_dim).transpose(0, 1)
-        key_states = key_states.view(-1, self.num_heads_kv, self.head_dim).transpose(0, 1)
-        value_states = value_states.view(-1, self.num_heads_kv, self.head_dim).transpose(0, 1)
+        query_states = query_states.view(-1, self.num_heads, self.head_dim) #.transpose(0, 1)
+        key_states = key_states.view(-1, self.num_heads_kv, self.head_dim) #.transpose(0, 1)
+        value_states = value_states.view(-1, self.num_heads_kv, self.head_dim) #.transpose(0, 1)
 
-        cos, sin = position_embeddings
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+        # cos, sin = position_embeddings
+        import flashinfer
+        query_states, key_states = flashinfer.rope.apply_rope_pos_ids(
+            query_states, key_states, pos_ids=position_ids, rope_theta=10000, interleave=True,
+        )
 
-        attn_wrapper.set_kv_cache(kv_cache, key_states.transpose(0, 1), value_states.transpose(0, 1))
-        attn_output = attn_wrapper.run(query_states.transpose(0, 1), kv_cache)
+        attn_wrapper.set_kv_cache(kv_cache, key_states, value_states)
+        attn_output = attn_wrapper.run(query_states, kv_cache)
 
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.out_proj(attn_output)
@@ -595,17 +599,17 @@ class ZonosPrefixConditioner(Conditioner):
 
 
 supported_language_codes = [
-        'af', 'am', 'an', 'ar', 'as', 'az', 'ba', 'bg', 'bn', 'bpy', 'bs', 'ca', 'cmn',
-        'cs', 'cy', 'da', 'de', 'el', 'en-029', 'en-gb', 'en-gb-scotland', 'en-gb-x-gbclan',
-        'en-gb-x-gbcwmd', 'en-gb-x-rp', 'en-us', 'eo', 'es', 'es-419', 'et', 'eu', 'fa',
-        'fa-latn', 'fi', 'fr-be', 'fr-ch', 'fr-fr', 'ga', 'gd', 'gn', 'grc', 'gu', 'hak',
-        'hi', 'hr', 'ht', 'hu', 'hy', 'hyw', 'ia', 'id', 'is', 'it', 'ja', 'jbo', 'ka',
-        'kk', 'kl', 'kn', 'ko', 'kok', 'ku', 'ky', 'la', 'lfn', 'lt', 'lv', 'mi', 'mk',
-        'ml', 'mr', 'ms', 'mt', 'my', 'nb', 'nci', 'ne', 'nl', 'om', 'or', 'pa', 'pap',
-        'pl', 'pt', 'pt-br', 'py', 'quc', 'ro', 'ru', 'ru-lv', 'sd', 'shn', 'si', 'sk',
-        'sl', 'sq', 'sr', 'sv', 'sw', 'ta', 'te', 'tn', 'tr', 'tt', 'ur', 'uz', 'vi',
-        'vi-vn-x-central', 'vi-vn-x-south', 'yue'
-    ]  # fmt: off
+    'af', 'am', 'an', 'ar', 'as', 'az', 'ba', 'bg', 'bn', 'bpy', 'bs', 'ca', 'cmn',
+    'cs', 'cy', 'da', 'de', 'el', 'en-029', 'en-gb', 'en-gb-scotland', 'en-gb-x-gbclan',
+    'en-gb-x-gbcwmd', 'en-gb-x-rp', 'en-us', 'eo', 'es', 'es-419', 'et', 'eu', 'fa',
+    'fa-latn', 'fi', 'fr-be', 'fr-ch', 'fr-fr', 'ga', 'gd', 'gn', 'grc', 'gu', 'hak',
+    'hi', 'hr', 'ht', 'hu', 'hy', 'hyw', 'ia', 'id', 'is', 'it', 'ja', 'jbo', 'ka',
+    'kk', 'kl', 'kn', 'ko', 'kok', 'ku', 'ky', 'la', 'lfn', 'lt', 'lv', 'mi', 'mk',
+    'ml', 'mr', 'ms', 'mt', 'my', 'nb', 'nci', 'ne', 'nl', 'om', 'or', 'pa', 'pap',
+    'pl', 'pt', 'pt-br', 'py', 'quc', 'ro', 'ru', 'ru-lv', 'sd', 'shn', 'si', 'sk',
+    'sl', 'sq', 'sr', 'sv', 'sw', 'ta', 'te', 'tn', 'tr', 'tt', 'ur', 'uz', 'vi',
+    'vi-vn-x-central', 'vi-vn-x-south', 'yue'
+]  # fmt: off
 
 
 class ZonosForCausalLM(nn.Module):
@@ -623,7 +627,6 @@ class ZonosForCausalLM(nn.Module):
         self.heads = nn.ModuleList([nn.Linear(dim, 1025, bias=False) for _ in range(self.autoencoder.num_codebooks)])
 
     def embed_tokens(self, input_ids):
-        print(f"{input_ids.shape=}")
         return sum(emb(input_ids[:, i]) for i, emb in enumerate(self.embeddings))
     
     # def get_input_embeddings(self):
@@ -660,6 +663,7 @@ class ZonosModel(BaseLM):
         self.model = ZonosForCausalLM(self.config)
         self.model.to(dtype).to(device)
         self.model.autoencoder.dac.to(dtype).to(device)
+        self.device = device
 
         with safetensors.safe_open(model_path, framework="pt") as f:
             for k in f.keys():
@@ -669,24 +673,16 @@ class ZonosModel(BaseLM):
                     self.model.state_dict()[k].copy_(f.get_tensor(k))
                 else:
                     raise KeyError(f"Missing weight '{k}' in the model state_dict")
-
-        # Use provided tokenizer path or default to model_name
-        # self.text_tokenizer = self._load_tokenizer(tokenizer_path)
-        # self.audio_tokenizer = SNAC.from_pretrained("hubertsiuzdak/snac_24khz").eval().to(device)
+            # Check for missing weights in the checkpoint that are not in the model
+            missing_in_model = set(f.keys()) - set(self.model.state_dict().keys())
+            if missing_in_model:
+                raise KeyError(f"The following weights are present in the checkpoint but missing in the model: {missing_in_model}")
 
         dim = self.config.backbone.d_model
         self.eos_token_id = self.config.eos_token_id
         self.masked_token_id = self.config.masked_token_id
 
-        # self.prefix_conditioner = PrefixConditioner(config.prefix_conditioner, dim)
         self.spk_clone_model = None
-
-        self._cg_graph = None
-        self._cg_batch_size = None
-        self._cg_input_ids = None
-        self._cg_logits = None
-        self._cg_inference_params = None
-        self._cg_scale = None
 
         self._num_attention_heads = self.model.config.backbone.attn_cfg["num_heads"]
         self._num_key_value_heads = self.model.config.backbone.attn_cfg["num_heads_kv"]
@@ -824,7 +820,7 @@ class ZonosModel(BaseLM):
         # self.validate_voice(voice)
         cond_dict = self._make_cond_dict(text=prompt)
         prefix_conditioning = self._prepare_conditioning(cond_dict)
-        print(f"{prefix_conditioning.shape=}, {prefix_conditioning.dtype=}") # should be [len, 2048]
+        # print(f"{prefix_conditioning.shape=}, {prefix_conditioning.dtype=}") # should be [len, 2048]
 
         # TODO: add API support for audio prefix
         prefix_tokens = torch.cat([
@@ -845,12 +841,9 @@ class ZonosModel(BaseLM):
     ):
         """Forward pass through the model."""
         inputs_embeds = self.model.embed_tokens(input_ids)
-        print(f"{position_ids=}")
 
         if prefix_conditioning is not None:
-            print(f"{prefix_conditioning.shape=}, {prefix_conditioning=}") # should be [len, 2048]
             inputs_embeds[:prefix_conditioning.shape[0]] = prefix_conditioning
-            print(f"{inputs_embeds.shape=} {inputs_embeds=}")
 
         if cfg_scale != 1.0:
             inputs_embeds = inputs_embeds.repeat(2, 1) # for generation with CFG
@@ -862,13 +855,16 @@ class ZonosModel(BaseLM):
             attn_wrapper=attn_wrapper,
             kv_cache=kv_cache,
         )
-        print(f"{logits.shape=} {logits}")
         logits += self.logit_bias
         
         # logits = apply_repetition_penalty(logits, repetition_cache, self.repetition_penalty)
 
         # output_ids = top_p_sampling(logits, top_p=self.top_p, temperature=self.temperature)
-        output_ids = torch.argmax(logits, dim=-1)
+        # output_ids = torch.argmax(logits, dim=-1)
+
+        output_ids = torch.zeros(logits.shape[0], logits.shape[1], dtype=torch.long, device=self.device)
+        for i in range(logits.shape[1]):
+            output_ids[:, i] = top_k_sampling(logits[:, i], top_k=10, temperature=self.temperature)
 
         if getattr(attn_wrapper, "qo_indptr", None) is not None:
             output_ids = output_ids[attn_wrapper.qo_indptr[:-1] - 1]
@@ -879,15 +875,20 @@ class ZonosModel(BaseLM):
     #     return self.text_tokenizer.decode(token_id)
     
     def is_stop_id(self, token_id):
-        return token_id == self.eos_token_id
+        return token_id[0] == self.eos_token_id
 
     def postprocess(self, tokens_list, next_audio_decode_idx, done_all):
-        print(tokens_list[-1])
-        if len(tokens_list) == 10:
+        if tokens_list[-1][0] == self.eos_token_id:
             # revert delay patterns
             seq_len = len(tokens_list)
             n_q = len(tokens_list[0])
-            codes = torch.stack([codes[:, k, k + 1 : seq_len - n_q + k + 1] for k in range(n_q)], dim=1)
-            wavs = self.model.autoencoder.decode(codes)
-            return wavs, 200
+            codes = torch.tensor(tokens_list, dtype=torch.long, device=self.device).view(seq_len, n_q)
+            codes = torch.stack([codes[k : seq_len - n_q + k, k] for k in range(n_q)], dim=0)
+            wavs = self.model.autoencoder.decode(codes[None, :, :])
+            
+            audio_24k = torchaudio.functional.resample(wavs[0], orig_freq=44100, new_freq=24000)
+            audio = audio_24k.detach().cpu().numpy()
+            audio_int16 = (audio * 32767).astype(np.int16) 
+            audio_bytes = audio_int16.tobytes()
+            return audio_bytes, 200
         return None, None

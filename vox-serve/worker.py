@@ -158,6 +158,11 @@ class ModelWorker:
                 # decode request
                 next_input_token = req.lm_output_tokens[-1]
 
+                # for zonos 
+                if len(req.lm_output_tokens) < 9:
+                    for i in range(len(req.lm_output_tokens), 9):
+                        next_input_token[i] = self.model.masked_token_id
+
                 req.kv_token_len += 1
                 req.kv_last_page_len += 1
                 if req.kv_last_page_len > self.page_size:
