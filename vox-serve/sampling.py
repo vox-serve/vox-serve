@@ -54,6 +54,18 @@ def top_k_top_p_sampling(logits, top_k, top_p, temperature, filter_apply_order="
 
     return samples
 
+def min_p_sampling(logits, min_p, temperature):
+    logits = logits / temperature
+    probs = torch.softmax(logits, dim=-1)
+
+    samples = flashinfer.sampling.min_p_sampling_from_probs(
+        probs=probs, 
+        min_p=min_p, 
+        deterministic=True,
+    )
+
+    return samples
+
 def apply_repetition_penalty(logits, repetition_cache, penalty):
     """
     Apply repetition penalty to logits based on the repetition cache.

@@ -20,7 +20,7 @@ import safetensors
 
 from ..tokenizer.dac import DAC
 from ..flashinfer_utils import FlashInferWrapper
-from ..sampling import top_p_sampling, top_k_sampling, apply_repetition_penalty
+from ..sampling import min_p_sampling, apply_repetition_penalty
 from .base import BaseLM
 
 
@@ -688,18 +688,15 @@ class ZonosModel(BaseLM):
         self._num_key_value_heads = self.model.config.backbone.attn_cfg["num_heads_kv"]
         self._num_hidden_layers = self.model.config.backbone.n_layer
         self._hidden_size = self.model.config.backbone.d_model
-        self.vocab_size = 1026 # self.model.config.backbone.vocab_size
+        self.vocab_size = 1026 
 
         self.n_codebooks = 9
         self.logit_bias = torch.zeros(self.n_codebooks, 1025, dtype=dtype, device=device)
         self.logit_bias[1:, self.eos_token_id] = -torch.inf # only allow codebook 0 to predict EOS
 
-        self.top_p = 1.0 
+        self.min_p = 0.1
         self.temperature = 1.0
         self.max_tokens = 1200 
-
-        # if config.pad_vocab_to_multiple_of:
-        #     self.register_load_state_dict_post_hook(self._pad_embeddings_and_heads)
 
 
     @property
@@ -817,12 +814,10 @@ class ZonosModel(BaseLM):
     
     def preprocess(self, prompt):
         """Prepare the prompt for the model, formatting it according to Orpheus specifications."""
-        # self.validate_voice(voice)
+        # TODO: add API support for custom voice
         cond_dict = self._make_cond_dict(text=prompt)
         prefix_conditioning = self._prepare_conditioning(cond_dict)
-        # print(f"{prefix_conditioning.shape=}, {prefix_conditioning.dtype=}") # should be [len, 2048]
 
-        # TODO: add API support for audio prefix
         prefix_tokens = torch.cat([
             torch.zeros(prefix_conditioning.shape[0], 9, dtype=torch.long),
             torch.full((1, 9), self.masked_token_id, dtype=torch.long), 
@@ -856,23 +851,15 @@ class ZonosModel(BaseLM):
             kv_cache=kv_cache,
         )
         logits += self.logit_bias
-        
-        # logits = apply_repetition_penalty(logits, repetition_cache, self.repetition_penalty)
-
-        # output_ids = top_p_sampling(logits, top_p=self.top_p, temperature=self.temperature)
-        # output_ids = torch.argmax(logits, dim=-1)
 
         output_ids = torch.zeros(logits.shape[0], logits.shape[1], dtype=torch.long, device=self.device)
         for i in range(logits.shape[1]):
-            output_ids[:, i] = top_k_sampling(logits[:, i], top_k=10, temperature=self.temperature)
+            output_ids[:, i] = min_p_sampling(logits[:, i], min_p=self.min_p, temperature=self.temperature)
 
         if getattr(attn_wrapper, "qo_indptr", None) is not None:
             output_ids = output_ids[attn_wrapper.qo_indptr[:-1] - 1]
 
         return output_ids
-    
-    # def decode_text_token(self, token_id):
-    #     return self.text_tokenizer.decode(token_id)
     
     def is_stop_id(self, token_id):
         return token_id[0] == self.eos_token_id
