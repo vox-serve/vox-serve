@@ -110,6 +110,16 @@ class ModelWorker:
         for i in range(self.max_num_pages):
             self.empty_pages.put(i)
     
+    @property
+    def detokenize_interval(self) -> int:
+        """Interval at which to detokenize outputs."""
+        return self.model.detokenize_interval
+    
+    @property
+    def detokenize_overlap(self) -> int:
+        """Overlap size for detokenization."""
+        return self.model.detokenize_overlap
+    
     def _prepare_lm_inputs(self, requests: List[Request]):
         """Prepare inputs for the LM step."""
         # flashinfer inputs
@@ -206,31 +216,6 @@ class ModelWorker:
             "input_features": input_features,
             "repetition_cache": repetition_cache,
         }
-
-    def _process_lm_outputs(
-        self, 
-        requests: List[Request], 
-        output_ids: torch.Tensor, 
-        qo_indptr: List[int] = None, 
-        is_decode: bool = False,
-    ):
-        """
-        Process the output IDs from the model and update the requests.
-        """
-        # output_ids = self.model.postprocess(output_ids)
-        for i, req in enumerate(requests):
-            req.lm_output_tokens.append(output_ids[i].tolist())
-        # if not is_decode:
-        #     # prefill
-        #     assert qo_indptr is not None 
-        #     for i, qo_idx in enumerate(qo_indptr[1:]):
-        #         requests[i].lm_output_tokens.append(output_ids[qo_idx - 1].item())
-        # else:
-        #     # decode
-        #     for i, req in enumerate(requests):
-        #         req.lm_output_tokens.append(output_ids[i].item())
-        
-        return
     
     def run_lm_prefill(self, requests: List[Request]):
         lm_inputs = self._prepare_lm_inputs(requests)
@@ -279,7 +264,9 @@ class ModelWorker:
             repetition_cache=repetition_cache,
         )
 
-        self._process_lm_outputs(requests, output_ids, qo_indptr, is_decode=False)
+        for i, req in enumerate(requests):
+            req.lm_output_tokens.append(output_ids[i].tolist())
+        
         return 
     
     def run_lm_decode(self, requests: List[Request]):
@@ -337,11 +324,14 @@ class ModelWorker:
             repetition_cache=repetition_cache,
         )
 
-        self._process_lm_outputs(requests, output_ids, is_decode=True)
+        for i, req in enumerate(requests):
+            req.lm_output_tokens.append(output_ids[i].tolist())
+
         return 
 
     def run_detokenize(self, requests: List[Request]):
-        # naive implementation for now 
+        if len(requests) == 0:
+            return
 
         # # For orpheus:
         # for req in requests:
@@ -355,17 +345,32 @@ class ModelWorker:
         #     else:
         #         req.is_audio_available = False
 
-        # for csm
-        for req in requests:
-            audio_samples, next_audio_decode_idx = self.model.postprocess(
-                req.lm_output_tokens, req.next_audio_decode_idx, req.done_all
-            )
-            if audio_samples is not None:
-                req.output_audio.append(audio_samples)
-                req.next_audio_decode_idx = next_audio_decode_idx
-                req.is_audio_available = True
-            else:
-                req.is_audio_available = False
+        token_ids = []
+        for req in requests: 
+            new_tokens = req.lm_output_tokens[req.next_audio_decode_idx : req.next_audio_decode_idx + self.detokenize_interval] 
+            
+            if req.done_all:
+                # exclude the last token since it is a stop token
+                new_tokens = new_tokens[:-1]
+
+            if len(new_tokens) < self.detokenize_interval:
+                new_tokens.extend([[0] * self.model.n_codebooks] * (self.detokenize_interval - len(new_tokens)))
+            token_ids.append(new_tokens)
+        
+        token_ids = torch.tensor(token_ids, device=self.device, dtype=torch.int32)
+
+        audio_tensors = self.model.postprocess(token_ids)
+
+        for i, req in enumerate(requests):
+            audio = audio_tensors[i].detach().cpu().numpy()
+            audio_int16 = (audio * 32767).astype(np.int16) 
+            audio_bytes = audio_int16.tobytes()
+            req.output_audio.put(audio_bytes)
+
+            if req.next_audio_decode_idx == 0:
+                # we need to adjust with overlap length only for the first chunk
+                req.next_audio_decode_idx -= self.detokenize_overlap
+            req.next_audio_decode_idx += self.detokenize_interval
         
         return
 

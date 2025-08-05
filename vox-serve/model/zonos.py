@@ -701,6 +701,7 @@ class ZonosModel(BaseLM):
         self.max_tokens = 1200 
         self.repetition_penalty = 3.0 
         self.repetition_penalty_window = 2
+        self._detokenize_interval = 50
 
         self._get_default_speaker_embedding()
 
@@ -728,6 +729,16 @@ class ZonosModel(BaseLM):
     def hidden_size(self) -> int:
         """Hidden size of the model."""
         return self._hidden_size
+
+    @property
+    def detokenize_interval(self) -> int:
+        """Interval at which to detokenize outputs."""
+        return self._detokenize_interval
+    
+    @property
+    def detokenize_overlap(self) -> int:
+        """Overlap size for detokenization."""
+        return self._n_codebooks
 
     def _get_default_speaker_embedding(self) -> torch.Tensor:
         from ..utils import download_github_file
@@ -931,21 +942,17 @@ class ZonosModel(BaseLM):
 
         return output_ids
     
-    def is_stop_id(self, token_id):
-        return token_id[0] == self.eos_token_id
+    def is_stop_id(self, token_ids: List[int]) -> bool:
+        return token_ids[0] == self.eos_token_id
 
-    def postprocess(self, tokens_list, next_audio_decode_idx, done_all):
-        if tokens_list[-1][0] == self.eos_token_id:
-            # revert delay patterns
-            seq_len = len(tokens_list)
-            n_q = len(tokens_list[0])
-            codes = torch.tensor(tokens_list, dtype=torch.long, device=self.device).view(seq_len, n_q)
-            codes = torch.stack([codes[k : seq_len - n_q + k, k] for k in range(n_q)], dim=0)
-            wavs = self.model.autoencoder.decode(codes[None, :, :])
-            
-            audio_24k = torchaudio.functional.resample(wavs[0], orig_freq=44100, new_freq=24000)
-            audio = audio_24k.detach().cpu().numpy()
-            audio_int16 = (audio * 32767).astype(np.int16) 
-            audio_bytes = audio_int16.tobytes()
-            return audio_bytes, 200
-        return None, None
+    def postprocess(self, token_ids: torch.Tensor):
+        interval = token_ids.shape[1]
+        n_q = token_ids.shape[2]
+
+        # revert delay patterns
+        codes = torch.stack([token_ids[:, k : interval - n_q + k, k] for k in range(n_q)], dim=1)
+
+        wavs = self.model.autoencoder.decode(codes)
+        audio_tensor = torchaudio.functional.resample(wavs, orig_freq=44100, new_freq=24000)
+
+        return audio_tensor
