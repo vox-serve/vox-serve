@@ -690,17 +690,24 @@ class ZonosModel(BaseLM):
         self._num_key_value_heads = self.model.config.backbone.attn_cfg["num_heads_kv"]
         self._num_hidden_layers = self.model.config.backbone.n_layer
         self._hidden_size = self.model.config.backbone.d_model
-        self.vocab_size = 1026 
+        self.vocab_size = 1025 # mask token is not included here since it's not predicted by LM heads
 
-        self.n_codebooks = 9
+        self._n_codebooks = self.model.autoencoder.num_codebooks
         self.logit_bias = torch.zeros(self.n_codebooks, 1025, dtype=dtype, device=device)
         self.logit_bias[1:, self.eos_token_id] = -torch.inf # only allow codebook 0 to predict EOS
 
         self.min_p = 0.1
         self.temperature = 1.0
         self.max_tokens = 1200 
+        self.repetition_penalty = 3.0 
+        self.repetition_penalty_window = 2
 
         self._get_default_speaker_embedding()
+
+    @property
+    def n_codebooks(self) -> int:
+        """Number of codebooks in the model."""
+        return self._n_codebooks
 
     @property
     def num_attention_heads(self) -> int:
@@ -722,7 +729,7 @@ class ZonosModel(BaseLM):
         """Hidden size of the model."""
         return self._hidden_size
 
-    def _get_default_speaker_embedding(self, device: torch.device | str = "cuda") -> torch.Tensor:
+    def _get_default_speaker_embedding(self) -> torch.Tensor:
         from ..utils import download_github_file
         try:
             wav, sr = torchaudio.load(
@@ -829,17 +836,26 @@ class ZonosModel(BaseLM):
         #     ]
         # )
     
-    def preprocess(self, prompt):
+    def preprocess(self, prompt: str):
         """Prepare the prompt for the model, formatting it according to Orpheus specifications."""
         # TODO: add API support for custom voice
         cond_dict = self._make_cond_dict(text=prompt)
         input_features = self._prepare_conditioning(cond_dict)
 
         prefix_tokens = torch.cat([
-            torch.zeros(input_features.shape[0], 9, dtype=torch.long),
-            torch.full((1, 9), self.masked_token_id, dtype=torch.long), 
+            torch.zeros(input_features.shape[0], self.n_codebooks, dtype=torch.long),
+            torch.full((1, self.n_codebooks), self.masked_token_id, dtype=torch.long), 
         ], dim=0)
-        return prefix_tokens.tolist(), {"input_features": input_features}
+
+        preprocess_dict = {
+            "input_features": input_features,
+            "repetition_cache": torch.zeros(
+                self.repetition_penalty_window, self.n_codebooks, self.vocab_size, 
+                dtype=torch.bool, device=self.device
+            ),
+        }
+
+        return prefix_tokens.tolist(), preprocess_dict
 
     def forward(
         self, 
@@ -878,13 +894,40 @@ class ZonosModel(BaseLM):
         self, 
         logits: torch.Tensor, 
         sampling_params: List[SamplingConfig] | None = None,
-        repetition_cache: torch.Tensor | None = None, 
+        repetition_cache: List[torch.Tensor] | None = None, 
         cfg_scale: float | None = None,
         **kwargs,
     ) -> torch.Tensor:
+        # apply repetition penalty
+        for i, cache in enumerate(repetition_cache):
+            if cache is None:
+                continue
+            # OR operation over window_size dimension. 
+            # TODO: penalty accumulation logic
+            appearance_mask = cache.any(dim=0)
+            logits[i] = torch.where(
+                (logits[i] > 0) & appearance_mask, 
+                logits[i] / self.repetition_penalty, 
+                logits[i],
+            )
+            logits[i] = torch.where(
+                (logits[i] <= 0) & appearance_mask, 
+                logits[i] * self.repetition_penalty, 
+                logits[i],
+            )
+
         output_ids = torch.zeros(logits.shape[0], logits.shape[1], dtype=torch.long, device=self.device)
-        for i in range(logits.shape[1]):
+        for i in range(self.n_codebooks):
             output_ids[:, i] = min_p_sampling(logits[:, i], min_p=self.min_p, temperature=self.temperature)
+        
+        # update repetition cache
+        for i, cache in enumerate(repetition_cache):
+            if cache is None:
+                continue
+            # shift the cache to the left and add the new token
+            cache[:-1] = cache[1:]
+            cache[-1] = torch.zeros(self.vocab_size, dtype=torch.bool, device=self.device)
+            cache[-1, torch.arange(self.n_codebooks), output_ids[i]] = True
 
         return output_ids
     

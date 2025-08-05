@@ -40,4 +40,4 @@ class Request:
     # optional inputs for inference or sampling
     input_features: torch.Tensor = None
     input_masks: torch.Tensor = None
-    repetition_cache: List[bool] = None
+    repetition_cache: torch.Tensor = None

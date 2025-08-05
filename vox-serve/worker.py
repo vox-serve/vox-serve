@@ -141,8 +141,12 @@ class ModelWorker:
                 if "input_masks" in preprocess_dict:
                     req.input_masks = preprocess_dict["input_masks"]
                 
+                if "repetition_cache" in preprocess_dict:
+                    req.repetition_cache = preprocess_dict["repetition_cache"]
+                
                 input_features.append(req.input_features)
                 input_masks.append(req.input_masks)
+                repetition_cache.append(req.repetition_cache)
                 
                 n_pages_to_allocate = (len(req.input_tokens) + self.page_size - 1) // self.page_size
                 req.kv_token_len = len(req.input_tokens)
@@ -163,17 +167,13 @@ class ModelWorker:
                 req.next_position_id = len(req.input_tokens) + 1
                 req.done_lm_prefill = True
 
-                req.repetition_cache = [False for _ in range(self.model.vocab_size)]
-                # for token in req.input_tokens:
-                #     req.repetition_cache[token] = True
-                repetition_cache.append(req.repetition_cache)
-
             else:
                 # decode request
                 next_input_token = req.lm_output_tokens[-1]
 
                 input_features.append(None)
                 input_masks.append(None)
+                repetition_cache.append(req.repetition_cache)
 
                 # for zonos 
                 if len(req.lm_output_tokens) < 9:
@@ -195,9 +195,6 @@ class ModelWorker:
                 position_ids.append(req.next_position_id)
 
                 req.next_position_id += 1
-
-                # req.repetition_cache[next_input_token] = True
-                repetition_cache.append(req.repetition_cache)
         
         return {
             "qo_indptr": qo_indptr,
@@ -254,7 +251,6 @@ class ModelWorker:
         paged_kv_indptr_tensor = torch.tensor(paged_kv_indptr, device=self.device, dtype=torch.int32)
         paged_kv_indices_tensor = torch.tensor(paged_kv_indices, device=self.device, dtype=torch.int32)
         paged_kv_last_page_len_tensor = torch.tensor(paged_kv_last_page_len, device=self.device, dtype=torch.int32)
-        repetition_cache_tensor = torch.tensor(repetition_cache, device=self.device, dtype=torch.bool)
 
         self.prefill_wrapper.plan(
             qo_indptr_tensor, 
@@ -280,6 +276,7 @@ class ModelWorker:
 
         output_ids = self.model.sampling(
             logits=logits,
+            repetition_cache=repetition_cache,
         )
 
         self._process_lm_outputs(requests, output_ids, qo_indptr, is_decode=False)
@@ -304,7 +301,6 @@ class ModelWorker:
         paged_kv_indptr_tensor = torch.tensor(paged_kv_indptr, device=self.device, dtype=torch.int32)
         paged_kv_indices_tensor = torch.tensor(paged_kv_indices, device=self.device, dtype=torch.int32)
         paged_kv_last_page_len_tensor = torch.tensor(paged_kv_last_page_len, device=self.device, dtype=torch.int32)
-        repetition_cache_tensor = torch.tensor(repetition_cache, device=self.device, dtype=torch.bool)
 
         self.decode_wrapper.plan(
             paged_kv_indptr_tensor, 
@@ -338,6 +334,7 @@ class ModelWorker:
 
         output_ids = self.model.sampling(
             logits=logits,
+            repetition_cache=repetition_cache,
         )
 
         self._process_lm_outputs(requests, output_ids, is_decode=True)

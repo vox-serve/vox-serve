@@ -26,6 +26,12 @@ class BaseLM(ABC):
     
     @property
     @abstractmethod
+    def n_codebooks(self) -> int:
+        """Number of codebooks in the model."""
+        pass
+    
+    @property
+    @abstractmethod
     def num_attention_heads(self) -> int:
         """Number of attention heads in the model."""
         pass
@@ -98,7 +104,7 @@ class BaseLM(ABC):
         Forward pass through the depth transformer for some models.
         
         Args:
-            input_ids: Input token IDs. Shape: (batch_size, n_codebook)
+            input_ids: Input token IDs. Shape: (batch_size, n_codebooks)
             position_ids: Position IDs for the tokens. Shape: (batch_size)
             attn_wrapper: FlashInfer attention wrapper
             kv_cache: KV cache tensor
@@ -115,7 +121,7 @@ class BaseLM(ABC):
         self, 
         logits: torch.Tensor, 
         sampling_params: List[SamplingConfig] | None,
-        repetition_cache: torch.Tensor | None, 
+        repetition_cache: List[torch.Tensor] | None, 
         cfg_scale: List[float] | None,
         **kwargs,
     ) -> torch.Tensor:
@@ -123,9 +129,11 @@ class BaseLM(ABC):
         Forward pass through the model.
         
         Args:
-            logits: Output logits from the model. Shape: (batch_size, vocab_size, hidden_size)
+            logits: Output logits from the model. Shape: (batch_size, n_codebooks, vocab_size)
             sampling_params: Optional list of sampling configurations
-            repetition_cache: Optional repetition cache tensor
+            repetition_cache: Optional repetition cache tensor. 
+                List of tensors with shape: (window_size, n_codebooks, vocab_size)
+                We don't make this a single tensor to enable in-place updates.
             cfg_scale: Optional classifier-free guidance scale
             **kwargs: Additional model-specific parameters
             
