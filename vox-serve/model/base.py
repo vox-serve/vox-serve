@@ -67,7 +67,6 @@ class BaseLM(ABC):
         """Overlap size for detokenization."""
         pass
 
-    @property
     @abstractmethod
     def is_stop_id(self, token_ids: List[int]) -> int:
         """
@@ -91,7 +90,7 @@ class BaseLM(ABC):
             **kwargs: Additional model-specific parameters
             
         Returns:
-            Tuple of (input_token_ids, formatted_prompt_string)
+            Tuple of (input_token_ids, preprocess_dict)
         """
         pass
     
@@ -115,7 +114,7 @@ class BaseLM(ABC):
             **kwargs: Additional model-specific parameters
             
         Returns:
-            Output logits tensor
+            Output logits tensor. Shape: (batch_size, n_codebooks, vocab_size)
         """
         pass
 

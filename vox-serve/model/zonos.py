@@ -21,7 +21,7 @@ import safetensors
 from ..tokenizer.dac import DAC
 from ..encoder.zonos import ZonosSpeakerEmbeddingLDA
 from ..flashinfer_utils import FlashInferWrapper
-from ..sampling import min_p_sampling, SamplingConfig
+from ..sampling import min_p_sampling, SamplingConfig, apply_repetition_penalty, update_repetition_penalty_cache
 from ..requests import Request
 from .base import BaseLM
 
@@ -741,6 +741,9 @@ class ZonosModel(BaseLM):
         """Overlap size for detokenization."""
         return self._n_codebooks
 
+    def is_stop_id(self, token_ids: List[int]) -> bool:
+        return token_ids[0] == self.eos_token_id
+
     def _get_default_speaker_embedding(self) -> torch.Tensor:
         from ..utils import download_github_file
         try:
@@ -913,18 +916,11 @@ class ZonosModel(BaseLM):
         for i, req in enumerate(requests):
             if req.repetition_cache is None:
                 continue
-            # OR operation over window_size dimension. 
-            # TODO: penalty accumulation logic
-            appearance_mask = req.repetition_cache.any(dim=0)
-            logits[i] = torch.where(
-                (logits[i] > 0) & appearance_mask, 
-                logits[i] / self.repetition_penalty, 
-                logits[i],
-            )
-            logits[i] = torch.where(
-                (logits[i] <= 0) & appearance_mask, 
-                logits[i] * self.repetition_penalty, 
-                logits[i],
+            
+            logits[i] = apply_repetition_penalty(
+                logits[i], 
+                req.repetition_cache, 
+                self.repetition_penalty
             )
 
         output_ids = torch.zeros(logits.shape[0], logits.shape[1], dtype=torch.long, device=self.device)
@@ -935,10 +931,12 @@ class ZonosModel(BaseLM):
         for i, req in enumerate(requests):
             if req.repetition_cache is None:
                 continue
-            # shift the cache to the left and add the new token
-            req.repetition_cache[:-1] = req.repetition_cache[1:]
-            req.repetition_cache[-1] = torch.zeros(self.vocab_size, dtype=torch.bool, device=self.device)
-            req.repetition_cache[-1, torch.arange(self.n_codebooks), output_ids[i]] = True
+            
+            update_repetition_penalty_cache(
+                req.repetition_cache, 
+                output_ids[i], 
+                self.repetition_penalty_window, 
+            )
 
             # mask part of the output tokens for the first n_codebooks - 1 tokens
             # use len(req.lm_output_tokens) + 1 since the output is not yet appended 
@@ -947,9 +945,6 @@ class ZonosModel(BaseLM):
                     output_ids[i, j] = self.masked_token_id
 
         return output_ids
-    
-    def is_stop_id(self, token_ids: List[int]) -> bool:
-        return token_ids[0] == self.eos_token_id
 
     def postprocess(self, token_ids: torch.Tensor):
         interval = token_ids.shape[1]
