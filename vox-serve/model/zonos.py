@@ -21,7 +21,7 @@ import safetensors
 from ..tokenizer.dac import DAC
 from ..encoder.zonos import ZonosSpeakerEmbeddingLDA
 from ..flashinfer_utils import FlashInferWrapper
-from ..sampling import min_p_sampling, apply_repetition_penalty
+from ..sampling import min_p_sampling, SamplingConfig
 from .base import BaseLM
 
 
@@ -843,14 +843,14 @@ class ZonosModel(BaseLM):
     
     def forward(
         self, 
-        input_ids, 
-        position_ids, 
-        attn_wrapper, 
-        kv_cache, 
+        input_ids: torch.Tensor, 
+        position_ids: torch.Tensor, 
+        attn_wrapper: FlashInferWrapper, 
+        kv_cache: torch.Tensor,
         repetition_cache, 
         prefix_conditioning = None,
         cfg_scale = 1.0,
-    ):
+    ) -> torch.Tensor:
         """Forward pass through the model."""
         inputs_embeds = self.model.embed_tokens(input_ids)
 
@@ -869,12 +869,22 @@ class ZonosModel(BaseLM):
         )
         logits += self.logit_bias
 
+        if getattr(attn_wrapper, "qo_indptr", None) is not None:
+            logits = logits[attn_wrapper.qo_indptr[:-1] - 1]
+
+        return logits
+    
+    def sampling(
+        self, 
+        logits: torch.Tensor, 
+        sampling_params: List[SamplingConfig] | None = None,
+        repetition_cache: torch.Tensor | None = None, 
+        cfg_scale: float | None = None,
+        **kwargs,
+    ) -> torch.Tensor:
         output_ids = torch.zeros(logits.shape[0], logits.shape[1], dtype=torch.long, device=self.device)
         for i in range(logits.shape[1]):
             output_ids[:, i] = min_p_sampling(logits[:, i], min_p=self.min_p, temperature=self.temperature)
-
-        if getattr(attn_wrapper, "qo_indptr", None) is not None:
-            output_ids = output_ids[attn_wrapper.qo_indptr[:-1] - 1]
 
         return output_ids
     

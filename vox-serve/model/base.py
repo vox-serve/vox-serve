@@ -1,8 +1,9 @@
 from abc import ABC, abstractmethod
-from typing import List, Tuple, Optional, Any
+from typing import List, Tuple, Optional, Any, Dict
 import torch
 
 from ..flashinfer_utils import FlashInferWrapper
+from ..sampling import SamplingConfig
 
 
 class BaseLM(ABC):
@@ -48,13 +49,12 @@ class BaseLM(ABC):
         pass
     
     @abstractmethod
-    def preprocess(self, prompt: str, voice: Optional[str] = None, **kwargs) -> Tuple[List[int], str]:
+    def preprocess(self, prompt: str, **kwargs) -> Tuple[List[List[int]], Dict[str, Any]]:
         """
         Preprocess the input prompt for the model.
         
         Args:
             prompt: Input text prompt
-            voice: Optional voice identifier
             **kwargs: Additional model-specific parameters
             
         Returns:
@@ -69,7 +69,7 @@ class BaseLM(ABC):
         position_ids: torch.Tensor, 
         attn_wrapper: FlashInferWrapper, 
         kv_cache: torch.Tensor,
-        repetition_cache: torch.Tensor,
+        **kwargs,
     ) -> torch.Tensor:
         """
         Forward pass through the model.
@@ -79,6 +79,55 @@ class BaseLM(ABC):
             position_ids: Position IDs for the tokens
             attn_wrapper: FlashInfer attention wrapper
             kv_cache: KV cache tensor
+            **kwargs: Additional model-specific parameters
+            
+        Returns:
+            Output logits tensor
+        """
+        pass
+
+    def depth_forward(
+        self, 
+        input_ids: torch.Tensor, 
+        position_ids: torch.Tensor, 
+        attn_wrapper: FlashInferWrapper, 
+        kv_cache: torch.Tensor,
+        **kwargs,
+    ) -> torch.Tensor:
+        """
+        Forward pass through the depth transformer for some models.
+        
+        Args:
+            input_ids: Input token IDs. Shape: (batch_size, n_codebook)
+            position_ids: Position IDs for the tokens. Shape: (batch_size)
+            attn_wrapper: FlashInfer attention wrapper
+            kv_cache: KV cache tensor
+            **kwargs: Additional model-specific parameters
+            
+        Returns:
+            Output logits tensor
+        """
+        assert self.has_depth_transformer, "This model does not support depth transformer."
+        pass
+
+    @abstractmethod
+    def sampling(
+        self, 
+        logits: torch.Tensor, 
+        sampling_params: List[SamplingConfig] | None,
+        repetition_cache: torch.Tensor | None, 
+        cfg_scale: float | None,
+        **kwargs,
+    ) -> torch.Tensor:
+        """
+        Forward pass through the model.
+        
+        Args:
+            logits: Output logits from the model. Shape: (batch_size, vocab_size, hidden_size)
+            sampling_params: Optional list of sampling configurations
+            repetition_cache: Optional repetition cache tensor
+            cfg_scale: Optional classifier-free guidance scale
+            **kwargs: Additional model-specific parameters
             
         Returns:
             Output token IDs from sampling
@@ -86,12 +135,12 @@ class BaseLM(ABC):
         pass
     
     @abstractmethod
-    def postprocess(self, token_sequence: List[int]) -> Optional[bytes]:
+    def postprocess(self, token_ids: List[List[int]]) -> Optional[bytes]:
         """
         Convert model output tokens to audio bytes.
         
         Args:
-            token_sequence: Sequence of output tokens (typically 28 tokens)
+            token_ids: 2D list of token IDs
             
         Returns:
             Audio bytes if conversion successful, None otherwise

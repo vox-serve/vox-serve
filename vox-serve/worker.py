@@ -240,7 +240,7 @@ class ModelWorker:
         torch.cuda.synchronize()
 
         # prefill run 
-        output_ids = self.model.forward(
+        logits = self.model.forward(
             input_ids=input_ids,
             position_ids=position_ids,
             attn_wrapper=self.prefill_wrapper,
@@ -250,6 +250,10 @@ class ModelWorker:
             # depth_kv_cache=self.depth_kv_cache,
             # tokens_mask=torch.tensor(requests[0].tokens_mask, device=self.device, dtype=torch.bool),
             prefix_conditioning=requests[0].prefix_conditioning if requests else None,
+        )
+
+        output_ids = self.model.sampling(
+            logits=logits,
         )
 
         self._process_lm_outputs(requests, output_ids, qo_indptr, is_decode=False)
@@ -285,8 +289,8 @@ class ModelWorker:
         #     [input_ids, torch.zeros(1, 1, device=self.device, dtype=torch.long)], dim=1
         # ) # text stream is 0
 
-        # prefill run 
-        output_ids = self.model.forward(
+        # decode run 
+        logits = self.model.forward(
             input_ids=input_ids,
             position_ids=position_ids,
             attn_wrapper=self.decode_wrapper,
@@ -295,6 +299,10 @@ class ModelWorker:
             # depth_attn_wrapper=self.depth_attn_wrapper,
             # depth_kv_cache=self.depth_kv_cache,
             # tokens_mask=curr_tokens_mask,
+        )
+
+        output_ids = self.model.sampling(
+            logits=logits,
         )
 
         self._process_lm_outputs(requests, output_ids, is_decode=True)
