@@ -4,6 +4,7 @@ import torch
 
 from ..flashinfer_utils import FlashInferWrapper
 from ..sampling import SamplingConfig
+from ..requests import Request
 
 
 class BaseLM(ABC):
@@ -146,9 +147,9 @@ class BaseLM(ABC):
     def sampling(
         self, 
         logits: torch.Tensor, 
-        sampling_params: List[SamplingConfig] | None,
-        repetition_cache: List[torch.Tensor] | None, 
-        cfg_scale: List[float] | None,
+        requests: List[Request],
+        sampling_params: SamplingConfig | None,
+        cfg_scale: float | None,
         **kwargs,
     ) -> torch.Tensor:
         """
@@ -156,11 +157,9 @@ class BaseLM(ABC):
         
         Args:
             logits: Output logits from the model. Shape: (batch_size, n_codebooks, vocab_size)
-            sampling_params: Optional list of sampling configurations
-            repetition_cache: Optional repetition cache tensor. 
-                List of tensors with shape: (window_size, n_codebooks, vocab_size)
-                We don't make this a single tensor to enable in-place updates.
-            cfg_scale: Optional classifier-free guidance scale
+            requests: List of Request objects containing sampling configurations etc.
+            sampling_params: Optional common sampling configurations
+            cfg_scale: Optional common classifier-free guidance scale
             **kwargs: Additional model-specific parameters
             
         Returns:

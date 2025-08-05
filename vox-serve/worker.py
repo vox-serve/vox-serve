@@ -185,10 +185,10 @@ class ModelWorker:
                 input_masks.append(None)
                 repetition_cache.append(req.repetition_cache)
 
-                # for zonos 
-                if len(req.lm_output_tokens) < 9:
-                    for i in range(len(req.lm_output_tokens), 9):
-                        next_input_token[i] = self.model.masked_token_id
+                # # for zonos 
+                # if len(req.lm_output_tokens) < 9:
+                #     for i in range(len(req.lm_output_tokens), 9):
+                #         next_input_token[i] = self.model.masked_token_id
 
                 req.kv_token_len += 1
                 req.kv_last_page_len += 1
@@ -261,7 +261,7 @@ class ModelWorker:
 
         output_ids = self.model.sampling(
             logits=logits,
-            repetition_cache=repetition_cache,
+            requests=requests,
         )
 
         for i, req in enumerate(requests):
@@ -321,7 +321,7 @@ class ModelWorker:
 
         output_ids = self.model.sampling(
             logits=logits,
-            repetition_cache=repetition_cache,
+            requests=requests,
         )
 
         for i, req in enumerate(requests):
@@ -354,7 +354,7 @@ class ModelWorker:
                 new_tokens = new_tokens[:-1]
 
             if len(new_tokens) < self.detokenize_interval:
-                new_tokens.extend([[0] * self.model.n_codebooks] * (self.detokenize_interval - len(new_tokens)))
+                new_tokens.extend([new_tokens[-1]] * (self.detokenize_interval - len(new_tokens)))
             
             token_ids.append(new_tokens)
         
@@ -369,7 +369,7 @@ class ModelWorker:
             last_chunk_len = len(req.lm_output_tokens[req.next_audio_decode_idx : req.next_audio_decode_idx + self.detokenize_interval])
             if last_chunk_len < self.detokenize_interval:
                 # remove the padded audio
-                audio_int16 = audio_int16[:int(len(audio_int16) * last_chunk_len / self.detokenize_interval)]
+                audio_int16 = audio_int16[:int(audio_int16.shape[1] * last_chunk_len / self.detokenize_interval)]
 
             audio_bytes = audio_int16.tobytes()
             req.output_audio.put(audio_bytes)

@@ -9,6 +9,7 @@ class SamplingConfig:
     temperature: float
     repetition_penalty: float
     repetition_window: int
+    cfg_scale: float
 
 def greedy_sampling(logits):
     """

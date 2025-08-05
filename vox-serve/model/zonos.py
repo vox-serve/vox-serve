@@ -22,6 +22,7 @@ from ..tokenizer.dac import DAC
 from ..encoder.zonos import ZonosSpeakerEmbeddingLDA
 from ..flashinfer_utils import FlashInferWrapper
 from ..sampling import min_p_sampling, SamplingConfig
+from ..requests import Request
 from .base import BaseLM
 
 
@@ -698,7 +699,7 @@ class ZonosModel(BaseLM):
 
         self.min_p = 0.1
         self.temperature = 1.0
-        self.max_tokens = 1200 
+        self.max_tokens = 2048 
         self.repetition_penalty = 3.0 
         self.repetition_penalty_window = 2
         self._detokenize_interval = 50
@@ -904,18 +905,17 @@ class ZonosModel(BaseLM):
     def sampling(
         self, 
         logits: torch.Tensor, 
-        sampling_params: List[SamplingConfig] | None = None,
-        repetition_cache: List[torch.Tensor] | None = None, 
+        requests: List[Request],
+        sampling_params: SamplingConfig | None = None,
         cfg_scale: float | None = None,
-        **kwargs,
     ) -> torch.Tensor:
         # apply repetition penalty
-        for i, cache in enumerate(repetition_cache):
-            if cache is None:
+        for i, req in enumerate(requests):
+            if req.repetition_cache is None:
                 continue
             # OR operation over window_size dimension. 
             # TODO: penalty accumulation logic
-            appearance_mask = cache.any(dim=0)
+            appearance_mask = req.repetition_cache.any(dim=0)
             logits[i] = torch.where(
                 (logits[i] > 0) & appearance_mask, 
                 logits[i] / self.repetition_penalty, 
@@ -932,13 +932,19 @@ class ZonosModel(BaseLM):
             output_ids[:, i] = min_p_sampling(logits[:, i], min_p=self.min_p, temperature=self.temperature)
         
         # update repetition cache
-        for i, cache in enumerate(repetition_cache):
-            if cache is None:
+        for i, req in enumerate(requests):
+            if req.repetition_cache is None:
                 continue
             # shift the cache to the left and add the new token
-            cache[:-1] = cache[1:]
-            cache[-1] = torch.zeros(self.vocab_size, dtype=torch.bool, device=self.device)
-            cache[-1, torch.arange(self.n_codebooks), output_ids[i]] = True
+            req.repetition_cache[:-1] = req.repetition_cache[1:]
+            req.repetition_cache[-1] = torch.zeros(self.vocab_size, dtype=torch.bool, device=self.device)
+            req.repetition_cache[-1, torch.arange(self.n_codebooks), output_ids[i]] = True
+
+            # mask part of the output tokens for the first n_codebooks - 1 tokens
+            # use len(req.lm_output_tokens) + 1 since the output is not yet appended 
+            if len(req.lm_output_tokens) + 1 < self.n_codebooks:
+                for j in range(len(req.lm_output_tokens) + 1, self.n_codebooks):
+                    output_ids[i, j] = self.masked_token_id
 
         return output_ids
     
