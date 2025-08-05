@@ -355,6 +355,7 @@ class ModelWorker:
 
             if len(new_tokens) < self.detokenize_interval:
                 new_tokens.extend([[0] * self.model.n_codebooks] * (self.detokenize_interval - len(new_tokens)))
+            
             token_ids.append(new_tokens)
         
         token_ids = torch.tensor(token_ids, device=self.device, dtype=torch.int32)
@@ -364,13 +365,16 @@ class ModelWorker:
         for i, req in enumerate(requests):
             audio = audio_tensors[i].detach().cpu().numpy()
             audio_int16 = (audio * 32767).astype(np.int16) 
+
+            last_chunk_len = len(req.lm_output_tokens[req.next_audio_decode_idx : req.next_audio_decode_idx + self.detokenize_interval])
+            if last_chunk_len < self.detokenize_interval:
+                # remove the padded audio
+                audio_int16 = audio_int16[:int(len(audio_int16) * last_chunk_len / self.detokenize_interval)]
+
             audio_bytes = audio_int16.tobytes()
             req.output_audio.put(audio_bytes)
 
-            if req.next_audio_decode_idx == 0:
-                # we need to adjust with overlap length only for the first chunk
-                req.next_audio_decode_idx -= self.detokenize_overlap
-            req.next_audio_decode_idx += self.detokenize_interval
+            req.next_audio_decode_idx += self.detokenize_interval - self.detokenize_overlap
         
         return
 
