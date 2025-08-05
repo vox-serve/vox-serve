@@ -112,23 +112,37 @@ class ModelWorker:
     
     def _prepare_lm_inputs(self, requests: List[Request]):
         """Prepare inputs for the LM step."""
+        # flashinfer inputs
         qo_indptr = [0] 
         paged_kv_indptr = [0] 
         paged_kv_indices = [] 
         paged_kv_last_page_len = [] 
 
+        # necessary inference inputs
         input_ids = [] 
         position_ids = []
 
-        repetition_cache_all = []
+        # optional inference inputs 
+        input_features = []
+        input_masks = []
+
+        # sampling inputs
+        # TODO: sampling params, cfg scale
+        repetition_cache = []
 
         for req in requests:
             if not req.done_lm_prefill:
                 # prefill request
-                # csm
-                # req.input_tokens, req.tokens_mask = self.model.preprocess(req.prompt)
-                # zonos
-                req.input_tokens, req.prefix_conditioning = self.model.preprocess(req.prompt)
+                req.input_tokens, preprocess_dict = self.model.preprocess(req.prompt)
+
+                if "input_features" in preprocess_dict:
+                    req.input_features = preprocess_dict["input_features"] 
+                
+                if "input_masks" in preprocess_dict:
+                    req.input_masks = preprocess_dict["input_masks"]
+                
+                input_features.append(req.input_features)
+                input_masks.append(req.input_masks)
                 
                 n_pages_to_allocate = (len(req.input_tokens) + self.page_size - 1) // self.page_size
                 req.kv_token_len = len(req.input_tokens)
@@ -152,11 +166,14 @@ class ModelWorker:
                 req.repetition_cache = [False for _ in range(self.model.vocab_size)]
                 # for token in req.input_tokens:
                 #     req.repetition_cache[token] = True
-                repetition_cache_all.append(req.repetition_cache)
+                repetition_cache.append(req.repetition_cache)
 
             else:
                 # decode request
                 next_input_token = req.lm_output_tokens[-1]
+
+                input_features.append(None)
+                input_masks.append(None)
 
                 # for zonos 
                 if len(req.lm_output_tokens) < 9:
@@ -180,17 +197,18 @@ class ModelWorker:
                 req.next_position_id += 1
 
                 # req.repetition_cache[next_input_token] = True
-                repetition_cache_all.append(req.repetition_cache)
+                repetition_cache.append(req.repetition_cache)
         
-        return (
-            qo_indptr, 
-            paged_kv_indptr, 
-            paged_kv_indices, 
-            paged_kv_last_page_len, 
-            input_ids, 
-            position_ids,
-            repetition_cache_all
-        )
+        return {
+            "qo_indptr": qo_indptr,
+            "paged_kv_indptr": paged_kv_indptr,
+            "paged_kv_indices": paged_kv_indices,
+            "paged_kv_last_page_len": paged_kv_last_page_len,
+            "input_ids": input_ids,
+            "position_ids": position_ids,
+            "input_features": input_features,
+            "repetition_cache": repetition_cache,
+        }
 
     def _process_lm_outputs(
         self, 
@@ -218,8 +236,16 @@ class ModelWorker:
         return
     
     def run_lm_prefill(self, requests: List[Request]):
-        qo_indptr, paged_kv_indptr, paged_kv_indices, paged_kv_last_page_len, \
-        input_ids, position_ids, repetition_cache = self._prepare_lm_inputs(requests)
+        lm_inputs = self._prepare_lm_inputs(requests)
+        
+        qo_indptr = lm_inputs["qo_indptr"]
+        paged_kv_indptr = lm_inputs["paged_kv_indptr"]
+        paged_kv_indices = lm_inputs["paged_kv_indices"]
+        paged_kv_last_page_len = lm_inputs["paged_kv_last_page_len"]
+        input_ids = lm_inputs["input_ids"]
+        position_ids = lm_inputs["position_ids"]
+        input_features = lm_inputs["input_features"]
+        repetition_cache = lm_inputs["repetition_cache"]
 
         input_ids = torch.tensor(input_ids, device=self.device, dtype=torch.int32)
         position_ids = torch.tensor(position_ids, device=self.device, dtype=torch.int32)
@@ -245,11 +271,11 @@ class ModelWorker:
             position_ids=position_ids,
             attn_wrapper=self.prefill_wrapper,
             kv_cache=self.kv_cache,
-            repetition_cache=repetition_cache_tensor,
+            # repetition_cache=repetition_cache_tensor,
             # depth_attn_wrapper=self.depth_attn_wrapper,
             # depth_kv_cache=self.depth_kv_cache,
             # tokens_mask=torch.tensor(requests[0].tokens_mask, device=self.device, dtype=torch.bool),
-            prefix_conditioning=requests[0].prefix_conditioning if requests else None,
+            input_features=input_features,
         )
 
         output_ids = self.model.sampling(
@@ -260,8 +286,16 @@ class ModelWorker:
         return 
     
     def run_lm_decode(self, requests: List[Request]):
-        qo_indptr, paged_kv_indptr, paged_kv_indices, paged_kv_last_page_len, \
-        input_ids, position_ids, repetition_cache = self._prepare_lm_inputs(requests)
+        lm_inputs = self._prepare_lm_inputs(requests)
+        
+        qo_indptr = lm_inputs["qo_indptr"]
+        paged_kv_indptr = lm_inputs["paged_kv_indptr"]
+        paged_kv_indices = lm_inputs["paged_kv_indices"]
+        paged_kv_last_page_len = lm_inputs["paged_kv_last_page_len"]
+        input_ids = lm_inputs["input_ids"]
+        position_ids = lm_inputs["position_ids"]
+        input_features = lm_inputs["input_features"]
+        repetition_cache = lm_inputs["repetition_cache"]
 
         input_ids = torch.tensor(input_ids, device=self.device, dtype=torch.int32)
         position_ids = torch.tensor(position_ids, device=self.device, dtype=torch.int32)
@@ -295,10 +329,11 @@ class ModelWorker:
             position_ids=position_ids,
             attn_wrapper=self.decode_wrapper,
             kv_cache=self.kv_cache,
-            repetition_cache=repetition_cache_tensor,
+            # repetition_cache=repetition_cache_tensor,
             # depth_attn_wrapper=self.depth_attn_wrapper,
             # depth_kv_cache=self.depth_kv_cache,
             # tokens_mask=curr_tokens_mask,
+            input_features=input_features,
         )
 
         output_ids = self.model.sampling(

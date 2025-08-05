@@ -833,33 +833,33 @@ class ZonosModel(BaseLM):
         """Prepare the prompt for the model, formatting it according to Orpheus specifications."""
         # TODO: add API support for custom voice
         cond_dict = self._make_cond_dict(text=prompt)
-        prefix_conditioning = self._prepare_conditioning(cond_dict)
+        input_features = self._prepare_conditioning(cond_dict)
 
         prefix_tokens = torch.cat([
-            torch.zeros(prefix_conditioning.shape[0], 9, dtype=torch.long),
+            torch.zeros(input_features.shape[0], 9, dtype=torch.long),
             torch.full((1, 9), self.masked_token_id, dtype=torch.long), 
         ], dim=0)
-        return prefix_tokens.tolist(), prefix_conditioning
-    
+        return prefix_tokens.tolist(), {"input_features": input_features}
+
     def forward(
         self, 
         input_ids: torch.Tensor, 
         position_ids: torch.Tensor, 
         attn_wrapper: FlashInferWrapper, 
         kv_cache: torch.Tensor,
-        repetition_cache, 
-        prefix_conditioning = None,
-        cfg_scale = 1.0,
+        input_features: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Forward pass through the model."""
         inputs_embeds = self.model.embed_tokens(input_ids)
 
-        if prefix_conditioning is not None:
-            inputs_embeds[:prefix_conditioning.shape[0]] = prefix_conditioning
-
-        if cfg_scale != 1.0:
-            inputs_embeds = inputs_embeds.repeat(2, 1) # for generation with CFG
-            raise NotImplementedError 
+        if getattr(attn_wrapper, "qo_indptr", None) is not None:
+            # includes prefill request
+            for i, feature in enumerate(input_features):
+                if feature is None:
+                    continue 
+                
+                # In Zonos, the prompt tokens except for the last one are filled with feature embeddings
+                inputs_embeds[attn_wrapper.qo_indptr[i] : attn_wrapper.qo_indptr[i + 1] - 1] = feature
         
         logits = self.model(
             inputs_embeds=inputs_embeds,

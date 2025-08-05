@@ -116,7 +116,7 @@ class BaseLM(ABC):
         logits: torch.Tensor, 
         sampling_params: List[SamplingConfig] | None,
         repetition_cache: torch.Tensor | None, 
-        cfg_scale: float | None,
+        cfg_scale: List[float] | None,
         **kwargs,
     ) -> torch.Tensor:
         """

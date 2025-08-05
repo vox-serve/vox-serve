@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from typing import Optional, Union, List
 
 import numpy as np 
+import torch
 
 from .sampling import SamplingConfig
 
@@ -36,6 +37,7 @@ class Request:
     # future optimization 
     is_pressing: bool = False 
     
-    # cache for calculating repetition penalty, boolean list of length vocab_size
+    # optional inputs for inference or sampling
+    input_features: torch.Tensor = None
+    input_masks: torch.Tensor = None
     repetition_cache: List[bool] = None
-    tokens_mask: List[bool] = None
