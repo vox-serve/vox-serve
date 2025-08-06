@@ -344,7 +344,7 @@ class OrpheusModel(BaseLM):
         self._hidden_size = self.model.config.hidden_size
         self.vocab_size = self.model.config.vocab_size
 
-        self.stop_token_id = 49158
+        self.stop_token_id = 128258
         self.temperature = 0.6 
         self.top_p = 0.8 
         self.max_tokens = 1200 
@@ -443,7 +443,6 @@ class OrpheusModel(BaseLM):
                 device=self.device,
             ),
         }
-        print(f"{input_ids.shape=}")
         return input_ids.tolist(), preprocess_dict
     
     def forward(
@@ -512,42 +511,18 @@ class OrpheusModel(BaseLM):
 
     def postprocess(self, token_ids: torch.Tensor):
         """Convert token IDs to audio bytes."""
-        # 1) Turn the list of length=28 into a (4×7) tensor
-        print(f"{token_ids.shape=} {token_ids.flatten().cpu().tolist()=}")  # [bs, 28, 1]
         mf = token_ids.view(-1, 4, 7)
         mf = self._turn_token_into_id(mf)
 
-        # 2) codes_0: take column 0 from each of the 4 rows → shape (4,)
-        codes_0 = mf[:, :, 0] # [[f0[0], f1[0], f2[0], f3[0]], ..]
-        # #    then add a batch‐dim → (1, 4)
-        # codes_0 = codes_0.unsqueeze(0)
-
-        # 3) codes_1: for each row i, take [col 1, col 4] → gives shape (4, 2)
-        #    then .reshape(-1) flattens row‐by‐row: [f0[1], f0[4], f1[1], f1[4], …]
-        codes_1 = mf[:, :, [1, 4]].view(-1, 8)    # shape (8,)
-        # codes_1 = codes_1.unsqueeze(0)         # → (1, 8)
-
-        # 4) codes_2: for each row i, take [col 2, col 3, col 5, col 6] → shape (4, 4)
-        #    then flatten row‐by‐row: [f0[2],f0[3],f0[5],f0[6], f1[2],…]
-        codes_2 = mf[:, :, [2, 3, 5, 6]].view(-1, 16)  # shape (16,)
-        # codes_2 = codes_2.unsqueeze(0)             # → (1, 16)
+        codes_0 = mf[:, :, 0] 
+        codes_1 = mf[:, :, [1, 4]].view(-1, 8)
+        codes_2 = mf[:, :, [2, 3, 5, 6]].view(-1, 16) 
 
         codes = [codes_0, codes_1, codes_2]
 
-        # # 5) Range‐check every code
-        # for c in codes:
-        #     if torch.any(c < 0) or torch.any(c > 4096):
-        #         return
-
-        # 6) Decode under inference_mode (all shapes are now fixed)
         with torch.inference_mode():
             audio_tensor = self.audio_tokenizer.decode(codes)
-            #    audio_hat.shape == [1, 1, 8192]
 
-        # 7) Slice [2048:4096], move to CPU, convert to int16, return bytes
-        audio_tensor = audio_tensor[:, :, 2048:4096]            # (1, 1, 2048)
+        # Slice [2048:4096]
+        audio_tensor = audio_tensor[:, :, 2048:4096]
         return audio_tensor
-        # arr = audio_slice.detach().cpu().numpy()            # (1, 1, 2048)
-        # audio_int16 = (arr * 32767).astype(np.int16)        # still (1, 1, 2048)
-        # audio_bytes = audio_int16.tobytes()
-        # return audio_bytes, next_audio_decode_idx + 7
