@@ -245,157 +245,155 @@ class Conditioner(nn.Module):
         return cond
 
 
-_inflect = inflect.engine()
-_comma_number_re = re.compile(r"([0-9][0-9\,]+[0-9])")
-_decimal_number_re = re.compile(r"([0-9]+\.[0-9]+)")
-_pounds_re = re.compile(r"£([0-9\,]*[0-9]+)")
-_dollars_re = re.compile(r"\$([0-9\.\,]*[0-9]+)")
-_ordinal_re = re.compile(r"[0-9]+(st|nd|rd|th)")
-_number_re = re.compile(r"[0-9]+")
+class ZonosUtils:
+    _inflect = inflect.engine()
+    _comma_number_re = re.compile(r"([0-9][0-9\,]+[0-9])")
+    _decimal_number_re = re.compile(r"([0-9]+\.[0-9]+)")
+    _pounds_re = re.compile(r"£([0-9\,]*[0-9]+)")
+    _dollars_re = re.compile(r"\$([0-9\.\,]*[0-9]+)")
+    _ordinal_re = re.compile(r"[0-9]+(st|nd|rd|th)")
+    _number_re = re.compile(r"[0-9]+")
 
+    PAD_ID, UNK_ID, BOS_ID, EOS_ID = 0, 1, 2, 3
+    SPECIAL_TOKEN_IDS = [PAD_ID, UNK_ID, BOS_ID, EOS_ID]
 
-def _remove_commas(m: re.Match) -> str:
-    return m.group(1).replace(",", "")
-
-
-def _expand_decimal_point(m: re.Match) -> str:
-    return m.group(1).replace(".", " point ")
-
-
-def _expand_dollars(m: re.Match) -> str:
-    match = m.group(1)
-    parts = match.split(".")
-    if len(parts) > 2:
-        return match + " dollars"  # Unexpected format
-    dollars = int(parts[0]) if parts[0] else 0
-    cents = int(parts[1]) if len(parts) > 1 and parts[1] else 0
-    if dollars and cents:
-        dollar_unit = "dollar" if dollars == 1 else "dollars"
-        cent_unit = "cent" if cents == 1 else "cents"
-        return "%s %s, %s %s" % (dollars, dollar_unit, cents, cent_unit)
-    elif dollars:
-        dollar_unit = "dollar" if dollars == 1 else "dollars"
-        return "%s %s" % (dollars, dollar_unit)
-    elif cents:
-        cent_unit = "cent" if cents == 1 else "cents"
-        return "%s %s" % (cents, cent_unit)
-    else:
-        return "zero dollars"
-
-
-def _expand_ordinal(m: re.Match) -> str:
-    return _inflect.number_to_words(m.group(0))
-
-
-def _expand_number(m: re.Match) -> str:
-    num = int(m.group(0))
-    if num > 1000 and num < 3000:
-        if num == 2000:
-            return "two thousand"
-        elif num > 2000 and num < 2010:
-            return "two thousand " + _inflect.number_to_words(num % 100)
-        elif num % 100 == 0:
-            return _inflect.number_to_words(num // 100) + " hundred"
-        else:
-            return _inflect.number_to_words(num, andword="", zero="oh", group=2).replace(", ", " ")
-    else:
-        return _inflect.number_to_words(num, andword="")
-
-
-def normalize_numbers(text: str) -> str:
-    text = re.sub(_comma_number_re, _remove_commas, text)
-    text = re.sub(_pounds_re, r"\1 pounds", text)
-    text = re.sub(_dollars_re, _expand_dollars, text)
-    text = re.sub(_decimal_number_re, _expand_decimal_point, text)
-    text = re.sub(_ordinal_re, _expand_ordinal, text)
-    text = re.sub(_number_re, _expand_number, text)
-    return text
-
-
-
-PAD_ID, UNK_ID, BOS_ID, EOS_ID = 0, 1, 2, 3
-SPECIAL_TOKEN_IDS = [PAD_ID, UNK_ID, BOS_ID, EOS_ID]
-
-_punctuation = ';:,.!?¡¿—…"«»“”() *~-/\\&'
-_letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-_letters_ipa = (
-    "ɑɐɒæɓʙβɔɕçɗɖðʤəɘɚɛɜɝɞɟʄɡɠɢʛɦɧħɥʜɨɪʝɭɬɫɮʟɱɯɰŋɳɲɴøɵɸθœɶʘɹɺɾɻʀʁɽʂʃʈʧʉʊʋⱱʌɣɤʍχʎʏʑʐʒʔʡʕʢǀǁǂǃˈˌːˑʼʴʰʱʲʷˠˤ˞↓↑→↗↘'̩'ᵻ"
-)
-
-symbols = [*_punctuation, *_letters, *_letters_ipa]
-_symbol_to_id = {s: i for i, s in enumerate(symbols, start=len(SPECIAL_TOKEN_IDS))}
-
-
-def _get_symbol_id(s: str) -> int:
-    return _symbol_to_id.get(s, 1)
-
-
-def get_symbol_ids(text: str) -> list[int]:
-    return list(map(_get_symbol_id, text))
-
-
-def tokenize_phonemes(phonemes: list[str]) -> tuple[torch.Tensor, list[int]]:
-    phoneme_ids = [[BOS_ID, *get_symbol_ids(phonemes), EOS_ID] for phonemes in phonemes]
-    lengths = list(map(len, phoneme_ids))
-    longest = max(lengths)
-    phoneme_ids = [[PAD_ID] * (longest - len(ids)) + ids for ids in phoneme_ids]
-    return torch.tensor(phoneme_ids), lengths
-
-
-def normalize_jp_text(text: str, tokenizer) -> str:
-    from kanjize import number2kanji
-    text = unicodedata.normalize("NFKC", text)
-    text = re.sub(r"\d+", lambda m: number2kanji(int(m[0])), text)
-    final_text = " ".join([x.reading_form() for x in tokenizer.tokenize(text, SplitMode.A)])
-    return final_text
-
-
-def clean(texts: list[str], languages: list[str]) -> list[str]:
-    texts_out = []
-    for text, language in zip(texts, languages):
-        if "ja" in language:
-            from sudachipy import Dictionary, SplitMode
-            text = normalize_jp_text(text, tokenizer=Dictionary(dict="full").create())
-        else:
-            text = normalize_numbers(text)
-        texts_out.append(text)
-    return texts_out
-
-
-@cache
-def get_backend(language: str) -> "EspeakBackend":
-    import logging
-
-    from phonemizer.backend import EspeakBackend
-
-    logger = logging.getLogger("phonemizer")
-    backend = EspeakBackend(
-        language,
-        preserve_punctuation=True,
-        with_stress=True,
-        punctuation_marks=_punctuation,
-        logger=logger,
+    _punctuation = ';:,.!?¡¿—…"«»""() *~-/\\&'
+    _letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+    _letters_ipa = (
+        "ɑɐɒæɓʙβɔɕçɗɖðʤəɘɚɛɜɝɞɟʄɡɠɢʛɦɧħɥʜɨɪʝɭɬɫɮʟɱɯɰŋɳɲɴøɵɸθœɶʘɹɺɾɻʀʁɽʂʃʈʧʉʊʋⱱʌɣɤʍχʎʏʑʐʒʔʡʕʢǀǁǂǃˈˌːˑʼʴʰʱʲʷˠˤ˞↓↑→↗↘'̩'ᵻ"
     )
-    logger.setLevel(logging.ERROR)
-    return backend
 
+    symbols = [*_punctuation, *_letters, *_letters_ipa]
+    _symbol_to_id = {s: i for i, s in enumerate(symbols, start=len(SPECIAL_TOKEN_IDS))}
 
-def phonemize(texts: list[str], languages: list[str]) -> list[str]:
-    texts = clean(texts, languages)
+    @staticmethod
+    def _remove_commas(m: re.Match) -> str:
+        return m.group(1).replace(",", "")
 
-    batch_phonemes = []
-    for text, language in zip(texts, languages):
-        backend = get_backend(language)
-        phonemes = backend.phonemize([text], strip=True)
-        batch_phonemes.append(phonemes[0])
+    @staticmethod
+    def _expand_decimal_point(m: re.Match) -> str:
+        return m.group(1).replace(".", " point ")
 
-    return batch_phonemes
+    @classmethod
+    def _expand_dollars(cls, m: re.Match) -> str:
+        match = m.group(1)
+        parts = match.split(".")
+        if len(parts) > 2:
+            return match + " dollars"  # Unexpected format
+        dollars = int(parts[0]) if parts[0] else 0
+        cents = int(parts[1]) if len(parts) > 1 and parts[1] else 0
+        if dollars and cents:
+            dollar_unit = "dollar" if dollars == 1 else "dollars"
+            cent_unit = "cent" if cents == 1 else "cents"
+            return "%s %s, %s %s" % (dollars, dollar_unit, cents, cent_unit)
+        elif dollars:
+            dollar_unit = "dollar" if dollars == 1 else "dollars"
+            return "%s %s" % (dollars, dollar_unit)
+        elif cents:
+            cent_unit = "cent" if cents == 1 else "cents"
+            return "%s %s" % (cents, cent_unit)
+        else:
+            return "zero dollars"
+
+    @classmethod
+    def _expand_ordinal(cls, m: re.Match) -> str:
+        return cls._inflect.number_to_words(m.group(0))
+
+    @classmethod
+    def _expand_number(cls, m: re.Match) -> str:
+        num = int(m.group(0))
+        if num > 1000 and num < 3000:
+            if num == 2000:
+                return "two thousand"
+            elif num > 2000 and num < 2010:
+                return "two thousand " + cls._inflect.number_to_words(num % 100)
+            elif num % 100 == 0:
+                return cls._inflect.number_to_words(num // 100) + " hundred"
+            else:
+                return cls._inflect.number_to_words(num, andword="", zero="oh", group=2).replace(", ", " ")
+        else:
+            return cls._inflect.number_to_words(num, andword="")
+
+    @classmethod
+    def normalize_numbers(cls, text: str) -> str:
+        text = re.sub(cls._comma_number_re, cls._remove_commas, text)
+        text = re.sub(cls._pounds_re, r"\1 pounds", text)
+        text = re.sub(cls._dollars_re, cls._expand_dollars, text)
+        text = re.sub(cls._decimal_number_re, cls._expand_decimal_point, text)
+        text = re.sub(cls._ordinal_re, cls._expand_ordinal, text)
+        text = re.sub(cls._number_re, cls._expand_number, text)
+        return text
+
+    @classmethod
+    def _get_symbol_id(cls, s: str) -> int:
+        return cls._symbol_to_id.get(s, 1)
+
+    @classmethod
+    def get_symbol_ids(cls, text: str) -> list[int]:
+        return list(map(cls._get_symbol_id, text))
+
+    @classmethod
+    def tokenize_phonemes(cls, phonemes: list[str]) -> tuple[torch.Tensor, list[int]]:
+        phoneme_ids = [[cls.BOS_ID, *cls.get_symbol_ids(phonemes), cls.EOS_ID] for phonemes in phonemes]
+        lengths = list(map(len, phoneme_ids))
+        longest = max(lengths)
+        phoneme_ids = [[cls.PAD_ID] * (longest - len(ids)) + ids for ids in phoneme_ids]
+        return torch.tensor(phoneme_ids), lengths
+
+    @classmethod
+    def normalize_jp_text(cls, text: str, tokenizer) -> str:
+        from kanjize import number2kanji
+        text = unicodedata.normalize("NFKC", text)
+        text = re.sub(r"\d+", lambda m: number2kanji(int(m[0])), text)
+        final_text = " ".join([x.reading_form() for x in tokenizer.tokenize(text, SplitMode.A)])
+        return final_text
+
+    @classmethod
+    def clean(cls, texts: list[str], languages: list[str]) -> list[str]:
+        texts_out = []
+        for text, language in zip(texts, languages):
+            if "ja" in language:
+                from sudachipy import Dictionary, SplitMode
+                text = cls.normalize_jp_text(text, tokenizer=Dictionary(dict="full").create())
+            else:
+                text = cls.normalize_numbers(text)
+            texts_out.append(text)
+        return texts_out
+
+    @classmethod
+    @cache
+    def get_backend(cls, language: str) -> "EspeakBackend":
+        import logging
+        from phonemizer.backend import EspeakBackend
+
+        logger = logging.getLogger("phonemizer")
+        backend = EspeakBackend(
+            language,
+            preserve_punctuation=True,
+            with_stress=True,
+            punctuation_marks=cls._punctuation,
+            logger=logger,
+        )
+        logger.setLevel(logging.ERROR)
+        return backend
+
+    @classmethod
+    def phonemize(cls, texts: list[str], languages: list[str]) -> list[str]:
+        texts = cls.clean(texts, languages)
+
+        batch_phonemes = []
+        for text, language in zip(texts, languages):
+            backend = cls.get_backend(language)
+            phonemes = backend.phonemize([text], strip=True)
+            batch_phonemes.append(phonemes[0])
+
+        return batch_phonemes
 
 
 class EspeakPhonemeConditioner(Conditioner):
     def __init__(self, output_dim: int, **kwargs):
         super().__init__(output_dim, **kwargs)
-        self.phoneme_embedder = nn.Embedding(len(SPECIAL_TOKEN_IDS) + len(symbols), output_dim)
+        self.phoneme_embedder = nn.Embedding(len(ZonosUtils.SPECIAL_TOKEN_IDS) + len(ZonosUtils.symbols), output_dim)
 
     def apply_cond(self, texts: list[str], languages: list[str]) -> torch.Tensor:
         """
@@ -405,8 +403,8 @@ class EspeakPhonemeConditioner(Conditioner):
         """
         device = self.phoneme_embedder.weight.device
 
-        phonemes = phonemize(texts, languages)
-        phoneme_ids, _ = tokenize_phonemes(phonemes)
+        phonemes = ZonosUtils.phonemize(texts, languages)
+        phoneme_ids, _ = ZonosUtils.tokenize_phonemes(phonemes)
         phoneme_embeds = self.phoneme_embedder(phoneme_ids.to(device))
 
         return phoneme_embeds
@@ -455,24 +453,21 @@ class PassthroughConditioner(Conditioner):
         return x
 
 
-_cond_cls_map = {
-    "PassthroughConditioner": PassthroughConditioner,
-    "EspeakPhonemeConditioner": EspeakPhonemeConditioner,
-    "FourierConditioner": FourierConditioner,
-    "IntegerConditioner": IntegerConditioner,
-}
-
-
-def build_conditioners(conditioners: list[dict], output_dim: int) -> list[Conditioner]:
-    return [_cond_cls_map[config["type"]](output_dim, **config) for config in conditioners]
-
-
 class ZonosPrefixConditioner(Conditioner):
     def __init__(self, config: PrefixConditionerConfig, output_dim: int):
         super().__init__(output_dim, "prefix", projection=config.projection)
-        self.conditioners = nn.ModuleList(build_conditioners(config.conditioners, output_dim))
+        self.conditioners = nn.ModuleList(self.build_conditioners(config.conditioners, output_dim))
         self.norm = nn.LayerNorm(output_dim)
         self.required_keys = {c.name for c in self.conditioners if c.uncond_vector is None}
+    
+    def build_conditioners(self, conditioners: list[dict], output_dim: int) -> list[Conditioner]:
+        _cond_cls_map = {
+            "PassthroughConditioner": PassthroughConditioner,
+            "EspeakPhonemeConditioner": EspeakPhonemeConditioner,
+            "FourierConditioner": FourierConditioner,
+            "IntegerConditioner": IntegerConditioner,
+        }
+        return [_cond_cls_map[config["type"]](output_dim, **config) for config in conditioners]
 
     def forward(self, cond_dict: dict) -> torch.Tensor:
         if not set(cond_dict).issuperset(self.required_keys):
