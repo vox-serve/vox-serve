@@ -8,7 +8,7 @@ from transformers import LlamaConfig, LlamaPreTrainedModel
 
 from ..tokenizer.snac import SNAC
 from ..flashinfer_utils import FlashInferWrapper
-from ..sampling import top_p_sampling, apply_repetition_penalty, update_repetition_penalty_cache, SamplingConfig
+from ..sampling import SamplingConfig, Sampler
 from ..requests import Request
 from .base import BaseLM
 
@@ -241,11 +241,16 @@ class OrpheusModel(BaseLM):
         self.vocab_size = self.model.config.vocab_size
 
         self.stop_token_id = 128258
-        self.temperature = 0.6 
-        self.top_p = 0.8 
-        self.max_tokens = 1200 
-        self.repetition_penalty=1.3
-        self.repetition_penalty_window = -1  # -1 means no window, apply to all tokens
+
+        self.default_sampling_config = SamplingConfig(
+            top_k=None, 
+            top_p=0.8,
+            min_p=None,
+            temperature=0.6,
+            repetition_penalty=1.3,
+            repetition_window=-1, 
+            cfg_scale=None,
+        )
 
     @property 
     def n_codebooks(self):
@@ -281,6 +286,13 @@ class OrpheusModel(BaseLM):
     def detokenize_overlap(self) -> int:
         """Overlap size for detokenization."""
         return 21
+    
+    @property
+    def max_tokens(self) -> int:
+        """
+        Maximum number of tokens the model generates in a single request.
+        """
+        return 1200
 
     def is_stop_id(self, token_ids: List[int]) -> bool:
         return token_ids[0] == self.stop_token_id
@@ -332,7 +344,7 @@ class OrpheusModel(BaseLM):
 
         preprocess_dict = {
             "repetition_cache": torch.zeros(
-                self.repetition_penalty_window if self.repetition_penalty_window > 0 else 1, 
+                self.default_sampling_config.repetition_window if self.default_sampling_config.repetition_window > 0 else 1, 
                 self.n_codebooks, 
                 self.vocab_size, 
                 dtype=torch.bool, 
@@ -373,30 +385,33 @@ class OrpheusModel(BaseLM):
         cfg_scale: float | None = None,
         **kwargs,
     ) -> torch.Tensor:
+        if sampling_params is None:
+            sampling_params = self.default_sampling_config
+
         # apply repetition penalty
         for i, req in enumerate(requests):
             if req.repetition_cache is None:
                 continue
 
-            logits[i] = apply_repetition_penalty(
+            logits[i] = Sampler.apply_repetition_penalty(
                 logits[i], 
                 req.repetition_cache, 
-                self.repetition_penalty
+                sampling_params.repetition_penalty
             )
 
         output_ids = torch.zeros(logits.shape[0], logits.shape[1], dtype=torch.long, device=self.device)
         for i in range(self.n_codebooks):
-            output_ids[:, i] = top_p_sampling(logits[:, i], top_p=self.top_p, temperature=self.temperature)
-        
+            output_ids[:, i] = Sampler.run_sampling(logits[:, i], config=sampling_params)
+
         # update repetition cache
         for i, req in enumerate(requests):
             if req.repetition_cache is None:
                 continue
 
-            update_repetition_penalty_cache(
+            Sampler.update_repetition_penalty_cache(
                 req.repetition_cache, 
                 output_ids[i], 
-                self.repetition_penalty_window, 
+                sampling_params.repetition_window, 
             )
 
         return output_ids
