@@ -6,6 +6,7 @@ import re
 import unicodedata
 import json 
 
+import flashinfer
 import inflect
 from phonemizer.backend import EspeakBackend
 import torch
@@ -71,111 +72,6 @@ class ZonosConfig:
         return config
 
 
-class ZonosRotaryEmbedding(nn.Module):
-    def __init__(self, config: BackboneConfig, device=None):
-        super().__init__()
-        # BC: "rope_type" was originally "type"
-        if hasattr(config, "rope_scaling") and config.rope_scaling is not None:
-            self.rope_type = config.rope_scaling.get("rope_type", config.rope_scaling.get("type"))
-        else:
-            self.rope_type = "default"
-        self.max_seq_len_cached = getattr(config, "max_position_embeddings", 16384)
-        self.original_max_seq_len = getattr(config, "max_position_embeddings", 16384)
-
-        self.config = config
-        self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
-
-        self.config.rope_theta = 10000 
-        self.config.head_dim = config.d_model // config.attn_cfg["num_heads"]
-
-        inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device)
-        self.register_buffer("inv_freq", inv_freq, persistent=False)
-        self.original_inv_freq = self.inv_freq
-
-    def _dynamic_frequency_update(self, position_ids, device):
-        """
-        dynamic RoPE layers should recompute `inv_freq` in the following situations:
-        1 - growing beyond the cached sequence length (allow scaling)
-        2 - the current sequence length is in the original scale (avoid losing precision with small sequences)
-        """
-        seq_len = torch.max(position_ids) + 1
-        if seq_len > self.max_seq_len_cached:  # growth
-            inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device, seq_len=seq_len)
-            self.register_buffer("inv_freq", inv_freq, persistent=False)  # TODO joao: may break with compilation
-            self.max_seq_len_cached = seq_len
-
-        if seq_len < self.original_max_seq_len and self.max_seq_len_cached > self.original_max_seq_len:  # reset
-            # This .to() is needed if the model has been moved to a device after being initialized (because
-            # the buffer is automatically moved, but not the original copy)
-            self.original_inv_freq = self.original_inv_freq.to(device)
-            self.register_buffer("inv_freq", self.original_inv_freq, persistent=False)
-            self.max_seq_len_cached = self.original_max_seq_len
-
-    @torch.no_grad()
-    def forward(self, x, position_ids):
-        if "dynamic" in self.rope_type:
-            self._dynamic_frequency_update(position_ids, device=x.device)
-
-        # If position_ids is flat (i.e. 1D [total_seq_len]), unsqueeze it to [1, total_seq_len]
-        if position_ids.dim() == 1:
-            position_ids = position_ids.unsqueeze(0)
-
-        # Core RoPE block: now position_ids is of shape [batch, seq_len] where batch=1 if it was flattened
-        inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1)
-        position_ids_expanded = position_ids[:, None, :].float()
-
-        # Force float32 (see https://github.com/huggingface/transformers/pull/29285)
-        device_type = x.device.type
-        device_type = device_type if isinstance(device_type, str) and device_type != "mps" else "cpu"
-        with torch.autocast(device_type=device_type, enabled=False):
-            # (batch, num_freq, 1) @ (batch, 1, seq_len) -> (batch, num_freq, seq_len)
-            freqs = (inv_freq_expanded.to(x.device) @ position_ids_expanded).transpose(1, 2)
-            emb = torch.cat((freqs, freqs), dim=-1)
-            cos = emb.cos()
-            sin = emb.sin()
-
-        # Apply scaling
-        cos = cos * self.attention_scaling
-        sin = sin * self.attention_scaling
-
-        # Squeeze out the batch dimension if it was originally flattened
-        return cos.squeeze(0).to(dtype=x.dtype), sin.squeeze(0).to(dtype=x.dtype)
-
-
-def rotate_half(x):
-    """Rotates half the hidden dims of the input."""
-    x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2 :]
-    return torch.cat((-x2, x1), dim=-1)
-
-
-def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=0):
-    """Applies Rotary Position Embedding to the query and key tensors.
-
-    Args:
-        q (`torch.Tensor`): The query tensor.
-        k (`torch.Tensor`): The key tensor.
-        cos (`torch.Tensor`): The cosine part of the rotary embedding.
-        sin (`torch.Tensor`): The sine part of the rotary embedding.
-        position_ids (`torch.Tensor`, *optional*):
-            Deprecated and unused.
-        unsqueeze_dim (`int`, *optional*, defaults to 1):
-            The 'unsqueeze_dim' argument specifies the dimension along which to unsqueeze cos[position_ids] and
-            sin[position_ids] so that they can be properly broadcasted to the dimensions of q and k. For example, note
-            that cos[position_ids] and sin[position_ids] have the shape [batch_size, seq_len, head_dim]. Then, if q and
-            k have the shape [batch_size, heads, seq_len, head_dim], then setting unsqueeze_dim=1 makes
-            cos[position_ids] and sin[position_ids] broadcastable to the shapes of q and k. Similarly, if q and k have
-            the shape [batch_size, seq_len, heads, head_dim], then set unsqueeze_dim=2.
-    Returns:
-        `tuple(torch.Tensor)` comprising of the query and key tensors rotated using the Rotary Position Embedding.
-    """
-    cos = cos.unsqueeze(unsqueeze_dim)
-    sin = sin.unsqueeze(unsqueeze_dim)
-    q_embed = (q * cos) + (rotate_half(q) * sin)
-    k_embed = (k * cos) + (rotate_half(k) * sin)
-    return q_embed, k_embed
-
-
 class ZonosMLP(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -209,7 +105,6 @@ class ZonosAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
         position_ids: torch.LongTensor,
-        position_embeddings: Tuple[torch.Tensor, torch.Tensor],
         attn_wrapper: FlashInferWrapper, 
         kv_cache: torch.Tensor,
     ):
@@ -224,8 +119,6 @@ class ZonosAttention(nn.Module):
         key_states = key_states.view(-1, self.num_heads_kv, self.head_dim) #.transpose(0, 1)
         value_states = value_states.view(-1, self.num_heads_kv, self.head_dim) #.transpose(0, 1)
 
-        # cos, sin = position_embeddings
-        import flashinfer
         query_states, key_states = flashinfer.rope.apply_rope_pos_ids(
             query_states, key_states, pos_ids=position_ids, rope_theta=10000, interleave=True,
         )
@@ -252,7 +145,6 @@ class ZonosDecoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         position_ids: torch.LongTensor,
-        position_embeddings: Tuple[torch.Tensor, torch.Tensor],
         attn_wrapper: FlashInferWrapper, 
         kv_cache: torch.Tensor,
     ):
@@ -264,7 +156,6 @@ class ZonosDecoderLayer(nn.Module):
         hidden_states = self.mixer(
             hidden_states=hidden_states,
             position_ids=position_ids,
-            position_embeddings=position_embeddings,
             attn_wrapper=attn_wrapper,
             kv_cache=kv_cache,
         )
@@ -287,7 +178,6 @@ class ZonosBackboneModel(nn.Module):
             [ZonosDecoderLayer(config, layer_idx) for layer_idx in range(config.n_layer)]
         )
         self.norm_f = nn.LayerNorm(config.d_model, eps=config.norm_epsilon)
-        self.rotary_emb = ZonosRotaryEmbedding(config=config)
 
     def forward(
         self,
@@ -299,14 +189,10 @@ class ZonosBackboneModel(nn.Module):
         
         hidden_states = inputs_embeds
 
-        # create position embeddings to be shared across the decoder layers
-        position_embeddings = self.rotary_emb(hidden_states, position_ids)
-
         for i, decoder_layer in enumerate(self.layers):
             hidden_states = decoder_layer(
                 hidden_states,
                 position_ids=position_ids,
-                position_embeddings=position_embeddings,
                 attn_wrapper=attn_wrapper,
                 kv_cache=kv_cache[i],
             )
