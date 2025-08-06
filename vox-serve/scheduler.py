@@ -2,6 +2,7 @@ import torch
 import time
 import zmq 
 import json
+from typing import List, Dict, Any, Optional, Tuple, Type
 
 from .requests import Request 
 from .worker import ModelWorker
@@ -20,7 +21,7 @@ class Scheduler:
         self.max_batch_size = max_batch_size
         self.model_worker = ModelWorker(model_name_or_path, max_batch_size=max_batch_size)
 
-        self.active_requests = []
+        self.active_requests: List[Request] = []
 
         self.context = zmq.Context()
         self.request_socket = self.context.socket(zmq.PULL)
@@ -33,8 +34,15 @@ class Scheduler:
         Process the next batch of requests.
         """
 
-        # get new requests 
-        requests, is_prefill = self._prepare_requests()
+        # insert/remove requests to self.active_requests 
+        self._prepare_requests()
+
+        # TODO: advanced scheduling logic here for LM forward
+        requests = self.active_requests
+
+        is_prefill = False 
+        for req in requests:
+            is_prefill = is_prefill or (not req.done_lm_prefill)
 
         if len(requests) == 0:
             time.sleep(0.1)
@@ -46,19 +54,27 @@ class Scheduler:
         else:
             self.model_worker.run_lm_decode(requests)
 
-        # run detokenization if needed
-        self.model_worker.run_detokenize(requests)
-
         # check for request completion and mark as done
         for req in requests:
             if self.model_worker.is_finished(req):
                 req.done_all = True
 
+        # TODO: advanced scheduling logic here for detokenization (independent of LM forward),
+        # including multiple chunks from a single request for some cases
+        requests_to_detokenize = []
+        
+        for req in requests:
+            if req.done_all or (len(req.lm_output_tokens) - req.next_audio_decode_idx >= self.model_worker.detokenize_interval):
+                requests_to_detokenize.append(req)
+        
+        # run detokenization if needed
+        self.model_worker.run_detokenize(requests_to_detokenize)
+
         # return results to clients
         for req in requests:
-            if req.is_audio_available:
+            if not req.output_audio.empty():
                 # Send audio chunk message: request_id|AUDIO|audio_data
-                message = req.request_id.encode('utf-8') + b'|AUDIO|' + req.output_audio[-1]
+                message = req.request_id.encode('utf-8') + b'|AUDIO|' + req.output_audio.get()
                 self.result_socket.send(message)
             
             # send completion notification for finished requests
@@ -125,8 +141,4 @@ class Scheduler:
         # Filter out completed requests
         self.active_requests = [req for req in self.active_requests if not req.done_all]
         
-        is_prefill = False 
-        for req in self.active_requests:
-            is_prefill = is_prefill or (not req.done_lm_prefill)
-        
-        return self.active_requests, is_prefill
+        return 

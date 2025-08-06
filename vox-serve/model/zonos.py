@@ -6,6 +6,7 @@ import re
 import unicodedata
 import json 
 
+import flashinfer
 import inflect
 from phonemizer.backend import EspeakBackend
 import torch
@@ -21,7 +22,8 @@ import safetensors
 from ..tokenizer.dac import DAC
 from ..encoder.zonos import ZonosSpeakerEmbeddingLDA
 from ..flashinfer_utils import FlashInferWrapper
-from ..sampling import min_p_sampling, apply_repetition_penalty
+from ..sampling import min_p_sampling, SamplingConfig, apply_repetition_penalty, update_repetition_penalty_cache
+from ..requests import Request
 from .base import BaseLM
 
 
@@ -70,111 +72,6 @@ class ZonosConfig:
         return config
 
 
-class ZonosRotaryEmbedding(nn.Module):
-    def __init__(self, config: BackboneConfig, device=None):
-        super().__init__()
-        # BC: "rope_type" was originally "type"
-        if hasattr(config, "rope_scaling") and config.rope_scaling is not None:
-            self.rope_type = config.rope_scaling.get("rope_type", config.rope_scaling.get("type"))
-        else:
-            self.rope_type = "default"
-        self.max_seq_len_cached = getattr(config, "max_position_embeddings", 16384)
-        self.original_max_seq_len = getattr(config, "max_position_embeddings", 16384)
-
-        self.config = config
-        self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
-
-        self.config.rope_theta = 10000 
-        self.config.head_dim = config.d_model // config.attn_cfg["num_heads"]
-
-        inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device)
-        self.register_buffer("inv_freq", inv_freq, persistent=False)
-        self.original_inv_freq = self.inv_freq
-
-    def _dynamic_frequency_update(self, position_ids, device):
-        """
-        dynamic RoPE layers should recompute `inv_freq` in the following situations:
-        1 - growing beyond the cached sequence length (allow scaling)
-        2 - the current sequence length is in the original scale (avoid losing precision with small sequences)
-        """
-        seq_len = torch.max(position_ids) + 1
-        if seq_len > self.max_seq_len_cached:  # growth
-            inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device, seq_len=seq_len)
-            self.register_buffer("inv_freq", inv_freq, persistent=False)  # TODO joao: may break with compilation
-            self.max_seq_len_cached = seq_len
-
-        if seq_len < self.original_max_seq_len and self.max_seq_len_cached > self.original_max_seq_len:  # reset
-            # This .to() is needed if the model has been moved to a device after being initialized (because
-            # the buffer is automatically moved, but not the original copy)
-            self.original_inv_freq = self.original_inv_freq.to(device)
-            self.register_buffer("inv_freq", self.original_inv_freq, persistent=False)
-            self.max_seq_len_cached = self.original_max_seq_len
-
-    @torch.no_grad()
-    def forward(self, x, position_ids):
-        if "dynamic" in self.rope_type:
-            self._dynamic_frequency_update(position_ids, device=x.device)
-
-        # If position_ids is flat (i.e. 1D [total_seq_len]), unsqueeze it to [1, total_seq_len]
-        if position_ids.dim() == 1:
-            position_ids = position_ids.unsqueeze(0)
-
-        # Core RoPE block: now position_ids is of shape [batch, seq_len] where batch=1 if it was flattened
-        inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1)
-        position_ids_expanded = position_ids[:, None, :].float()
-
-        # Force float32 (see https://github.com/huggingface/transformers/pull/29285)
-        device_type = x.device.type
-        device_type = device_type if isinstance(device_type, str) and device_type != "mps" else "cpu"
-        with torch.autocast(device_type=device_type, enabled=False):
-            # (batch, num_freq, 1) @ (batch, 1, seq_len) -> (batch, num_freq, seq_len)
-            freqs = (inv_freq_expanded.to(x.device) @ position_ids_expanded).transpose(1, 2)
-            emb = torch.cat((freqs, freqs), dim=-1)
-            cos = emb.cos()
-            sin = emb.sin()
-
-        # Apply scaling
-        cos = cos * self.attention_scaling
-        sin = sin * self.attention_scaling
-
-        # Squeeze out the batch dimension if it was originally flattened
-        return cos.squeeze(0).to(dtype=x.dtype), sin.squeeze(0).to(dtype=x.dtype)
-
-
-def rotate_half(x):
-    """Rotates half the hidden dims of the input."""
-    x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2 :]
-    return torch.cat((-x2, x1), dim=-1)
-
-
-def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=0):
-    """Applies Rotary Position Embedding to the query and key tensors.
-
-    Args:
-        q (`torch.Tensor`): The query tensor.
-        k (`torch.Tensor`): The key tensor.
-        cos (`torch.Tensor`): The cosine part of the rotary embedding.
-        sin (`torch.Tensor`): The sine part of the rotary embedding.
-        position_ids (`torch.Tensor`, *optional*):
-            Deprecated and unused.
-        unsqueeze_dim (`int`, *optional*, defaults to 1):
-            The 'unsqueeze_dim' argument specifies the dimension along which to unsqueeze cos[position_ids] and
-            sin[position_ids] so that they can be properly broadcasted to the dimensions of q and k. For example, note
-            that cos[position_ids] and sin[position_ids] have the shape [batch_size, seq_len, head_dim]. Then, if q and
-            k have the shape [batch_size, heads, seq_len, head_dim], then setting unsqueeze_dim=1 makes
-            cos[position_ids] and sin[position_ids] broadcastable to the shapes of q and k. Similarly, if q and k have
-            the shape [batch_size, seq_len, heads, head_dim], then set unsqueeze_dim=2.
-    Returns:
-        `tuple(torch.Tensor)` comprising of the query and key tensors rotated using the Rotary Position Embedding.
-    """
-    cos = cos.unsqueeze(unsqueeze_dim)
-    sin = sin.unsqueeze(unsqueeze_dim)
-    q_embed = (q * cos) + (rotate_half(q) * sin)
-    k_embed = (k * cos) + (rotate_half(k) * sin)
-    return q_embed, k_embed
-
-
 class ZonosMLP(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -208,7 +105,6 @@ class ZonosAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
         position_ids: torch.LongTensor,
-        position_embeddings: Tuple[torch.Tensor, torch.Tensor],
         attn_wrapper: FlashInferWrapper, 
         kv_cache: torch.Tensor,
     ):
@@ -223,8 +119,6 @@ class ZonosAttention(nn.Module):
         key_states = key_states.view(-1, self.num_heads_kv, self.head_dim) #.transpose(0, 1)
         value_states = value_states.view(-1, self.num_heads_kv, self.head_dim) #.transpose(0, 1)
 
-        # cos, sin = position_embeddings
-        import flashinfer
         query_states, key_states = flashinfer.rope.apply_rope_pos_ids(
             query_states, key_states, pos_ids=position_ids, rope_theta=10000, interleave=True,
         )
@@ -251,7 +145,6 @@ class ZonosDecoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         position_ids: torch.LongTensor,
-        position_embeddings: Tuple[torch.Tensor, torch.Tensor],
         attn_wrapper: FlashInferWrapper, 
         kv_cache: torch.Tensor,
     ):
@@ -263,7 +156,6 @@ class ZonosDecoderLayer(nn.Module):
         hidden_states = self.mixer(
             hidden_states=hidden_states,
             position_ids=position_ids,
-            position_embeddings=position_embeddings,
             attn_wrapper=attn_wrapper,
             kv_cache=kv_cache,
         )
@@ -286,7 +178,6 @@ class ZonosBackboneModel(nn.Module):
             [ZonosDecoderLayer(config, layer_idx) for layer_idx in range(config.n_layer)]
         )
         self.norm_f = nn.LayerNorm(config.d_model, eps=config.norm_epsilon)
-        self.rotary_emb = ZonosRotaryEmbedding(config=config)
 
     def forward(
         self,
@@ -298,14 +189,10 @@ class ZonosBackboneModel(nn.Module):
         
         hidden_states = inputs_embeds
 
-        # create position embeddings to be shared across the decoder layers
-        position_embeddings = self.rotary_emb(hidden_states, position_ids)
-
         for i, decoder_layer in enumerate(self.layers):
             hidden_states = decoder_layer(
                 hidden_states,
                 position_ids=position_ids,
-                position_embeddings=position_embeddings,
                 attn_wrapper=attn_wrapper,
                 kv_cache=kv_cache[i],
             )
@@ -358,157 +245,155 @@ class Conditioner(nn.Module):
         return cond
 
 
-_inflect = inflect.engine()
-_comma_number_re = re.compile(r"([0-9][0-9\,]+[0-9])")
-_decimal_number_re = re.compile(r"([0-9]+\.[0-9]+)")
-_pounds_re = re.compile(r"£([0-9\,]*[0-9]+)")
-_dollars_re = re.compile(r"\$([0-9\.\,]*[0-9]+)")
-_ordinal_re = re.compile(r"[0-9]+(st|nd|rd|th)")
-_number_re = re.compile(r"[0-9]+")
+class ZonosUtils:
+    _inflect = inflect.engine()
+    _comma_number_re = re.compile(r"([0-9][0-9\,]+[0-9])")
+    _decimal_number_re = re.compile(r"([0-9]+\.[0-9]+)")
+    _pounds_re = re.compile(r"£([0-9\,]*[0-9]+)")
+    _dollars_re = re.compile(r"\$([0-9\.\,]*[0-9]+)")
+    _ordinal_re = re.compile(r"[0-9]+(st|nd|rd|th)")
+    _number_re = re.compile(r"[0-9]+")
 
+    PAD_ID, UNK_ID, BOS_ID, EOS_ID = 0, 1, 2, 3
+    SPECIAL_TOKEN_IDS = [PAD_ID, UNK_ID, BOS_ID, EOS_ID]
 
-def _remove_commas(m: re.Match) -> str:
-    return m.group(1).replace(",", "")
-
-
-def _expand_decimal_point(m: re.Match) -> str:
-    return m.group(1).replace(".", " point ")
-
-
-def _expand_dollars(m: re.Match) -> str:
-    match = m.group(1)
-    parts = match.split(".")
-    if len(parts) > 2:
-        return match + " dollars"  # Unexpected format
-    dollars = int(parts[0]) if parts[0] else 0
-    cents = int(parts[1]) if len(parts) > 1 and parts[1] else 0
-    if dollars and cents:
-        dollar_unit = "dollar" if dollars == 1 else "dollars"
-        cent_unit = "cent" if cents == 1 else "cents"
-        return "%s %s, %s %s" % (dollars, dollar_unit, cents, cent_unit)
-    elif dollars:
-        dollar_unit = "dollar" if dollars == 1 else "dollars"
-        return "%s %s" % (dollars, dollar_unit)
-    elif cents:
-        cent_unit = "cent" if cents == 1 else "cents"
-        return "%s %s" % (cents, cent_unit)
-    else:
-        return "zero dollars"
-
-
-def _expand_ordinal(m: re.Match) -> str:
-    return _inflect.number_to_words(m.group(0))
-
-
-def _expand_number(m: re.Match) -> str:
-    num = int(m.group(0))
-    if num > 1000 and num < 3000:
-        if num == 2000:
-            return "two thousand"
-        elif num > 2000 and num < 2010:
-            return "two thousand " + _inflect.number_to_words(num % 100)
-        elif num % 100 == 0:
-            return _inflect.number_to_words(num // 100) + " hundred"
-        else:
-            return _inflect.number_to_words(num, andword="", zero="oh", group=2).replace(", ", " ")
-    else:
-        return _inflect.number_to_words(num, andword="")
-
-
-def normalize_numbers(text: str) -> str:
-    text = re.sub(_comma_number_re, _remove_commas, text)
-    text = re.sub(_pounds_re, r"\1 pounds", text)
-    text = re.sub(_dollars_re, _expand_dollars, text)
-    text = re.sub(_decimal_number_re, _expand_decimal_point, text)
-    text = re.sub(_ordinal_re, _expand_ordinal, text)
-    text = re.sub(_number_re, _expand_number, text)
-    return text
-
-
-
-PAD_ID, UNK_ID, BOS_ID, EOS_ID = 0, 1, 2, 3
-SPECIAL_TOKEN_IDS = [PAD_ID, UNK_ID, BOS_ID, EOS_ID]
-
-_punctuation = ';:,.!?¡¿—…"«»“”() *~-/\\&'
-_letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-_letters_ipa = (
-    "ɑɐɒæɓʙβɔɕçɗɖðʤəɘɚɛɜɝɞɟʄɡɠɢʛɦɧħɥʜɨɪʝɭɬɫɮʟɱɯɰŋɳɲɴøɵɸθœɶʘɹɺɾɻʀʁɽʂʃʈʧʉʊʋⱱʌɣɤʍχʎʏʑʐʒʔʡʕʢǀǁǂǃˈˌːˑʼʴʰʱʲʷˠˤ˞↓↑→↗↘'̩'ᵻ"
-)
-
-symbols = [*_punctuation, *_letters, *_letters_ipa]
-_symbol_to_id = {s: i for i, s in enumerate(symbols, start=len(SPECIAL_TOKEN_IDS))}
-
-
-def _get_symbol_id(s: str) -> int:
-    return _symbol_to_id.get(s, 1)
-
-
-def get_symbol_ids(text: str) -> list[int]:
-    return list(map(_get_symbol_id, text))
-
-
-def tokenize_phonemes(phonemes: list[str]) -> tuple[torch.Tensor, list[int]]:
-    phoneme_ids = [[BOS_ID, *get_symbol_ids(phonemes), EOS_ID] for phonemes in phonemes]
-    lengths = list(map(len, phoneme_ids))
-    longest = max(lengths)
-    phoneme_ids = [[PAD_ID] * (longest - len(ids)) + ids for ids in phoneme_ids]
-    return torch.tensor(phoneme_ids), lengths
-
-
-def normalize_jp_text(text: str, tokenizer) -> str:
-    from kanjize import number2kanji
-    text = unicodedata.normalize("NFKC", text)
-    text = re.sub(r"\d+", lambda m: number2kanji(int(m[0])), text)
-    final_text = " ".join([x.reading_form() for x in tokenizer.tokenize(text, SplitMode.A)])
-    return final_text
-
-
-def clean(texts: list[str], languages: list[str]) -> list[str]:
-    texts_out = []
-    for text, language in zip(texts, languages):
-        if "ja" in language:
-            from sudachipy import Dictionary, SplitMode
-            text = normalize_jp_text(text, tokenizer=Dictionary(dict="full").create())
-        else:
-            text = normalize_numbers(text)
-        texts_out.append(text)
-    return texts_out
-
-
-@cache
-def get_backend(language: str) -> "EspeakBackend":
-    import logging
-
-    from phonemizer.backend import EspeakBackend
-
-    logger = logging.getLogger("phonemizer")
-    backend = EspeakBackend(
-        language,
-        preserve_punctuation=True,
-        with_stress=True,
-        punctuation_marks=_punctuation,
-        logger=logger,
+    _punctuation = ';:,.!?¡¿—…"«»""() *~-/\\&'
+    _letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+    _letters_ipa = (
+        "ɑɐɒæɓʙβɔɕçɗɖðʤəɘɚɛɜɝɞɟʄɡɠɢʛɦɧħɥʜɨɪʝɭɬɫɮʟɱɯɰŋɳɲɴøɵɸθœɶʘɹɺɾɻʀʁɽʂʃʈʧʉʊʋⱱʌɣɤʍχʎʏʑʐʒʔʡʕʢǀǁǂǃˈˌːˑʼʴʰʱʲʷˠˤ˞↓↑→↗↘'̩'ᵻ"
     )
-    logger.setLevel(logging.ERROR)
-    return backend
 
+    symbols = [*_punctuation, *_letters, *_letters_ipa]
+    _symbol_to_id = {s: i for i, s in enumerate(symbols, start=len(SPECIAL_TOKEN_IDS))}
 
-def phonemize(texts: list[str], languages: list[str]) -> list[str]:
-    texts = clean(texts, languages)
+    @staticmethod
+    def _remove_commas(m: re.Match) -> str:
+        return m.group(1).replace(",", "")
 
-    batch_phonemes = []
-    for text, language in zip(texts, languages):
-        backend = get_backend(language)
-        phonemes = backend.phonemize([text], strip=True)
-        batch_phonemes.append(phonemes[0])
+    @staticmethod
+    def _expand_decimal_point(m: re.Match) -> str:
+        return m.group(1).replace(".", " point ")
 
-    return batch_phonemes
+    @classmethod
+    def _expand_dollars(cls, m: re.Match) -> str:
+        match = m.group(1)
+        parts = match.split(".")
+        if len(parts) > 2:
+            return match + " dollars"  # Unexpected format
+        dollars = int(parts[0]) if parts[0] else 0
+        cents = int(parts[1]) if len(parts) > 1 and parts[1] else 0
+        if dollars and cents:
+            dollar_unit = "dollar" if dollars == 1 else "dollars"
+            cent_unit = "cent" if cents == 1 else "cents"
+            return "%s %s, %s %s" % (dollars, dollar_unit, cents, cent_unit)
+        elif dollars:
+            dollar_unit = "dollar" if dollars == 1 else "dollars"
+            return "%s %s" % (dollars, dollar_unit)
+        elif cents:
+            cent_unit = "cent" if cents == 1 else "cents"
+            return "%s %s" % (cents, cent_unit)
+        else:
+            return "zero dollars"
+
+    @classmethod
+    def _expand_ordinal(cls, m: re.Match) -> str:
+        return cls._inflect.number_to_words(m.group(0))
+
+    @classmethod
+    def _expand_number(cls, m: re.Match) -> str:
+        num = int(m.group(0))
+        if num > 1000 and num < 3000:
+            if num == 2000:
+                return "two thousand"
+            elif num > 2000 and num < 2010:
+                return "two thousand " + cls._inflect.number_to_words(num % 100)
+            elif num % 100 == 0:
+                return cls._inflect.number_to_words(num // 100) + " hundred"
+            else:
+                return cls._inflect.number_to_words(num, andword="", zero="oh", group=2).replace(", ", " ")
+        else:
+            return cls._inflect.number_to_words(num, andword="")
+
+    @classmethod
+    def normalize_numbers(cls, text: str) -> str:
+        text = re.sub(cls._comma_number_re, cls._remove_commas, text)
+        text = re.sub(cls._pounds_re, r"\1 pounds", text)
+        text = re.sub(cls._dollars_re, cls._expand_dollars, text)
+        text = re.sub(cls._decimal_number_re, cls._expand_decimal_point, text)
+        text = re.sub(cls._ordinal_re, cls._expand_ordinal, text)
+        text = re.sub(cls._number_re, cls._expand_number, text)
+        return text
+
+    @classmethod
+    def _get_symbol_id(cls, s: str) -> int:
+        return cls._symbol_to_id.get(s, 1)
+
+    @classmethod
+    def get_symbol_ids(cls, text: str) -> list[int]:
+        return list(map(cls._get_symbol_id, text))
+
+    @classmethod
+    def tokenize_phonemes(cls, phonemes: list[str]) -> tuple[torch.Tensor, list[int]]:
+        phoneme_ids = [[cls.BOS_ID, *cls.get_symbol_ids(phonemes), cls.EOS_ID] for phonemes in phonemes]
+        lengths = list(map(len, phoneme_ids))
+        longest = max(lengths)
+        phoneme_ids = [[cls.PAD_ID] * (longest - len(ids)) + ids for ids in phoneme_ids]
+        return torch.tensor(phoneme_ids), lengths
+
+    @classmethod
+    def normalize_jp_text(cls, text: str, tokenizer) -> str:
+        from kanjize import number2kanji
+        text = unicodedata.normalize("NFKC", text)
+        text = re.sub(r"\d+", lambda m: number2kanji(int(m[0])), text)
+        final_text = " ".join([x.reading_form() for x in tokenizer.tokenize(text, SplitMode.A)])
+        return final_text
+
+    @classmethod
+    def clean(cls, texts: list[str], languages: list[str]) -> list[str]:
+        texts_out = []
+        for text, language in zip(texts, languages):
+            if "ja" in language:
+                from sudachipy import Dictionary, SplitMode
+                text = cls.normalize_jp_text(text, tokenizer=Dictionary(dict="full").create())
+            else:
+                text = cls.normalize_numbers(text)
+            texts_out.append(text)
+        return texts_out
+
+    @classmethod
+    @cache
+    def get_backend(cls, language: str) -> "EspeakBackend":
+        import logging
+        from phonemizer.backend import EspeakBackend
+
+        logger = logging.getLogger("phonemizer")
+        backend = EspeakBackend(
+            language,
+            preserve_punctuation=True,
+            with_stress=True,
+            punctuation_marks=cls._punctuation,
+            logger=logger,
+        )
+        logger.setLevel(logging.ERROR)
+        return backend
+
+    @classmethod
+    def phonemize(cls, texts: list[str], languages: list[str]) -> list[str]:
+        texts = cls.clean(texts, languages)
+
+        batch_phonemes = []
+        for text, language in zip(texts, languages):
+            backend = cls.get_backend(language)
+            phonemes = backend.phonemize([text], strip=True)
+            batch_phonemes.append(phonemes[0])
+
+        return batch_phonemes
 
 
 class EspeakPhonemeConditioner(Conditioner):
     def __init__(self, output_dim: int, **kwargs):
         super().__init__(output_dim, **kwargs)
-        self.phoneme_embedder = nn.Embedding(len(SPECIAL_TOKEN_IDS) + len(symbols), output_dim)
+        self.phoneme_embedder = nn.Embedding(len(ZonosUtils.SPECIAL_TOKEN_IDS) + len(ZonosUtils.symbols), output_dim)
 
     def apply_cond(self, texts: list[str], languages: list[str]) -> torch.Tensor:
         """
@@ -518,8 +403,8 @@ class EspeakPhonemeConditioner(Conditioner):
         """
         device = self.phoneme_embedder.weight.device
 
-        phonemes = phonemize(texts, languages)
-        phoneme_ids, _ = tokenize_phonemes(phonemes)
+        phonemes = ZonosUtils.phonemize(texts, languages)
+        phoneme_ids, _ = ZonosUtils.tokenize_phonemes(phonemes)
         phoneme_embeds = self.phoneme_embedder(phoneme_ids.to(device))
 
         return phoneme_embeds
@@ -568,24 +453,21 @@ class PassthroughConditioner(Conditioner):
         return x
 
 
-_cond_cls_map = {
-    "PassthroughConditioner": PassthroughConditioner,
-    "EspeakPhonemeConditioner": EspeakPhonemeConditioner,
-    "FourierConditioner": FourierConditioner,
-    "IntegerConditioner": IntegerConditioner,
-}
-
-
-def build_conditioners(conditioners: list[dict], output_dim: int) -> list[Conditioner]:
-    return [_cond_cls_map[config["type"]](output_dim, **config) for config in conditioners]
-
-
 class ZonosPrefixConditioner(Conditioner):
     def __init__(self, config: PrefixConditionerConfig, output_dim: int):
         super().__init__(output_dim, "prefix", projection=config.projection)
-        self.conditioners = nn.ModuleList(build_conditioners(config.conditioners, output_dim))
+        self.conditioners = nn.ModuleList(self.build_conditioners(config.conditioners, output_dim))
         self.norm = nn.LayerNorm(output_dim)
         self.required_keys = {c.name for c in self.conditioners if c.uncond_vector is None}
+    
+    def build_conditioners(self, conditioners: list[dict], output_dim: int) -> list[Conditioner]:
+        _cond_cls_map = {
+            "PassthroughConditioner": PassthroughConditioner,
+            "EspeakPhonemeConditioner": EspeakPhonemeConditioner,
+            "FourierConditioner": FourierConditioner,
+            "IntegerConditioner": IntegerConditioner,
+        }
+        return [_cond_cls_map[config["type"]](output_dim, **config) for config in conditioners]
 
     def forward(self, cond_dict: dict) -> torch.Tensor:
         if not set(cond_dict).issuperset(self.required_keys):
@@ -690,17 +572,25 @@ class ZonosModel(BaseLM):
         self._num_key_value_heads = self.model.config.backbone.attn_cfg["num_heads_kv"]
         self._num_hidden_layers = self.model.config.backbone.n_layer
         self._hidden_size = self.model.config.backbone.d_model
-        self.vocab_size = 1026 
+        self.vocab_size = 1025 # mask token is not included here since it's not predicted by LM heads
 
-        self.n_codebooks = 9
+        self._n_codebooks = self.model.autoencoder.num_codebooks
         self.logit_bias = torch.zeros(self.n_codebooks, 1025, dtype=dtype, device=device)
         self.logit_bias[1:, self.eos_token_id] = -torch.inf # only allow codebook 0 to predict EOS
 
         self.min_p = 0.1
         self.temperature = 1.0
-        self.max_tokens = 1200 
+        self.max_tokens = 2048 
+        self.repetition_penalty = 3.0 
+        self.repetition_penalty_window = 2
+        self._detokenize_interval = 50
 
         self._get_default_speaker_embedding()
+
+    @property
+    def n_codebooks(self) -> int:
+        """Number of codebooks in the model."""
+        return self._n_codebooks
 
     @property
     def num_attention_heads(self) -> int:
@@ -722,7 +612,20 @@ class ZonosModel(BaseLM):
         """Hidden size of the model."""
         return self._hidden_size
 
-    def _get_default_speaker_embedding(self, device: torch.device | str = "cuda") -> torch.Tensor:
+    @property
+    def detokenize_interval(self) -> int:
+        """Interval at which to detokenize outputs."""
+        return self._detokenize_interval
+    
+    @property
+    def detokenize_overlap(self) -> int:
+        """Overlap size for detokenization."""
+        return self._n_codebooks
+
+    def is_stop_id(self, token_ids: List[int]) -> bool:
+        return token_ids[0] == self.eos_token_id
+
+    def _get_default_speaker_embedding(self) -> torch.Tensor:
         from ..utils import download_github_file
         try:
             wav, sr = torchaudio.load(
@@ -829,37 +732,47 @@ class ZonosModel(BaseLM):
         #     ]
         # )
     
-    def preprocess(self, prompt):
+    def preprocess(self, prompt: str):
         """Prepare the prompt for the model, formatting it according to Orpheus specifications."""
         # TODO: add API support for custom voice
         cond_dict = self._make_cond_dict(text=prompt)
-        prefix_conditioning = self._prepare_conditioning(cond_dict)
+        input_features = self._prepare_conditioning(cond_dict)
 
         prefix_tokens = torch.cat([
-            torch.zeros(prefix_conditioning.shape[0], 9, dtype=torch.long),
-            torch.full((1, 9), self.masked_token_id, dtype=torch.long), 
+            torch.zeros(input_features.shape[0], self.n_codebooks, dtype=torch.long),
+            torch.full((1, self.n_codebooks), self.masked_token_id, dtype=torch.long), 
         ], dim=0)
-        return prefix_tokens.tolist(), prefix_conditioning
-    
+
+        preprocess_dict = {
+            "input_features": input_features,
+            "repetition_cache": torch.zeros(
+                self.repetition_penalty_window, self.n_codebooks, self.vocab_size, 
+                dtype=torch.bool, device=self.device
+            ),
+        }
+
+        return prefix_tokens.tolist(), preprocess_dict
+
     def forward(
         self, 
-        input_ids, 
-        position_ids, 
-        attn_wrapper, 
-        kv_cache, 
-        repetition_cache, 
-        prefix_conditioning = None,
-        cfg_scale = 1.0,
-    ):
+        input_ids: torch.Tensor, 
+        position_ids: torch.Tensor, 
+        attn_wrapper: FlashInferWrapper, 
+        kv_cache: torch.Tensor,
+        input_features: torch.Tensor | None = None,
+        **kwargs: Any,
+    ) -> torch.Tensor:
         """Forward pass through the model."""
         inputs_embeds = self.model.embed_tokens(input_ids)
 
-        if prefix_conditioning is not None:
-            inputs_embeds[:prefix_conditioning.shape[0]] = prefix_conditioning
-
-        if cfg_scale != 1.0:
-            inputs_embeds = inputs_embeds.repeat(2, 1) # for generation with CFG
-            raise NotImplementedError 
+        if getattr(attn_wrapper, "qo_indptr", None) is not None:
+            # includes prefill request
+            for i, feature in enumerate(input_features):
+                if feature is None:
+                    continue 
+                
+                # In Zonos, the prompt tokens except for the last one are filled with feature embeddings
+                inputs_embeds[attn_wrapper.qo_indptr[i] : attn_wrapper.qo_indptr[i + 1] - 1] = feature
         
         logits = self.model(
             inputs_embeds=inputs_embeds,
@@ -869,30 +782,62 @@ class ZonosModel(BaseLM):
         )
         logits += self.logit_bias
 
-        output_ids = torch.zeros(logits.shape[0], logits.shape[1], dtype=torch.long, device=self.device)
-        for i in range(logits.shape[1]):
-            output_ids[:, i] = min_p_sampling(logits[:, i], min_p=self.min_p, temperature=self.temperature)
-
         if getattr(attn_wrapper, "qo_indptr", None) is not None:
-            output_ids = output_ids[attn_wrapper.qo_indptr[:-1] - 1]
+            logits = logits[attn_wrapper.qo_indptr[:-1] - 1]
+
+        return logits
+    
+    def sampling(
+        self, 
+        logits: torch.Tensor, 
+        requests: List[Request],
+        sampling_params: SamplingConfig | None = None,
+        cfg_scale: float | None = None,
+    ) -> torch.Tensor:
+        # apply repetition penalty
+        for i, req in enumerate(requests):
+            if req.repetition_cache is None:
+                continue
+            
+            logits[i] = apply_repetition_penalty(
+                logits[i], 
+                req.repetition_cache, 
+                self.repetition_penalty
+            )
+
+        output_ids = torch.zeros(logits.shape[0], logits.shape[1], dtype=torch.long, device=self.device)
+        for i in range(self.n_codebooks):
+            output_ids[:, i] = min_p_sampling(logits[:, i], min_p=self.min_p, temperature=self.temperature)
+        
+        # update repetition cache
+        for i, req in enumerate(requests):
+            if req.repetition_cache is None:
+                continue
+            
+            update_repetition_penalty_cache(
+                req.repetition_cache, 
+                output_ids[i], 
+                self.repetition_penalty_window, 
+            )
+
+            # mask part of the output tokens for the first n_codebooks - 1 tokens
+            # use len(req.lm_output_tokens) + 1 since the output is not yet appended 
+            if len(req.lm_output_tokens) + 1 < self.n_codebooks:
+                for j in range(len(req.lm_output_tokens) + 1, self.n_codebooks):
+                    output_ids[i, j] = self.masked_token_id
+            
+            req.input_features = None # not used in decode phase
 
         return output_ids
-    
-    def is_stop_id(self, token_id):
-        return token_id[0] == self.eos_token_id
 
-    def postprocess(self, tokens_list, next_audio_decode_idx, done_all):
-        if tokens_list[-1][0] == self.eos_token_id:
-            # revert delay patterns
-            seq_len = len(tokens_list)
-            n_q = len(tokens_list[0])
-            codes = torch.tensor(tokens_list, dtype=torch.long, device=self.device).view(seq_len, n_q)
-            codes = torch.stack([codes[k : seq_len - n_q + k, k] for k in range(n_q)], dim=0)
-            wavs = self.model.autoencoder.decode(codes[None, :, :])
-            
-            audio_24k = torchaudio.functional.resample(wavs[0], orig_freq=44100, new_freq=24000)
-            audio = audio_24k.detach().cpu().numpy()
-            audio_int16 = (audio * 32767).astype(np.int16) 
-            audio_bytes = audio_int16.tobytes()
-            return audio_bytes, 200
-        return None, None
+    def postprocess(self, token_ids: torch.Tensor):
+        interval = token_ids.shape[1]
+        n_q = token_ids.shape[2]
+
+        # revert delay patterns
+        codes = torch.stack([token_ids[:, k : interval - n_q + k, k] for k in range(n_q)], dim=1)
+
+        wavs = self.model.autoencoder.decode(codes)
+        audio_tensor = torchaudio.functional.resample(wavs, orig_freq=44100, new_freq=24000)
+
+        return audio_tensor

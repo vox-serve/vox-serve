@@ -1,7 +1,9 @@
 from dataclasses import dataclass, field
 from typing import Optional, Union, List
+from queue import Queue
 
 import numpy as np 
+import torch
 
 from .sampling import SamplingConfig
 
@@ -23,9 +25,9 @@ class Request:
     kv_last_page_len: int = None
     # kv_token_len == (len(kv_pages) - 1) * page_size + kv_last_page_len
 
-    input_tokens: List[int] = None
-    lm_output_tokens: List[List[int]] | List[int] = field(default_factory=list)
-    output_audio: List[bytes] = field(default_factory=list)
+    input_tokens: List[List[int]] = None # shape: (seq_len, n_codebooks)
+    lm_output_tokens: List[List[int]] = field(default_factory=list) # shape: (seq_len, n_codebooks)
+    output_audio: Queue = field(default_factory=Queue)
 
     # progress status
     done_lm_prefill: bool = False
@@ -36,6 +38,7 @@ class Request:
     # future optimization 
     is_pressing: bool = False 
     
-    # cache for calculating repetition penalty, boolean list of length vocab_size
-    repetition_cache: List[bool] = None
-    tokens_mask: List[bool] = None
+    # optional inputs for inference or sampling
+    input_features: torch.Tensor = None
+    input_masks: torch.Tensor = None
+    repetition_cache: torch.Tensor = None # Shape: (window_size, n_codebooks, vocab_size)
