@@ -1,4 +1,4 @@
-from typing import Callable, List, Optional, Tuple, Union
+from typing import List, Tuple, Dict, Any
 import numpy as np
 import torch
 import asyncio
@@ -14,7 +14,8 @@ from transformers import LlamaConfig, LlamaPreTrainedModel
 
 from ..tokenizer.snac import SNAC
 from ..flashinfer_utils import FlashInferWrapper
-from ..sampling import top_p_sampling, apply_repetition_penalty
+from ..sampling import top_p_sampling, apply_repetition_penalty, update_repetition_penalty_cache, SamplingConfig
+from ..requests import Request
 from .base import BaseLM
 
 
@@ -324,17 +325,15 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
         return logits
 
 
-
 class OrpheusModel(BaseLM):
     def __init__(self, model_name, dtype=torch.bfloat16, device="cuda:0", tokenizer_path="canopylabs/orpheus-3b-0.1-ft"):
         super().__init__(model_name, device, dtype)
-        self.model_name = self._map_model_params(model_name)
+        self.model_name = model_name
         self.model = LlamaForCausalLM.from_pretrained(model_name)
         self.model.to(dtype).to(device)
-        # self.engine_kwargs = engine_kwargs  # vLLM engine kwargs
-        # self.engine = self._setup_engine()
-        self.available_voices = ["zoe", "zac","jess", "leo", "mia", "julia", "leah"]
-        
+
+        self.available_voices = ["tara", "leah", "jess", "leo", "dan", "mia", "zac", "zoe"]
+
         # Use provided tokenizer path or default to model_name
         self.text_tokenizer = self._load_tokenizer(tokenizer_path)
         self.audio_tokenizer = SNAC.from_pretrained("hubertsiuzdak/snac_24khz").eval().to(device)
@@ -350,7 +349,12 @@ class OrpheusModel(BaseLM):
         self.top_p = 0.8 
         self.max_tokens = 1200 
         self.repetition_penalty=1.3
+        self.repetition_penalty_window = -1  # -1 means no window, apply to all tokens
 
+    @property 
+    def n_codebooks(self):
+        """Number of codebooks in the model."""
+        return 1
 
     @property
     def num_attention_heads(self) -> int:
@@ -372,52 +376,31 @@ class OrpheusModel(BaseLM):
         """Hidden size of the model."""
         return self._hidden_size
 
+    @property
+    def detokenize_interval(self) -> int:
+        """Interval at which to detokenize outputs."""
+        return 28
+    
+    @property
+    def detokenize_overlap(self) -> int:
+        """Overlap size for detokenization."""
+        return 21
+
+    def is_stop_id(self, token_ids: List[int]) -> bool:
+        return token_ids[0] == self.stop_token_id
+
     def _load_tokenizer(self, tokenizer_path):
         """Load tokenizer from local path or HuggingFace hub"""
         from transformers import AutoTokenizer
         return AutoTokenizer.from_pretrained(tokenizer_path)
-        # try:
-        #     # Check if tokenizer_path is a local directory
-        #     if os.path.isdir(tokenizer_path):
-        #         return AutoTokenizer.from_pretrained(tokenizer_path, local_files_only=True)
-        #     else:
-        #         return AutoTokenizer.from_pretrained(tokenizer_path)
-        # except Exception as e:
-        #     print(f"Error loading tokenizer: {e}")
-        #     print(f"Falling back to default tokenizer")
-        #     return AutoTokenizer.from_pretrained("gpt2")
     
-    def _map_model_params(self, model_name):
-        model_map = {
-            # "nano-150m":{
-            #     "repo_id": "canopylabs/orpheus-tts-0.1-finetune-prod",
-            # }, 
-            # "micro-400m":{
-            #     "repo_id": "canopylabs/orpheus-tts-0.1-finetune-prod",
-            # }, 
-            # "small-1b":{
-            #     "repo_id": "canopylabs/orpheus-tts-0.1-finetune-prod",
-            # },
-            "medium-3b":{
-                "repo_id": "canopylabs/orpheus-tts-0.1-finetune-prod",
-            },
-        }
-        unsupported_models = ["nano-150m", "micro-400m", "small-1b"]
-        if (model_name  in unsupported_models):
-            raise ValueError(f"Model {model_name} is not supported. Only medium-3b is supported, small, micro and nano models will be released very soon")
-        elif model_name in model_map:
-            return model_name[model_name]["repo_id"]
-        else:
-            return model_name
-    
-    def validate_voice(self, voice):
+    def _validate_voice(self, voice):
         """Validate if the given voice is supported by the model."""
-        if voice:
-            if voice not in self.available_voices:
-                raise ValueError(f"Voice {voice} is not available for model {self.model_name}")
+        if voice and voice not in self.available_voices:
+            raise ValueError(f"Voice {voice} is not available for model {self.model_name}")
 
 
-    def orpheus_format_prompt(self, prompt, voice="tara", model_type="larger"):
+    def _orpheus_format_prompt(self, prompt, voice="tara", model_type="larger"):
         if model_type == "smaller":
             if voice:
                 return f"<custom_token_3>{prompt}[{voice}]<custom_token_4><custom_token_5>"
@@ -427,28 +410,54 @@ class OrpheusModel(BaseLM):
             if voice:
                 adapted_prompt = f"{voice}: {prompt}"
                 prompt_tokens = self.text_tokenizer(adapted_prompt, return_tensors="pt")
-                start_token = torch.tensor([[ 128259]], dtype=torch.int64)
+                start_token = torch.tensor([[128259]], dtype=torch.int64)
                 end_tokens = torch.tensor([[128009, 128260, 128261, 128257]], dtype=torch.int64)
                 all_input_ids = torch.cat([start_token, prompt_tokens.input_ids, end_tokens], dim=1)
                 prompt_string = self.text_tokenizer.decode(all_input_ids[0])
                 return all_input_ids, prompt_string
             else:
                 prompt_tokens = self.text_tokenizer(prompt, return_tensors="pt")
-                start_token = torch.tensor([[ 128259]], dtype=torch.int64)
+                start_token = torch.tensor([[128259]], dtype=torch.int64)
                 end_tokens = torch.tensor([[128009, 128260, 128261, 128257]], dtype=torch.int64)
                 all_input_ids = torch.cat([start_token, prompt_tokens.input_ids, end_tokens], dim=1)
                 prompt_string = self.text_tokenizer.decode(all_input_ids[0])
                 return all_input_ids, prompt_string
     
-    def preprocess(self, prompt, voice="tara", model_type="larger"):
+    def preprocess(
+        self, 
+        prompt: str, 
+        voice="tara", 
+        model_type="larger",
+    ) -> Tuple[List[List[int]], Dict[str, Any]]:
         """Prepare the prompt for the model, formatting it according to Orpheus specifications."""
-        # self.validate_voice(voice)
-        input_ids, prompt_string = self.orpheus_format_prompt(prompt, voice, model_type)
-        return input_ids[0].tolist(), prompt_string
+        self._validate_voice(voice)
+        input_ids, _ = self._orpheus_format_prompt(prompt, voice, model_type)
+        input_ids = input_ids.view(-1, 1) # add codebook dimension
+
+        preprocess_dict = {
+            "repetition_cache": torch.zeros(
+                self.repetition_penalty_window if self.repetition_penalty_window > 0 else 1, 
+                self.n_codebooks, 
+                self.vocab_size, 
+                dtype=torch.bool, 
+                device=self.device,
+            ),
+        }
+        print(f"{input_ids.shape=}")
+        return input_ids.tolist(), preprocess_dict
     
-    def forward(self, input_ids, position_ids, attn_wrapper, kv_cache, repetition_cache):
+    def forward(
+        self, 
+        input_ids: torch.Tensor, 
+        position_ids: torch.Tensor, 
+        attn_wrapper: FlashInferWrapper, 
+        kv_cache: torch.Tensor,
+        **kwargs: Any,
+    ) -> torch.Tensor:
         """Forward pass through the model."""
-        inputs_embeds = self.model.embed_tokens(input_ids)
+        # remove codebook dimension
+        inputs_embeds = self.model.embed_tokens(input_ids[:, 0])
+
         logits = self.model(
             inputs_embeds=inputs_embeds,
             position_ids=position_ids,
@@ -456,68 +465,89 @@ class OrpheusModel(BaseLM):
             kv_cache=kv_cache,
         )
         
-        logits = apply_repetition_penalty(logits, repetition_cache, self.repetition_penalty)
-
-        output_ids = top_p_sampling(logits, top_p=self.top_p, temperature=self.temperature)
-
         if getattr(attn_wrapper, "qo_indptr", None) is not None:
-            output_ids = output_ids[attn_wrapper.qo_indptr[:-1] - 1]
+            logits = logits[attn_wrapper.qo_indptr[:-1] - 1]
+        
+        return logits[:, None, :] # add codebook dimension
+
+    def sampling(
+        self, 
+        logits: torch.Tensor, 
+        requests: List[Request],
+        sampling_params: SamplingConfig | None = None,
+        cfg_scale: float | None = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        # apply repetition penalty
+        for i, req in enumerate(requests):
+            if req.repetition_cache is None:
+                continue
+
+            logits[i] = apply_repetition_penalty(
+                logits[i], 
+                req.repetition_cache, 
+                self.repetition_penalty
+            )
+
+        output_ids = torch.zeros(logits.shape[0], logits.shape[1], dtype=torch.long, device=self.device)
+        for i in range(self.n_codebooks):
+            output_ids[:, i] = top_p_sampling(logits[:, i], top_p=self.top_p, temperature=self.temperature)
+        
+        # update repetition cache
+        for i, req in enumerate(requests):
+            if req.repetition_cache is None:
+                continue
+
+            update_repetition_penalty_cache(
+                req.repetition_cache, 
+                output_ids[i], 
+                self.repetition_penalty_window, 
+            )
 
         return output_ids
     
-    def decode_text_token(self, token_id):
-        return self.text_tokenizer.decode(token_id)
-    
-    def turn_token_into_id(self, output_ids):
+    def _turn_token_into_id(self, output_ids):
         """Modoel's output ids to audio ids"""
         return (output_ids - 128256 - 10) % 4096
-    
-    def is_stop_id(self, token_id):
-        return token_id == self.stop_token_id
 
-    def postprocess(self, tokens_list, next_audio_decode_idx, done_all):
-        do_detokenize = (len(tokens_list) % 7 == 0 and len(tokens_list) >= 28) or done_all
-        if not do_detokenize:
-            return None, None
-        
-        multiframe = tokens_list[next_audio_decode_idx:]
-        if len(multiframe) < 7:
-            return
-
+    def postprocess(self, token_ids: torch.Tensor):
+        """Convert token IDs to audio bytes."""
         # 1) Turn the list of length=28 into a (4×7) tensor
-        mf = torch.tensor(multiframe, device=self.device, dtype=torch.int32).view(4, 7)
-        mf = self.turn_token_into_id(mf)
+        print(f"{token_ids.shape=} {token_ids.flatten().cpu().tolist()=}")  # [bs, 28, 1]
+        mf = token_ids.view(-1, 4, 7)
+        mf = self._turn_token_into_id(mf)
 
         # 2) codes_0: take column 0 from each of the 4 rows → shape (4,)
-        codes_0 = mf[:, 0]           # [f0[0], f1[0], f2[0], f3[0]]
-        #    then add a batch‐dim → (1, 4)
-        codes_0 = codes_0.unsqueeze(0)
+        codes_0 = mf[:, :, 0] # [[f0[0], f1[0], f2[0], f3[0]], ..]
+        # #    then add a batch‐dim → (1, 4)
+        # codes_0 = codes_0.unsqueeze(0)
 
         # 3) codes_1: for each row i, take [col 1, col 4] → gives shape (4, 2)
         #    then .reshape(-1) flattens row‐by‐row: [f0[1], f0[4], f1[1], f1[4], …]
-        codes_1 = mf[:, [1, 4]].reshape(-1)    # shape (8,)
-        codes_1 = codes_1.unsqueeze(0)         # → (1, 8)
+        codes_1 = mf[:, :, [1, 4]].view(-1, 8)    # shape (8,)
+        # codes_1 = codes_1.unsqueeze(0)         # → (1, 8)
 
         # 4) codes_2: for each row i, take [col 2, col 3, col 5, col 6] → shape (4, 4)
         #    then flatten row‐by‐row: [f0[2],f0[3],f0[5],f0[6], f1[2],…]
-        codes_2 = mf[:, [2, 3, 5, 6]].reshape(-1)  # shape (16,)
-        codes_2 = codes_2.unsqueeze(0)             # → (1, 16)
+        codes_2 = mf[:, :, [2, 3, 5, 6]].view(-1, 16)  # shape (16,)
+        # codes_2 = codes_2.unsqueeze(0)             # → (1, 16)
 
         codes = [codes_0, codes_1, codes_2]
 
-        # 5) Range‐check every code
-        for c in codes:
-            if torch.any(c < 0) or torch.any(c > 4096):
-                return
+        # # 5) Range‐check every code
+        # for c in codes:
+        #     if torch.any(c < 0) or torch.any(c > 4096):
+        #         return
 
         # 6) Decode under inference_mode (all shapes are now fixed)
         with torch.inference_mode():
-            audio_hat = self.audio_tokenizer.decode(codes)
+            audio_tensor = self.audio_tokenizer.decode(codes)
             #    audio_hat.shape == [1, 1, 8192]
 
         # 7) Slice [2048:4096], move to CPU, convert to int16, return bytes
-        audio_slice = audio_hat[:, :, 2048:4096]            # (1, 1, 2048)
-        arr = audio_slice.detach().cpu().numpy()            # (1, 1, 2048)
-        audio_int16 = (arr * 32767).astype(np.int16)        # still (1, 1, 2048)
-        audio_bytes = audio_int16.tobytes()
-        return audio_bytes, next_audio_decode_idx + 7
+        audio_tensor = audio_tensor[:, :, 2048:4096]            # (1, 1, 2048)
+        return audio_tensor
+        # arr = audio_slice.detach().cpu().numpy()            # (1, 1, 2048)
+        # audio_int16 = (arr * 32767).astype(np.int16)        # still (1, 1, 2048)
+        # audio_bytes = audio_int16.tobytes()
+        # return audio_bytes, next_audio_decode_idx + 7

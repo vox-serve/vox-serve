@@ -879,6 +879,7 @@ class ZonosModel(BaseLM):
         attn_wrapper: FlashInferWrapper, 
         kv_cache: torch.Tensor,
         input_features: torch.Tensor | None = None,
+        **kwargs: Any,
     ) -> torch.Tensor:
         """Forward pass through the model."""
         inputs_embeds = self.model.embed_tokens(input_ids)
