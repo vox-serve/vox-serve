@@ -1,12 +1,7 @@
-from dataclasses import dataclass
 from typing import Any, List, Optional, Tuple, Dict
-import numpy as np
 import torch
-import asyncio
-import threading
-import queue
-import wave
 
+import flashinfer
 import torch
 from torch import nn
 from transformers.activations import ACT2FN
@@ -170,6 +165,12 @@ class LlamaAttention(nn.Module):
         self.attention_dropout = config.attention_dropout
         self.is_causal = True
 
+        self.rope_scale = config.rope_scaling.get("factor", 32.0)
+        self.rope_theta = config.rope_theta 
+        self.low_freq_factor = config.rope_scaling.get("low_freq_factor", 1.0)
+        self.high_freq_factor = config.rope_scaling.get("high_freq_factor", 4.0)
+        self.old_context_len = config.rope_scaling.get("original_max_position_embeddings", 8192)
+
         self.q_proj = nn.Linear(
             config.hidden_size, config.num_attention_heads * self.head_dim, bias=config.attention_bias
         )
@@ -194,15 +195,25 @@ class LlamaAttention(nn.Module):
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
 
-        query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(0, 1)
-        key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(0, 1)
-        value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(0, 1)
+        query_states = self.q_proj(hidden_states).view(hidden_shape) #.transpose(0, 1)
+        key_states = self.k_proj(hidden_states).view(hidden_shape) #.transpose(0, 1)
+        value_states = self.v_proj(hidden_states).view(hidden_shape) #.transpose(0, 1)
 
-        cos, sin = position_embeddings
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+        query_states, key_states = flashinfer.rope.apply_llama31_rope_pos_ids(
+            query_states, key_states, 
+            pos_ids=position_ids, 
+            rope_scale=self.rope_scale, 
+            rope_theta=self.rope_theta, 
+            low_freq_factor=self.low_freq_factor,
+            high_freq_factor=self.high_freq_factor,
+            old_context_len=self.old_context_len,
+        )
 
-        attn_wrapper.set_kv_cache(kv_cache, key_states.transpose(0, 1), value_states.transpose(0, 1))
-        attn_output = attn_wrapper.run(query_states.transpose(0, 1), kv_cache)
+        # cos, sin = position_embeddings
+        # query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+
+        attn_wrapper.set_kv_cache(kv_cache, key_states, value_states)
+        attn_output = attn_wrapper.run(query_states, kv_cache)
 
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)
