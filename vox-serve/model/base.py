@@ -67,6 +67,14 @@ class BaseLM(ABC):
         """Overlap size for detokenization."""
         pass
 
+    @property
+    @abstractmethod
+    def max_tokens(self) -> int:
+        """
+        Maximum number of tokens the model generates in a single request.
+        """
+        pass
+
     @abstractmethod
     def is_stop_id(self, token_ids: List[int]) -> int:
         """

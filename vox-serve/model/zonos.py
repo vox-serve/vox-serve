@@ -1,7 +1,5 @@
 from functools import cache
-from typing import Any, Callable, List, Optional, Tuple, Union, Iterable
-import numpy as np
-import torch
+from typing import Any, List, Iterable
 import re
 import unicodedata
 import json 
@@ -13,16 +11,13 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 import torchaudio
-from transformers.activations import ACT2FN
-from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
-from transformers import LlamaConfig, LlamaPreTrainedModel
 from huggingface_hub import hf_hub_download
 import safetensors
 
 from ..tokenizer.dac import DAC
 from ..encoder.zonos import ZonosSpeakerEmbeddingLDA
 from ..flashinfer_utils import FlashInferWrapper
-from ..sampling import min_p_sampling, SamplingConfig, apply_repetition_penalty, update_repetition_penalty_cache
+from ..sampling import SamplingConfig, Sampler
 from ..requests import Request
 from .base import BaseLM
 
@@ -578,12 +573,15 @@ class ZonosModel(BaseLM):
         self.logit_bias = torch.zeros(self.n_codebooks, 1025, dtype=dtype, device=device)
         self.logit_bias[1:, self.eos_token_id] = -torch.inf # only allow codebook 0 to predict EOS
 
-        self.min_p = 0.1
-        self.temperature = 1.0
-        self.max_tokens = 2048 
-        self.repetition_penalty = 3.0 
-        self.repetition_penalty_window = 2
-        self._detokenize_interval = 50
+        self.default_sampling_config = SamplingConfig(
+            top_k=None, 
+            top_p=None,
+            min_p=0.1,
+            temperature=1.0,
+            repetition_penalty=3.0,
+            repetition_window=2, 
+            cfg_scale=None,
+        )
 
         self._get_default_speaker_embedding()
 
@@ -615,12 +613,19 @@ class ZonosModel(BaseLM):
     @property
     def detokenize_interval(self) -> int:
         """Interval at which to detokenize outputs."""
-        return self._detokenize_interval
+        return 50
     
     @property
     def detokenize_overlap(self) -> int:
         """Overlap size for detokenization."""
         return self._n_codebooks
+    
+    @property
+    def max_tokens(self) -> int:
+        """
+        Maximum number of tokens the model generates in a single request.
+        """
+        return 2048
 
     def is_stop_id(self, token_ids: List[int]) -> bool:
         return token_ids[0] == self.eos_token_id
@@ -746,7 +751,10 @@ class ZonosModel(BaseLM):
         preprocess_dict = {
             "input_features": input_features,
             "repetition_cache": torch.zeros(
-                self.repetition_penalty_window, self.n_codebooks, self.vocab_size, 
+                self.default_sampling_config.repetition_window if self.default_sampling_config.repetition_window > 0 else 1, 
+                self.default_sampling_config.repetition_window, 
+                self.n_codebooks, 
+                self.vocab_size, 
                 dtype=torch.bool, device=self.device
             ),
         }
@@ -794,30 +802,33 @@ class ZonosModel(BaseLM):
         sampling_params: SamplingConfig | None = None,
         cfg_scale: float | None = None,
     ) -> torch.Tensor:
+        if sampling_params is None:
+            sampling_params = self.default_sampling_config
+
         # apply repetition penalty
         for i, req in enumerate(requests):
             if req.repetition_cache is None:
                 continue
             
-            logits[i] = apply_repetition_penalty(
+            logits[i] = Sampler.apply_repetition_penalty(
                 logits[i], 
                 req.repetition_cache, 
-                self.repetition_penalty
+                sampling_params.repetition_penalty
             )
 
         output_ids = torch.zeros(logits.shape[0], logits.shape[1], dtype=torch.long, device=self.device)
         for i in range(self.n_codebooks):
-            output_ids[:, i] = min_p_sampling(logits[:, i], min_p=self.min_p, temperature=self.temperature)
+            output_ids[:, i] = Sampler.run_sampling(logits[:, i], config=sampling_params)
         
         # update repetition cache
         for i, req in enumerate(requests):
             if req.repetition_cache is None:
                 continue
             
-            update_repetition_penalty_cache(
+            Sampler.update_repetition_penalty_cache(
                 req.repetition_cache, 
                 output_ids[i], 
-                self.repetition_penalty_window, 
+                sampling_params.repetition_window, 
             )
 
             # mask part of the output tokens for the first n_codebooks - 1 tokens

@@ -10,7 +10,7 @@ from transformers import AutoTokenizer, LlamaConfig, CsmConfig, CsmDepthDecoderC
 from tokenizers.processors import TemplateProcessing
 
 from ..flashinfer_utils import FlashInferWrapper
-from ..sampling import top_k_sampling, SamplingConfig
+from ..sampling import SamplingConfig, Sampler
 from ..requests import Request
 from .base import BaseLMWithDepth
 
@@ -334,10 +334,17 @@ class CSMModel(BaseLMWithDepth):
         self._depth_hidden_size = self.model.config.depth_decoder_config.hidden_size
         self.vocab_size = self.model.config.vocab_size
 
-        self.top_k = 50
-        self.temperature = 0.9
         self.stop_token_id = 0
-        self.max_tokens = 1200 
+
+        self.default_sampling_config = SamplingConfig(
+            top_k=50, 
+            top_p=None,
+            min_p=None,
+            temperature=0.9,
+            repetition_penalty=None,
+            repetition_window=None, 
+            cfg_scale=None,
+        )
 
         self._set_default_context()
 
@@ -538,6 +545,13 @@ class CSMModel(BaseLMWithDepth):
         """Overlap size for detokenization."""
         return 0
     
+    @property
+    def max_tokens(self) -> int:
+        """
+        Maximum number of tokens the model generates in a single request.
+        """
+        return 1200
+    
     def is_stop_id(self, token_ids: List[int]) -> int:
         # index -2 since we want to check the final audio codebook before text stream
         return token_ids[-2] == self.stop_token_id
@@ -604,13 +618,16 @@ class CSMModel(BaseLMWithDepth):
         The initial input for the depth transformer is concatenation of last hidden state and embedding for codebook 0, 
         which essentially is the prefill with sequence length of 2.
         """
+        if sampling_params is None:
+            sampling_params = self.default_sampling_config
+
         assert logits.shape[1] == 1, "Logits should have shape [bs, 1, vocab_size]"
 
         # there are 33 codebooks (32 audio + 1 text), but the output from backbone transformer is single codebook
         # so here we allocate output_ids for all codebooks but do sampling only for the first one
         output_ids = torch.zeros(logits.shape[0], self.n_codebooks, dtype=torch.long, device=self.device)
         for i in range(logits.shape[1]):
-            output_ids[:, i] = top_k_sampling(logits[:, i], top_k=self.top_k, temperature=self.temperature)
+            output_ids[:, i] = Sampler.run_sampling(logits[:, i], config=sampling_params)
         
         c0_embed = self.embed_audio_tokens_single(output_ids[:, 0], 0)
         # backbone_ids.shape=torch.Size([1])
@@ -655,7 +672,10 @@ class CSMModel(BaseLMWithDepth):
         cfg_scale: float | None = None,
         **kwargs,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        output_ids = top_k_sampling(logits, top_k=self.top_k, temperature=self.temperature)
+        if sampling_params is None:
+            sampling_params = self.default_sampling_config
+        
+        output_ids = Sampler.run_sampling(logits, config=sampling_params)
         ci_embed = self.embed_audio_tokens_single(output_ids, i_iteration)
         return output_ids, ci_embed
 
