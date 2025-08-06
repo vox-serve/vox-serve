@@ -9,17 +9,16 @@ from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from transformers import AutoTokenizer, LlamaConfig, CsmConfig, CsmDepthDecoderConfig, CsmPreTrainedModel
 from tokenizers.processors import TemplateProcessing
 
-# from ..tokenizer.mimi import Mimi
 from ..flashinfer_utils import FlashInferWrapper
 from ..sampling import top_k_sampling, SamplingConfig
 from ..requests import Request
 from .base import BaseLMWithDepth
 
 
-class LlamaRMSNorm(nn.Module):
+class CsmRMSNorm(nn.Module):
     def __init__(self, hidden_size, eps=1e-6):
         """
-        LlamaRMSNorm is equivalent to T5LayerNorm
+        CsmRMSNorm is equivalent to T5LayerNorm
         """
         super().__init__()
         self.weight = nn.Parameter(torch.ones(hidden_size))
@@ -36,109 +35,7 @@ class LlamaRMSNorm(nn.Module):
         return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
 
 
-class LlamaRotaryEmbedding(nn.Module):
-    def __init__(self, config: LlamaConfig, device=None):
-        super().__init__()
-        # BC: "rope_type" was originally "type"
-        if hasattr(config, "rope_scaling") and config.rope_scaling is not None:
-            self.rope_type = config.rope_scaling.get("rope_type", config.rope_scaling.get("type"))
-        else:
-            self.rope_type = "default"
-        self.max_seq_len_cached = config.max_position_embeddings
-        self.original_max_seq_len = config.max_position_embeddings
-
-        self.config = config
-        self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
-
-        inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device)
-        self.register_buffer("inv_freq", inv_freq, persistent=False)
-        self.original_inv_freq = self.inv_freq
-
-    def _dynamic_frequency_update(self, position_ids, device):
-        """
-        dynamic RoPE layers should recompute `inv_freq` in the following situations:
-        1 - growing beyond the cached sequence length (allow scaling)
-        2 - the current sequence length is in the original scale (avoid losing precision with small sequences)
-        """
-        seq_len = torch.max(position_ids) + 1
-        if seq_len > self.max_seq_len_cached:  # growth
-            inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device, seq_len=seq_len)
-            self.register_buffer("inv_freq", inv_freq, persistent=False)  # TODO joao: may break with compilation
-            self.max_seq_len_cached = seq_len
-
-        if seq_len < self.original_max_seq_len and self.max_seq_len_cached > self.original_max_seq_len:  # reset
-            # This .to() is needed if the model has been moved to a device after being initialized (because
-            # the buffer is automatically moved, but not the original copy)
-            self.original_inv_freq = self.original_inv_freq.to(device)
-            self.register_buffer("inv_freq", self.original_inv_freq, persistent=False)
-            self.max_seq_len_cached = self.original_max_seq_len
-
-    @torch.no_grad()
-    def forward(self, x, position_ids):
-        if "dynamic" in self.rope_type:
-            self._dynamic_frequency_update(position_ids, device=x.device)
-
-        # If position_ids is flat (i.e. 1D [total_seq_len]), unsqueeze it to [1, total_seq_len]
-        if position_ids.dim() == 1:
-            position_ids = position_ids.unsqueeze(0)
-
-        # Core RoPE block: now position_ids is of shape [batch, seq_len] where batch=1 if it was flattened
-        inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1)
-        position_ids_expanded = position_ids[:, None, :].float()
-
-        # Force float32 (see https://github.com/huggingface/transformers/pull/29285)
-        device_type = x.device.type
-        device_type = device_type if isinstance(device_type, str) and device_type != "mps" else "cpu"
-        with torch.autocast(device_type=device_type, enabled=False):
-            # (batch, num_freq, 1) @ (batch, 1, seq_len) -> (batch, num_freq, seq_len)
-            freqs = (inv_freq_expanded.to(x.device) @ position_ids_expanded).transpose(1, 2)
-            emb = torch.cat((freqs, freqs), dim=-1)
-            cos = emb.cos()
-            sin = emb.sin()
-
-        # Apply scaling
-        cos = cos * self.attention_scaling
-        sin = sin * self.attention_scaling
-
-        # Squeeze out the batch dimension if it was originally flattened
-        return cos.squeeze(0).to(dtype=x.dtype), sin.squeeze(0).to(dtype=x.dtype)
-
-
-def rotate_half(x):
-    """Rotates half the hidden dims of the input."""
-    x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2 :]
-    return torch.cat((-x2, x1), dim=-1)
-
-
-def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=0):
-    """Applies Rotary Position Embedding to the query and key tensors.
-
-    Args:
-        q (`torch.Tensor`): The query tensor.
-        k (`torch.Tensor`): The key tensor.
-        cos (`torch.Tensor`): The cosine part of the rotary embedding.
-        sin (`torch.Tensor`): The sine part of the rotary embedding.
-        position_ids (`torch.Tensor`, *optional*):
-            Deprecated and unused.
-        unsqueeze_dim (`int`, *optional*, defaults to 1):
-            The 'unsqueeze_dim' argument specifies the dimension along which to unsqueeze cos[position_ids] and
-            sin[position_ids] so that they can be properly broadcasted to the dimensions of q and k. For example, note
-            that cos[position_ids] and sin[position_ids] have the shape [batch_size, seq_len, head_dim]. Then, if q and
-            k have the shape [batch_size, heads, seq_len, head_dim], then setting unsqueeze_dim=1 makes
-            cos[position_ids] and sin[position_ids] broadcastable to the shapes of q and k. Similarly, if q and k have
-            the shape [batch_size, seq_len, heads, head_dim], then set unsqueeze_dim=2.
-    Returns:
-        `tuple(torch.Tensor)` comprising of the query and key tensors rotated using the Rotary Position Embedding.
-    """
-    cos = cos.unsqueeze(unsqueeze_dim)
-    sin = sin.unsqueeze(unsqueeze_dim)
-    q_embed = (q * cos) + (rotate_half(q) * sin)
-    k_embed = (k * cos) + (rotate_half(k) * sin)
-    return q_embed, k_embed
-
-
-class LlamaMLP(nn.Module):
+class CsmMLP(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
@@ -154,7 +51,7 @@ class LlamaMLP(nn.Module):
         return down_proj
 
 
-class LlamaAttention(nn.Module):
+class CsmAttention(nn.Module):
     def __init__(self, config: LlamaConfig, layer_idx: int):
         super().__init__()
         self.config = config
@@ -188,7 +85,6 @@ class LlamaAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
         position_ids: torch.LongTensor,
-        position_embeddings: Tuple[torch.Tensor, torch.Tensor],
         attn_wrapper: FlashInferWrapper, 
         kv_cache: torch.Tensor,
     ):
@@ -209,9 +105,6 @@ class LlamaAttention(nn.Module):
             old_context_len=self.old_context_len,
         )
 
-        # cos, sin = position_embeddings
-        # query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
-
         attn_wrapper.set_kv_cache(kv_cache, key_states, value_states)
         attn_output = attn_wrapper.run(query_states, kv_cache)
 
@@ -220,22 +113,21 @@ class LlamaAttention(nn.Module):
         return attn_output
 
 
-class LlamaDecoderLayer(nn.Module):
+class CsmDecoderLayer(nn.Module):
     def __init__(self, config: LlamaConfig, layer_idx: int):
         super().__init__()
         self.hidden_size = config.hidden_size
 
-        self.self_attn = LlamaAttention(config=config, layer_idx=layer_idx)
-        self.mlp = LlamaMLP(config)
+        self.self_attn = CsmAttention(config=config, layer_idx=layer_idx)
+        self.mlp = CsmMLP(config)
 
-        self.input_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.input_layernorm = CsmRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = CsmRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         position_ids: torch.LongTensor,
-        position_embeddings: Tuple[torch.Tensor, torch.Tensor],
         attn_wrapper: FlashInferWrapper, 
         kv_cache: torch.Tensor,
     ):
@@ -247,7 +139,6 @@ class LlamaDecoderLayer(nn.Module):
         hidden_states = self.self_attn(
             hidden_states=hidden_states,
             position_ids=position_ids,
-            position_embeddings=position_embeddings,
             attn_wrapper=attn_wrapper,
             kv_cache=kv_cache,
         )
@@ -272,22 +163,17 @@ class CsmBackboneModelEmbeddings(nn.Module):
 
     def forward(self, input_ids):
         input_embeds = self.embed_audio_tokens(input_ids + self.audio_tokens_offsets)
-        # input_embeds = input_embeds.sum(dim=2)
         return input_embeds
     
 
 class CsmBackboneModel(nn.Module):
     def __init__(self, config: LlamaConfig):
         super().__init__()
-        # self.padding_idx = config.pad_token_id
-        # self.vocab_size = config.vocab_size
-
         self.embed_tokens = CsmBackboneModelEmbeddings(config)
         self.layers = nn.ModuleList(
-            [LlamaDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
+            [CsmDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
         )
-        self.norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.rotary_emb = LlamaRotaryEmbedding(config=config)
+        self.norm = CsmRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
     
     def forward(
         self,
@@ -299,14 +185,10 @@ class CsmBackboneModel(nn.Module):
         
         hidden_states = inputs_embeds
 
-        # create position embeddings to be shared across the decoder layers
-        position_embeddings = self.rotary_emb(hidden_states, position_ids)
-
         for i, decoder_layer in enumerate(self.layers):
             hidden_states = decoder_layer(
                 hidden_states,
                 position_ids=position_ids,
-                position_embeddings=position_embeddings,
                 attn_wrapper=attn_wrapper,
                 kv_cache=kv_cache[i],
             )
@@ -322,10 +204,9 @@ class CsmDepthDecoderModel(nn.Module):
 
         self.embed_tokens = nn.Embedding((config.num_codebooks * config.vocab_size), config.backbone_hidden_size)
         self.layers = nn.ModuleList(
-            [LlamaDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
+            [CsmDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
         )
-        self.norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.rotary_emb = LlamaRotaryEmbedding(config=config)
+        self.norm = CsmRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.inputs_embeds_projector = nn.Linear(config.backbone_hidden_size, config.hidden_size, bias=False)
         
     def forward(
@@ -337,14 +218,10 @@ class CsmDepthDecoderModel(nn.Module):
     ):
         hidden_states = self.inputs_embeds_projector(inputs_embeds)
 
-        # create position embeddings to be shared across the decoder layers
-        position_embeddings = self.rotary_emb(hidden_states, position_ids)
-
         for i, decoder_layer in enumerate(self.layers):
             hidden_states = decoder_layer(
                 hidden_states,
                 position_ids=position_ids,
-                position_embeddings=position_embeddings,
                 attn_wrapper=attn_wrapper,
                 kv_cache=kv_cache[i],
             )
@@ -368,7 +245,6 @@ class CsmCodebooksHead(nn.Module):
             codebook_idxs = cache_position - 1
             codebook_weight = self.weight[codebook_idxs]
 
-        # print(f"{hidden_states.shape=}, {cache_position=}") # [seq_len, 1024], [0, 1]
         hidden_states = [
             nn.functional.linear(hidden_states[codebook_idx, :], codebook_weight[codebook_idx].T)
             for codebook_idx in range(codebook_weight.shape[0])
@@ -387,8 +263,8 @@ class CsmDepthDecoderForCausalLM(nn.Module):
     
     def forward(
         self,
-        inputs_embeds: torch.Tensor, # [bs]
-        position_ids: torch.LongTensor, # [bs]
+        inputs_embeds: torch.Tensor,
+        position_ids: torch.LongTensor,
         attn_wrapper: FlashInferWrapper, 
         kv_cache: torch.Tensor,
     ):
@@ -410,8 +286,8 @@ class CsmForConditionalGeneration(CsmPreTrainedModel):
     
     def forward_backbone(
         self,
-        inputs_embeds: torch.Tensor, # [bs]
-        position_ids: torch.LongTensor, # [bs]
+        inputs_embeds: torch.Tensor,
+        position_ids: torch.LongTensor,
         attn_wrapper: FlashInferWrapper, 
         kv_cache: torch.Tensor,
     ):
@@ -422,8 +298,8 @@ class CsmForConditionalGeneration(CsmPreTrainedModel):
 
     def forward_depth(
         self,
-        inputs_embeds: torch.Tensor, # [bs]
-        position_ids: torch.LongTensor, # [bs]
+        inputs_embeds: torch.Tensor,
+        position_ids: torch.LongTensor,
         attn_wrapper: FlashInferWrapper, 
         kv_cache: torch.Tensor,
     ):
@@ -691,20 +567,14 @@ class CSMModel(BaseLMWithDepth):
         **kwargs: Any,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Forward pass through the backbone model."""
-        # input_ids: [bs, n_codebook]
-        # print(f"{input_ids=} {input_ids.shape=}")
         text_embeds = self.embed_text_tokens(input_ids[:, -1:])
         audio_embeds = self.embed_audio_tokens_all(input_ids[:, :-1])
-        # print(f"{input_ids=} {input_ids.shape=}, {text_embeds.shape=}, {audio_embeds.shape=}") # [bs, 33], [bs, 1, 2048], [bs, 32, 2048]
-        # print(f"{text_embeds=} {audio_embeds=}") # [bs, 1, 2048], [bs, 32, 2048]
-        # print(f"{tokens_mask.shape=}, {tokens_mask=}") # [bs, 33]
         inputs_embeds = torch.cat([audio_embeds, text_embeds], dim=1) # [bs, 33, 2048]
 
         input_masks = torch.cat(input_masks, dim=0)  # [bs, 33]   
         inputs_embeds = inputs_embeds * input_masks[:, :, None]
         inputs_embeds = inputs_embeds.sum(dim=1)
 
-        # print(f"{inputs_embeds=}")
         backbone_logits, backbone_last_hidden = self.model.forward_backbone(
             inputs_embeds=inputs_embeds,
             position_ids=position_ids,
