@@ -1,7 +1,7 @@
 from typing import Dict, Type, Any
 import torch
 
-from .base import BaseLM
+from .base import BaseLM, BaseLMWithDepth
 from .orpheus import OrpheusModel
 from .csm import CSMModel
 from .zonos import ZonosModel
@@ -54,7 +54,7 @@ def load_model(
     device: str = "cuda",
     dtype: torch.dtype = torch.bfloat16,
     **kwargs: Any
-) -> BaseLM:
+) -> BaseLM | BaseLMWithDepth:
     """
     Load a model instance based on the model name.
     

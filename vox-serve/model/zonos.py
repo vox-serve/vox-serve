@@ -825,6 +825,8 @@ class ZonosModel(BaseLM):
             if len(req.lm_output_tokens) + 1 < self.n_codebooks:
                 for j in range(len(req.lm_output_tokens) + 1, self.n_codebooks):
                     output_ids[i, j] = self.masked_token_id
+            
+            req.input_features = None # not used in decode phase
 
         return output_ids
 

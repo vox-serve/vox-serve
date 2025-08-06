@@ -133,6 +133,7 @@ class ModelWorker:
         position_ids = []
 
         # optional inference inputs 
+        # TODO: these should be single tenosr, not list of tensors
         input_features = []
         input_masks = []
 
@@ -181,8 +182,8 @@ class ModelWorker:
                 # decode request
                 next_input_token = req.lm_output_tokens[-1]
 
-                input_features.append(None)
-                input_masks.append(None)
+                input_features.append(req.input_features)
+                input_masks.append(req.input_masks)
                 repetition_cache.append(req.repetition_cache)
 
                 req.kv_token_len += 1
@@ -209,7 +210,7 @@ class ModelWorker:
             "input_ids": input_ids,
             "position_ids": position_ids,
             "input_features": input_features,
-            "repetition_cache": repetition_cache,
+            "input_masks": input_masks,
         }
     
     def run_lm_prefill(self, requests: List[Request]):
@@ -222,7 +223,7 @@ class ModelWorker:
         input_ids = lm_inputs["input_ids"]
         position_ids = lm_inputs["position_ids"]
         input_features = lm_inputs["input_features"]
-        repetition_cache = lm_inputs["repetition_cache"]
+        input_masks = lm_inputs["input_masks"]
 
         input_ids = torch.tensor(input_ids, device=self.device, dtype=torch.int32)
         position_ids = torch.tensor(position_ids, device=self.device, dtype=torch.int32)
@@ -242,22 +243,73 @@ class ModelWorker:
         torch.cuda.synchronize()
 
         # prefill run 
-        logits = self.model.forward(
-            input_ids=input_ids,
-            position_ids=position_ids,
-            attn_wrapper=self.prefill_wrapper,
-            kv_cache=self.kv_cache,
-            # repetition_cache=repetition_cache_tensor,
-            # depth_attn_wrapper=self.depth_attn_wrapper,
-            # depth_kv_cache=self.depth_kv_cache,
-            # tokens_mask=torch.tensor(requests[0].tokens_mask, device=self.device, dtype=torch.bool),
-            input_features=input_features,
-        )
+        if self.has_depth_transformer:
+            logits, backbone_hidden_states = self.model.forward(
+                input_ids=input_ids,
+                position_ids=position_ids,
+                attn_wrapper=self.prefill_wrapper,
+                kv_cache=self.kv_cache,
+                input_features=input_features,
+                input_masks=input_masks,
+            )
 
-        output_ids = self.model.sampling(
-            logits=logits,
-            requests=requests,
-        )
+            output_ids, hidden_for_depth = self.model.sampling(
+                logits=logits,
+                hidden_states=backbone_hidden_states,
+                requests=requests,
+            )
+
+            # assuming that the sequence length is 2 for the initial iteration of depth transformer. 
+            # may need to change here for other models.
+            depth_position_ids = torch.tensor([0, 1] * output_ids.shape[0], device=self.device)
+            depth_qo_indptr = torch.arange(output_ids.shape[0] + 1, device=self.device) * 2
+            depth_kv_indptr = torch.arange(output_ids.shape[0] + 1, device=self.device)
+            depth_kv_indices = torch.arange(output_ids.shape[0], device=self.device)
+            depth_kv_last_page_len = torch.tensor([2] * output_ids.shape[0], device=self.device)
+            self.depth_kv_cache.zero_()
+
+            for i in range(1, self.model.depth_n_codebooks):
+                self.depth_attn_wrapper.plan(
+                    qo_indptr=depth_qo_indptr,
+                    paged_kv_indptr=depth_kv_indptr, 
+                    paged_kv_indices=depth_kv_indices, 
+                    paged_kv_last_page_len=depth_kv_last_page_len,
+                    dtype=torch.bfloat16,
+                )
+                torch.cuda.synchronize()
+                
+                depth_logits = self.model.depth_forward(
+                    input_ids=output_ids,
+                    hidden_states=hidden_for_depth,
+                    position_ids=depth_position_ids,
+                    attn_wrapper=self.depth_attn_wrapper,
+                    kv_cache=self.depth_kv_cache,
+                )
+
+                output_ids[:, i], hidden_for_depth = self.model.depth_sampling(
+                    logits=depth_logits,
+                    i_iteration=i,
+                    requests=requests,
+                )
+
+                depth_position_ids = torch.tensor([i + 1] * output_ids.shape[0], device=self.device)
+                depth_qo_indptr = torch.arange(output_ids.shape[0] + 1, device=self.device)
+                depth_kv_last_page_len += 1
+                
+        else:
+            logits = self.model.forward(
+                input_ids=input_ids,
+                position_ids=position_ids,
+                attn_wrapper=self.prefill_wrapper,
+                kv_cache=self.kv_cache,
+                input_features=input_features,
+                input_masks=input_masks,
+            )
+
+            output_ids = self.model.sampling(
+                logits=logits,
+                requests=requests,
+            )
 
         for i, req in enumerate(requests):
             req.lm_output_tokens.append(output_ids[i].tolist())
@@ -274,7 +326,7 @@ class ModelWorker:
         input_ids = lm_inputs["input_ids"]
         position_ids = lm_inputs["position_ids"]
         input_features = lm_inputs["input_features"]
-        repetition_cache = lm_inputs["repetition_cache"]
+        input_masks = lm_inputs["input_masks"]
 
         input_ids = torch.tensor(input_ids, device=self.device, dtype=torch.int32)
         position_ids = torch.tensor(position_ids, device=self.device, dtype=torch.int32)
@@ -292,32 +344,72 @@ class ModelWorker:
         )
         torch.cuda.synchronize()
 
-        # For CSM
-        # curr_tokens_mask = torch.cat(
-        #     [torch.ones_like(input_ids).bool(), torch.zeros(1, 1).bool().to(self.device)], dim=1
-        # )
-
-        # input_ids = torch.cat(
-        #     [input_ids, torch.zeros(1, 1, device=self.device, dtype=torch.long)], dim=1
-        # ) # text stream is 0
-
         # decode run 
-        logits = self.model.forward(
-            input_ids=input_ids,
-            position_ids=position_ids,
-            attn_wrapper=self.decode_wrapper,
-            kv_cache=self.kv_cache,
-            # repetition_cache=repetition_cache_tensor,
-            # depth_attn_wrapper=self.depth_attn_wrapper,
-            # depth_kv_cache=self.depth_kv_cache,
-            # tokens_mask=curr_tokens_mask,
-            input_features=input_features,
-        )
+        if self.has_depth_transformer:
+            logits, backbone_hidden_states = self.model.forward(
+                input_ids=input_ids,
+                position_ids=position_ids,
+                attn_wrapper=self.decode_wrapper,
+                kv_cache=self.kv_cache,
+                input_features=input_features,
+                input_masks=input_masks,
+            )
 
-        output_ids = self.model.sampling(
-            logits=logits,
-            requests=requests,
-        )
+            output_ids, hidden_for_depth = self.model.sampling(
+                logits=logits,
+                hidden_states=backbone_hidden_states,
+                requests=requests,
+            )
+
+            depth_position_ids = torch.tensor([0, 1] * output_ids.shape[0], device=self.device)
+            depth_qo_indptr = torch.arange(output_ids.shape[0] + 1, device=self.device) * 2
+            depth_kv_indptr = torch.arange(output_ids.shape[0] + 1, device=self.device)
+            depth_kv_indices = torch.arange(output_ids.shape[0], device=self.device)
+            depth_kv_last_page_len = torch.tensor([2] * output_ids.shape[0], device=self.device)
+            self.depth_kv_cache.zero_()
+
+            for i in range(1, self.model.depth_n_codebooks):
+                self.depth_attn_wrapper.plan(
+                    qo_indptr=depth_qo_indptr,
+                    paged_kv_indptr=depth_kv_indptr, 
+                    paged_kv_indices=depth_kv_indices, 
+                    paged_kv_last_page_len=depth_kv_last_page_len,
+                    dtype=torch.bfloat16,
+                )
+                torch.cuda.synchronize()
+                
+                depth_logits = self.model.depth_forward(
+                    input_ids=output_ids,
+                    hidden_states=hidden_for_depth,
+                    position_ids=depth_position_ids,
+                    attn_wrapper=self.depth_attn_wrapper,
+                    kv_cache=self.depth_kv_cache,
+                )
+
+                output_ids[:, i], hidden_for_depth = self.model.depth_sampling(
+                    logits=depth_logits,
+                    i_iteration=i,
+                    requests=requests,
+                )
+
+                depth_position_ids = torch.tensor([i + 1] * output_ids.shape[0], device=self.device)
+                depth_qo_indptr = torch.arange(output_ids.shape[0] + 1, device=self.device)
+                depth_kv_last_page_len += 1
+                
+        else:
+            logits = self.model.forward(
+                input_ids=input_ids,
+                position_ids=position_ids,
+                attn_wrapper=self.decode_wrapper,
+                kv_cache=self.kv_cache,
+                input_features=input_features,
+                input_masks=input_masks,
+            )
+
+            output_ids = self.model.sampling(
+                logits=logits,
+                requests=requests,
+            )
 
         for i, req in enumerate(requests):
             req.lm_output_tokens.append(output_ids[i].tolist())
@@ -328,25 +420,14 @@ class ModelWorker:
         if len(requests) == 0:
             return
 
-        # # For orpheus:
-        # for req in requests:
-        #     if len(req.lm_output_tokens) % 7 == 0 and len(req.lm_output_tokens) > 27:
-        #         audio_samples = self.model.postprocess(req.lm_output_tokens[-28:])
-        #         if audio_samples is not None:
-        #             req.output_audio.append(audio_samples)
-        #             req.is_audio_available = True
-        #         else:
-        #             req.is_audio_available = False
-        #     else:
-        #         req.is_audio_available = False
-
         token_ids = []
         for req in requests: 
             new_tokens = req.lm_output_tokens[req.next_audio_decode_idx : req.next_audio_decode_idx + self.detokenize_interval] 
             
             if req.done_all:
                 # exclude the last token since it is a stop token
-                new_tokens = new_tokens[:-1]
+                if len(new_tokens) > 1:
+                    new_tokens = new_tokens[:-1]
 
             if len(new_tokens) < self.detokenize_interval:
                 new_tokens.extend([new_tokens[-1]] * (self.detokenize_interval - len(new_tokens)))
