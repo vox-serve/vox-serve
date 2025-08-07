@@ -19,7 +19,7 @@ from ..encoder.zonos import ZonosSpeakerEmbeddingLDA
 from ..flashinfer_utils import FlashInferWrapper
 from ..sampling import SamplingConfig, Sampler
 from ..requests import Request
-from .base import BaseLM
+from .base import BaseLM, PreprocessOutput
 
 
 from dataclasses import dataclass, field
@@ -737,7 +737,7 @@ class ZonosModel(BaseLM):
         #     ]
         # )
     
-    def preprocess(self, prompt: str):
+    def preprocess(self, prompt: str) -> PreprocessOutput:
         """Prepare the prompt for the model, formatting it according to Orpheus specifications."""
         # TODO: add API support for custom voice
         cond_dict = self._make_cond_dict(text=prompt)
@@ -748,18 +748,19 @@ class ZonosModel(BaseLM):
             torch.full((1, self.n_codebooks), self.masked_token_id, dtype=torch.long), 
         ], dim=0)
 
-        preprocess_dict = {
-            "input_features": input_features,
-            "repetition_cache": torch.zeros(
-                self.default_sampling_config.repetition_window if self.default_sampling_config.repetition_window > 0 else 1, 
-                self.default_sampling_config.repetition_window, 
-                self.n_codebooks, 
-                self.vocab_size, 
-                dtype=torch.bool, device=self.device
-            ),
-        }
+        repetition_cache = torch.zeros(
+            self.default_sampling_config.repetition_window if self.default_sampling_config.repetition_window > 0 else 1, 
+            self.default_sampling_config.repetition_window, 
+            self.n_codebooks, 
+            self.vocab_size, 
+            dtype=torch.bool, device=self.device
+        )
 
-        return prefix_tokens.tolist(), preprocess_dict
+        return PreprocessOutput(
+            input_tokens=prefix_tokens.tolist(),
+            input_features=input_features,
+            repetition_cache=repetition_cache
+        )
 
     def forward(
         self, 

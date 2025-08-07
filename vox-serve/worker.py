@@ -144,16 +144,17 @@ class ModelWorker:
         for req in requests:
             if not req.done_lm_prefill:
                 # prefill request
-                req.input_tokens, preprocess_dict = self.model.preprocess(req.prompt)
+                preprocess_output = self.model.preprocess(req.prompt)
+                req.input_tokens = preprocess_output.input_tokens
 
-                if "input_features" in preprocess_dict:
-                    req.input_features = preprocess_dict["input_features"] 
+                if preprocess_output.input_features is not None:
+                    req.input_features = preprocess_output.input_features
                 
-                if "input_masks" in preprocess_dict:
-                    req.input_masks = preprocess_dict["input_masks"]
+                if preprocess_output.input_masks is not None:
+                    req.input_masks = preprocess_output.input_masks
                 
-                if "repetition_cache" in preprocess_dict:
-                    req.repetition_cache = preprocess_dict["repetition_cache"]
+                if preprocess_output.repetition_cache is not None:
+                    req.repetition_cache = preprocess_output.repetition_cache
                 
                 input_features.append(req.input_features)
                 input_masks.append(req.input_masks)
