@@ -1,10 +1,25 @@
 from abc import ABC, abstractmethod
 from typing import List, Tuple, Optional, Any, Dict
+from dataclasses import dataclass
 import torch
 
 from ..flashinfer_utils import FlashInferWrapper
 from ..sampling import SamplingConfig
 from ..requests import Request
+
+
+@dataclass
+class PreprocessOutput:
+    """
+    Output data structure for the preprocess method of language models.
+    
+    This replaces the dictionary return format to provide better type safety
+    and clearer interface for preprocessing results.
+    """
+    input_tokens: List[List[int]]
+    repetition_cache: Optional[torch.Tensor] = None
+    input_masks: Optional[torch.Tensor] = None
+    input_features: Optional[torch.Tensor] = None
 
 
 class BaseLM(ABC):
@@ -89,7 +104,7 @@ class BaseLM(ABC):
         pass
     
     @abstractmethod
-    def preprocess(self, prompt: str, **kwargs) -> Tuple[List[List[int]], Dict[str, Any]]:
+    def preprocess(self, prompt: str, **kwargs) -> PreprocessOutput:
         """
         Preprocess the input prompt for the model.
         
@@ -98,7 +113,7 @@ class BaseLM(ABC):
             **kwargs: Additional model-specific parameters
             
         Returns:
-            Tuple of (input_token_ids, preprocess_dict)
+            PreprocessOutput containing input tokens and additional model-specific data
         """
         pass
     

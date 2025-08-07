@@ -10,7 +10,7 @@ from ..tokenizer.snac import SNAC
 from ..flashinfer_utils import FlashInferWrapper
 from ..sampling import SamplingConfig, Sampler
 from ..requests import Request
-from .base import BaseLM
+from .base import BaseLM, PreprocessOutput
 
 
 class OrpheusRMSNorm(nn.Module):
@@ -336,22 +336,24 @@ class OrpheusModel(BaseLM):
         prompt: str, 
         voice="tara", 
         model_type="larger",
-    ) -> Tuple[List[List[int]], Dict[str, Any]]:
+    ) -> PreprocessOutput:
         """Prepare the prompt for the model, formatting it according to Orpheus specifications."""
         self._validate_voice(voice)
         input_ids, _ = self._orpheus_format_prompt(prompt, voice, model_type)
         input_ids = input_ids.view(-1, 1) # add codebook dimension
 
-        preprocess_dict = {
-            "repetition_cache": torch.zeros(
-                self.default_sampling_config.repetition_window if self.default_sampling_config.repetition_window > 0 else 1, 
-                self.n_codebooks, 
-                self.vocab_size, 
-                dtype=torch.bool, 
-                device=self.device,
-            ),
-        }
-        return input_ids.tolist(), preprocess_dict
+        repetition_cache = torch.zeros(
+            self.default_sampling_config.repetition_window if self.default_sampling_config.repetition_window > 0 else 1, 
+            self.n_codebooks, 
+            self.vocab_size, 
+            dtype=torch.bool, 
+            device=self.device,
+        )
+        
+        return PreprocessOutput(
+            input_tokens=input_ids.tolist(),
+            repetition_cache=repetition_cache
+        )
     
     def forward(
         self, 

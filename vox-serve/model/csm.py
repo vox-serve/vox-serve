@@ -12,7 +12,7 @@ from tokenizers.processors import TemplateProcessing
 from ..flashinfer_utils import FlashInferWrapper
 from ..sampling import SamplingConfig, Sampler
 from ..requests import Request
-from .base import BaseLMWithDepth
+from .base import BaseLMWithDepth, PreprocessOutput
 
 
 class CsmRMSNorm(nn.Module):
@@ -556,7 +556,7 @@ class CSMModel(BaseLMWithDepth):
         # index -2 since we want to check the final audio codebook before text stream
         return token_ids[-2] == self.stop_token_id
     
-    def preprocess(self, prompt: str, speaker=0, context=None) -> Tuple[List[List[int]], Dict[str, Any]]:
+    def preprocess(self, prompt: str, speaker=0, context=None) -> PreprocessOutput:
         """Prepare the prompt for the model, formatting it according to CSM specifications."""
         # TODO: add reference context to API argument
         prompt_tokens, prompt_tokens_mask = self._tokenize_text_segment(prompt, speaker)
@@ -564,12 +564,10 @@ class CSMModel(BaseLMWithDepth):
             prompt_tokens = torch.cat(self.default_context["tokens"] + [prompt_tokens], dim=0)
             prompt_tokens_mask = torch.cat(self.default_context["tokens_mask"] + [prompt_tokens_mask], dim=0)
         
-        preprocess_dict = {
-            "input_masks": prompt_tokens_mask,
-        }
-        
-        # print(f"{prompt_tokens=}, {prompt_tokens_mask=}") # [seq_len, 33]
-        return prompt_tokens.tolist(), preprocess_dict
+        return PreprocessOutput(
+            input_tokens=prompt_tokens.tolist(),
+            input_masks=prompt_tokens_mask
+        )
     
     def forward(
         self, 
