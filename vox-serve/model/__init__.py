@@ -2,8 +2,9 @@ from typing import Dict, Type, Any
 import torch
 
 from .base import BaseLM, BaseLMWithDepth
-from .orpheus import OrpheusModel
 from .csm import CSMModel
+from .glm_voice import GLMVoiceModel
+from .orpheus import OrpheusModel
 from .zonos import ZonosModel
 
 # Registry mapping model name patterns to model classes
@@ -14,6 +15,8 @@ MODEL_REGISTRY: Dict[str, Type[BaseLM]] = {
     "sesame/csm-1b": CSMModel,
     "zonos": ZonosModel, 
     "Zyphra/Zonos-v0.1-transformer": ZonosModel,
+    "glm": GLMVoiceModel,
+    "zai-org/glm-4-voice-9b": GLMVoiceModel,
 }
 
 
