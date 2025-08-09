@@ -380,14 +380,37 @@ class GLMVoiceModel(BaseLM):
         from transformers import AutoTokenizer
         return AutoTokenizer.from_pretrained(tokenizer_path)
     
+    def _format_prompt(self, input_mode: str, prompt: str | None, audio_path: str | None) -> str:
+        if input_mode == "audio":
+            audio_tokens = extract_speech_token(
+                whisper_model, feature_extractor, [audio_path]
+            )[0]
+            audio_tokens = "".join([f"<|audio_{x}|>" for x in audio_tokens])
+            audio_tokens = "<|begin_of_audio|>" + audio_tokens + "<|end_of_audio|>"
+            user_input = audio_tokens
+            system_prompt = "User will provide you with a speech instruction. Do it step by step. First, think about the instruction and respond in a interleaved manner, with 13 text token followed by 26 audio tokens. "
+        else:
+            user_input = prompt
+            system_prompt = "User will provide you with a text instruction. Do it step by step. First, think about the instruction and respond in a interleaved manner, with 13 text token followed by 26 audio tokens."
+        
+        text_input = f"<|system|>\n{system_prompt}"
+        text_input += f"<|user|>\n{user_input}<|assistant|>streaming_transcription\n"
+
+        return text_input
+    
     def preprocess(
         self, 
-        prompt: str, 
-        voice="tara", 
-        model_type="larger",
+        prompt: str | None = None, 
+        audio_path: str | None = None,
+        input_audio: torch.Tensor | None = None,
     ) -> PreprocessOutput:
         """Prepare the prompt for the model, formatting it according to GLMVoice specifications."""
-        input_ids = self.text_tokenizer(prompt, return_tensors="pt").input_ids
+        text_input = self._format_prompt(
+            input_mode="audio" if audio_path is not None else "text",
+            prompt=prompt,
+            audio_path=audio_path,
+        )
+        input_ids = self.text_tokenizer(text_input, return_tensors="pt").input_ids
         input_ids = input_ids.view(-1, 1) # add codebook dimension
         
         return PreprocessOutput(input_tokens=input_ids.tolist())
