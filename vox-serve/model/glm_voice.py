@@ -1,6 +1,7 @@
 from typing import List, Dict, Any
 import json
 from dataclasses import dataclass
+# from hyperpyyaml import load_hyperpyyaml
 
 import flashinfer
 import torch
@@ -12,6 +13,7 @@ from ..flashinfer_utils import FlashInferWrapper
 from ..sampling import SamplingConfig, Sampler
 from ..requests import Request
 from ..utils import load_hf_safetensor_state_dict
+from ..tokenizer.glm_decoder import GLMAudioDecoder
 from .base import BaseLM, PreprocessOutput
 
 @dataclass
@@ -310,7 +312,17 @@ class GLMVoiceModel(BaseLM):
 
         # Use provided tokenizer path or default to model_name
         self.text_tokenizer = self._load_tokenizer(model_name)
-        # self.audio_tokenizer = SNAC.from_pretrained("hubertsiuzdak/snac_24khz").eval().to(device)
+
+        audio_decoder_repo = "zai-org/glm-4-voice-decoder"
+        audio_decoder_config_path = hf_hub_download(repo_id=audio_decoder_repo, filename="config.yaml", revision=None)
+        audio_decoder_flow_path = hf_hub_download(repo_id=audio_decoder_repo, filename="flow.pt", revision=None)
+        audio_decoder_hift_path = hf_hub_download(repo_id=audio_decoder_repo, filename="hift.pt", revision=None)
+        self.audio_decoder = GLMAudioDecoder(
+            config_path=audio_decoder_config_path,
+            flow_path=audio_decoder_flow_path,
+            hift_path=audio_decoder_hift_path,
+        )
+        self.audio_decoder.to(device)
 
         self._num_attention_heads = self.model.config.num_attention_heads 
         self._num_key_value_heads = self.model.config.multi_query_group_num
@@ -319,6 +331,7 @@ class GLMVoiceModel(BaseLM):
         self.vocab_size = self.model.config.vocab_size
 
         self.stop_token_ids = [151329, 151336, 151338]
+        self.audio_offset = self.text_tokenizer.convert_tokens_to_ids("<|audio_0|>")
 
         self.default_sampling_config = SamplingConfig(
             top_k=None, 
@@ -457,4 +470,4 @@ class GLMVoiceModel(BaseLM):
         return output_ids
 
     def postprocess(self, token_ids: torch.Tensor):
-        pass
+        return self.audio_decoder(token_ids)
