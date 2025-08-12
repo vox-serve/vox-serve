@@ -1,6 +1,6 @@
 from typing import List, Dict, Any
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 # from hyperpyyaml import load_hyperpyyaml
 
 import flashinfer
@@ -18,33 +18,46 @@ from .base import BaseLM, PreprocessOutput
 
 @dataclass
 class GLMVoiceConfig:
-    num_layers: int = 28
-    padded_vocab_size: int = 65024
-    hidden_size: int = 4096
-    ffn_hidden_size: int = 13696
-    kv_channels: int = 128
-    num_attention_heads: int = 32
-    seq_length: int = 2048
-    hidden_dropout: float = 0.0
-    classifier_dropout: float = None
-    attention_dropout: float = 0.0
-    layernorm_epsilon: float = 1e-5
-    rmsnorm: bool = True
-    apply_residual_connection_post_layernorm: bool = False
-    post_layer_norm: bool = True
+    # _name_or_path: str = "THUDM/glm-4-voice-9b"
     add_bias_linear: bool = False
-    add_qkv_bias: bool = False
-    bias_dropout_fusion: bool = True
-    multi_query_attention: bool = False
-    multi_query_group_num: int = 1
+    add_qkv_bias: bool = True
+    # apply_query_key_layer_scaling: bool = True
+    # apply_residual_connection_post_layernorm: bool = False
+    # attention_dropout: float = 0.0
+    # attention_softmax_in_fp32: bool = True
+    # bias_dropout_fusion: bool = True
+    # classifier_dropout: Any = None
+    eos_token_id: List[int] = field(default_factory=lambda: [151329, 151336, 151338])
+    ffn_hidden_size: int = 13696
+    # fp32_residual_connection: bool = False
+    # hidden_dropout: float = 0.0
+    hidden_size: int = 4096
+    # kv_channels: int = 128
+    layernorm_epsilon: float = 3.90625e-08
+    # model_type: str = "chatglm"
+    # multi_query_attention: bool = True
+    multi_query_group_num: int = 2
+    num_attention_heads: int = 32
+    num_hidden_layers: int = 40
+    num_layers: int = 40
+    # original_rope: bool = True
+    pad_token_id: int = 151329
+    padded_vocab_size: int = 168960
+    # post_layer_norm: bool = True
+    rmsnorm: bool = True
     rope_ratio: int = 1
-    apply_query_key_layer_scaling: bool = True
-    attention_softmax_in_fp32: bool = True
-    fp32_residual_connection: bool = False
+    torch_dtype: str = "bfloat16"
+    # transformers_version: str = "4.44.1"
+    # use_cache: bool = True
+    vocab_size: int = 168960
 
     @classmethod
     def from_dict(cls, config_dict: Dict[str, Any]) -> 'GLMVoiceConfig':
-        return cls(**config_dict)
+        # Get field names from the dataclass
+        field_names = {field.name for field in cls.__dataclass_fields__.values()}
+        # Filter config_dict to only include known fields
+        filtered_dict = {k: v for k, v in config_dict.items() if k in field_names}
+        return cls(**filtered_dict)
 
 
 class GLMVoiceRMSNorm(nn.Module):
@@ -72,8 +85,8 @@ class GLMVoiceMLP(nn.Module):
         super().__init__()
         self.config = config
         self.hidden_size = config.hidden_size
-        self.intermediate_size = config.ffn_hidden_size * 2
-        self.dense_h_to_4h = nn.Linear(self.hidden_size, self.intermediate_size, bias=config.add_bias_linear)
+        self.intermediate_size = config.ffn_hidden_size
+        self.dense_h_to_4h = nn.Linear(self.hidden_size, self.intermediate_size * 2, bias=config.add_bias_linear)
         self.dense_4h_to_h = nn.Linear(self.intermediate_size, self.hidden_size, bias=config.add_bias_linear)
         self.act_fn = self.swiglu
 
@@ -93,11 +106,8 @@ class GLMVoiceAttention(nn.Module):
         self.layer_idx = layer_idx
         self.head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
 
-        self.rope_scale = config.rope_scaling.get("factor", 32.0)
-        self.rope_theta = config.rope_theta 
-        self.low_freq_factor = config.rope_scaling.get("low_freq_factor", 1.0)
-        self.high_freq_factor = config.rope_scaling.get("high_freq_factor", 4.0)
-        self.old_context_len = config.rope_scaling.get("original_max_position_embeddings", 8192)
+        self.rope_scale = config.rope_ratio
+        self.rope_theta = 10_000
 
         self.num_q_heads = config.num_attention_heads
         self.num_kv_heads = config.multi_query_group_num
@@ -131,14 +141,11 @@ class GLMVoiceAttention(nn.Module):
         key_states = key_layer.view(hidden_shape) #.transpose(0, 1)
         value_states = value_layer.view(hidden_shape) #.transpose(0, 1)
 
-        query_states, key_states = flashinfer.rope.apply_llama31_rope_pos_ids(
+        query_states, key_states = flashinfer.rope.apply_rope_pos_ids(
             query_states, key_states, 
             pos_ids=position_ids, 
             rope_scale=self.rope_scale, 
             rope_theta=self.rope_theta, 
-            low_freq_factor=self.low_freq_factor,
-            high_freq_factor=self.high_freq_factor,
-            old_context_len=self.old_context_len,
         )
 
         attn_wrapper.set_kv_cache(kv_cache, key_states, value_states)
@@ -226,11 +233,7 @@ class GLMVoiceEmbedding(nn.Module):
         super().__init__()
 
         self.hidden_size = config.hidden_size
-        self.word_embeddings = nn.Embedding(
-            config.padded_vocab_size,
-            self.hidden_size,
-            dtype=config.torch_dtype,
-        )
+        self.word_embeddings = nn.Embedding(config.padded_vocab_size, self.hidden_size)
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.word_embeddings(input_ids)
@@ -276,9 +279,6 @@ class GLMVoiceForCausalLM(nn.Module):
 
     def embed_tokens(self, input_ids):
         return self.transformer.embed_tokens(input_ids)
-    
-    def get_input_embeddings(self):
-        return self.transformer.get_input_embeddings()
 
     def forward(
         self,
@@ -306,7 +306,7 @@ class GLMVoiceModel(BaseLM):
         self.model = GLMVoiceForCausalLM(self.config)
         self.model.load_state_dict(
             load_hf_safetensor_state_dict(repo_id=model_name, revision=None, token=None),
-            strict=True,
+            strict=False,
         )
         self.model.to(dtype).to(device)
 
@@ -321,14 +321,15 @@ class GLMVoiceModel(BaseLM):
             config_path=audio_decoder_config_path,
             flow_path=audio_decoder_flow_path,
             hift_path=audio_decoder_hift_path,
+            device=device,
         )
         self.audio_decoder.to(device)
 
-        self._num_attention_heads = self.model.config.num_attention_heads 
-        self._num_key_value_heads = self.model.config.multi_query_group_num
-        self._num_hidden_layers = self.model.config.num_layers
-        self._hidden_size = self.model.config.hidden_size
-        self.vocab_size = self.model.config.vocab_size
+        self._num_attention_heads = self.config.num_attention_heads 
+        self._num_key_value_heads = self.config.multi_query_group_num
+        self._num_hidden_layers = self.config.num_layers
+        self._hidden_size = self.config.hidden_size
+        self.vocab_size = self.config.vocab_size
 
         self.stop_token_ids = [151329, 151336, 151338]
         self.audio_offset = self.text_tokenizer.convert_tokens_to_ids("<|audio_0|>")
@@ -391,7 +392,7 @@ class GLMVoiceModel(BaseLM):
     def _load_tokenizer(self, tokenizer_path):
         """Load tokenizer from local path or HuggingFace hub"""
         from transformers import AutoTokenizer
-        return AutoTokenizer.from_pretrained(tokenizer_path)
+        return AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
     
     def _format_prompt(self, input_mode: str, prompt: str | None, audio_path: str | None) -> str:
         if input_mode == "audio":

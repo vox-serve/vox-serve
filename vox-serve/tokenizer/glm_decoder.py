@@ -1421,7 +1421,7 @@ class TimestepEmbedding(nn.Module):
         self,
         in_channels: int,
         time_embed_dim: int,
-        act_fn: str = "gelu",
+        act_fn: str = "silu",
         out_dim: int = None,
         post_act_fn: Optional[str] = None,
         cond_proj_dim=None,
@@ -1435,8 +1435,8 @@ class TimestepEmbedding(nn.Module):
         else:
             self.cond_proj = None
 
-        assert act_fn == "gelu"
-        self.act = torch.nn.GELU()
+        assert act_fn == "silu"
+        self.act = torch.nn.SiLU()
 
         if out_dim is not None:
             time_embed_dim_out = out_dim
@@ -1506,6 +1506,34 @@ class Upsample1D(nn.Module):
         return outputs
 
 
+class DiffusersGELU(nn.Module):
+    r"""
+    GELU activation function with tanh approximation support with `approximate="tanh"`.
+
+    Parameters:
+        dim_in (`int`): The number of channels in the input.
+        dim_out (`int`): The number of channels in the output.
+        approximate (`str`, *optional*, defaults to `"none"`): If `"tanh"`, use tanh approximation.
+        bias (`bool`, defaults to True): Whether to use a bias in the linear layer.
+    """
+
+    def __init__(self, dim_in: int, dim_out: int, approximate: str = "none", bias: bool = True):
+        super().__init__()
+        self.proj = nn.Linear(dim_in, dim_out, bias=bias)
+        self.approximate = approximate
+
+    def gelu(self, gate: torch.Tensor) -> torch.Tensor:
+        # if gate.device.type == "mps" and is_torch_version("<", "2.0.0"):
+        #     # fp16 gelu not supported on mps before torch 2.0
+        #     return F.gelu(gate.to(dtype=torch.float32), approximate=self.approximate).to(dtype=gate.dtype)
+        return F.gelu(gate, approximate=self.approximate)
+
+    def forward(self, hidden_states):
+        hidden_states = self.proj(hidden_states)
+        hidden_states = self.gelu(hidden_states)
+        return hidden_states
+
+
 class BasicTransformeFeedForward(nn.Module):
     r"""
     A feed-forward layer.
@@ -1533,7 +1561,7 @@ class BasicTransformeFeedForward(nn.Module):
         dim_out = dim_out if dim_out is not None else dim
 
         assert activation_fn == "gelu"
-        act_fn = nn.GELU(dim, inner_dim)
+        act_fn = DiffusersGELU(dim, inner_dim)
 
         # if activation_fn == "gelu":
         #     act_fn = GELU(dim, inner_dim)
@@ -1759,7 +1787,7 @@ class ConditionalDecoder(nn.Module):
         dropout=0,
         attention_head_dim=64,
         n_blocks=4,
-        num_mid_blocks=21,
+        num_mid_blocks=12,
         num_heads=8,
         act_fn="gelu",
     ):
@@ -2626,18 +2654,27 @@ class GLMHiFTModel(nn.Module):
 
 
 class GLMAudioDecoder(nn.Module):
-    def __init__(self, config_path, flow_path, hift_path):
+    def __init__(self, config_path, flow_path, hift_path, device):
         super().__init__()
+        self.device = device
 
-        with open(config_path, 'r') as f:
-            self.scratch_configs = load_hyperpyyaml(f)
+        # with open(config_path, 'r') as f:
+        #     self.scratch_configs = load_hyperpyyaml(f)
 
         # Load models
         # self.flow = GLMFlowModel(self.scratch_configs['flow'])
-        self.flow = GLMFlowModel()
+        self.flow = GLMFlowModel(
+            encoder=BlockConformerEncoder(),
+            length_regulator=InterpolateRegulator(),
+            decoder=ConditionalCFM(
+                estimator=ConditionalDecoder()
+            ),
+        )
         self.flow.load_state_dict(torch.load(flow_path, map_location=self.device))
         # self.hift = GLMHiFTModel(self.scratch_configs['hift'])
-        self.hift = GLMHiFTModel()
+        self.hift = GLMHiFTModel(
+            f0_predictor=ConvRNNF0Predictor()
+        )
         self.hift.load_state_dict(torch.load(hift_path, map_location=self.device))
 
     def forward(
