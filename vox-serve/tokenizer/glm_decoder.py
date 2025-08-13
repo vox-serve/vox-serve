@@ -2681,6 +2681,10 @@ class GLMAudioDecoder(nn.Module):
         self,
         audio_ids: torch.Tensor,
     ):
-        mel = self.flow.inference(token=audio_ids, token_len=torch.tensor([audio_ids.shape[1]], dtype=torch.int32))
+        mel = self.flow.inference(
+            token=audio_ids, 
+            token_len=torch.tensor([audio_ids.shape[1]], dtype=torch.int32, device=self.device),
+            embedding=torch.zeros(1, 192, device=self.device),
+        )
         speech = self.hift.inference(mel=mel)
         return speech

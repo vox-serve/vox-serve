@@ -152,7 +152,7 @@ class GLMVoiceAttention(nn.Module):
         attn_output = attn_wrapper.run(query_states, kv_cache)
 
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
-        attn_output = self.o_proj(attn_output)
+        attn_output = self.dense(attn_output)
         return attn_output
 
 
@@ -249,6 +249,9 @@ class GLMVoiceBackboneModel(nn.Module):
         self.encoder = GLMVoiceTransformer(config)
         self.output_layer = nn.Linear(config.hidden_size, config.padded_vocab_size, bias=False)
 
+    def embed_tokens(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.embedding(input_ids)
+
     def forward(
         self,
         inputs_embeds: torch.Tensor,
@@ -260,7 +263,7 @@ class GLMVoiceBackboneModel(nn.Module):
         hidden_states = inputs_embeds
 
         hidden_states = self.encoder(
-            inputs_embeds=hidden_states,
+            hidden_states=hidden_states,
             position_ids=position_ids,
             attn_wrapper=attn_wrapper,
             kv_cache=kv_cache,
@@ -340,7 +343,7 @@ class GLMVoiceModel(BaseLM):
             min_p=None,
             temperature=1.0,
             repetition_penalty=None,
-            repetition_window=-None, 
+            repetition_window=None, 
             cfg_scale=None,
         )
 
@@ -471,4 +474,4 @@ class GLMVoiceModel(BaseLM):
         return output_ids
 
     def postprocess(self, token_ids: torch.Tensor):
-        return self.audio_decoder(token_ids)
+        return self.audio_decoder(token_ids[:, :, 0] - self.audio_offset)
