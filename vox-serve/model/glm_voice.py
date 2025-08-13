@@ -144,6 +144,8 @@ class GLMVoiceAttention(nn.Module):
         query_states, key_states = flashinfer.rope.apply_rope_pos_ids(
             query_states, key_states, 
             pos_ids=position_ids, 
+            rotary_dim=self.head_dim // 2,
+            interleave=True,
             rope_scale=self.rope_scale, 
             rope_theta=self.rope_theta, 
         )
@@ -339,9 +341,9 @@ class GLMVoiceModel(BaseLM):
 
         self.default_sampling_config = SamplingConfig(
             top_k=None, 
-            top_p=1.0,
+            top_p=0.8,
             min_p=None,
-            temperature=1.0,
+            temperature=0.8,
             repetition_penalty=None,
             repetition_window=None, 
             cfg_scale=None,
