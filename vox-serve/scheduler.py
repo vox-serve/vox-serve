@@ -64,7 +64,7 @@ class Scheduler:
         requests_to_detokenize = []
         
         for req in requests:
-            if req.done_all or (len(req.lm_output_tokens) - req.next_audio_decode_idx >= self.model_worker.detokenize_interval):
+            if req.done_all or self.model_worker.do_detokenize(req):
                 requests_to_detokenize.append(req)
         
         # run detokenization if needed

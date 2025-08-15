@@ -544,6 +544,12 @@ class ModelWorker:
             for req in dummy_requests:
                 self.free_kv_cache(req)
 
+    def do_detokenize(self, request: Request):
+        """
+        Check if the request is ready for detokenization.
+        """
+        return (len(request.lm_output_tokens) - request.next_audio_decode_idx >= self.detokenize_interval)
+
     def is_finished(self, request: Request):
         # TODO: request-specific max_tokens
         return (
