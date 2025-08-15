@@ -636,6 +636,10 @@ class CSMModel(BaseLMWithDepth):
             req.input_masks = torch.ones(self.n_codebooks, dtype=torch.bool, device=self.device)[None, :]
             req.input_masks[:, -1] = False  # only the audio streams are used in decode phase
 
+            # no additional logic for CSM model
+            req.lm_output_tokens.append(output_ids[i].tolist())
+            req.lm_output_audio_tokens.append(output_ids[i].tolist())
+
         return output_ids, hidden_for_depth
     
     def depth_forward(

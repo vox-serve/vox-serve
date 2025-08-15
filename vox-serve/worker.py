@@ -315,8 +315,8 @@ class ModelWorker:
                 requests=requests,
             )
 
-        for i, req in enumerate(requests):
-            req.lm_output_tokens.append(output_ids[i].tolist())
+        # for i, req in enumerate(requests):
+        #     req.lm_output_tokens.append(output_ids[i].tolist())
         
         return 
     
@@ -415,8 +415,8 @@ class ModelWorker:
                 requests=requests,
             )
 
-        for i, req in enumerate(requests):
-            req.lm_output_tokens.append(output_ids[i].tolist())
+        # for i, req in enumerate(requests):
+        #     req.lm_output_tokens.append(output_ids[i].tolist())
 
         return 
 
@@ -426,7 +426,7 @@ class ModelWorker:
 
         token_ids = []
         for req in requests: 
-            new_tokens = req.lm_output_tokens[req.next_audio_decode_idx : req.next_audio_decode_idx + self.detokenize_interval] 
+            new_tokens = req.lm_output_audio_tokens[req.next_audio_decode_idx : req.next_audio_decode_idx + self.detokenize_interval] 
             
             if req.done_all:
                 # exclude the last token since it is a stop token
@@ -446,7 +446,7 @@ class ModelWorker:
             audio = audio_tensors[i].detach().cpu().numpy()
             audio_int16 = (audio * 32767).astype(np.int16) 
 
-            last_chunk_len = len(req.lm_output_tokens[req.next_audio_decode_idx : req.next_audio_decode_idx + self.detokenize_interval])
+            last_chunk_len = len(req.lm_output_audio_tokens[req.next_audio_decode_idx : req.next_audio_decode_idx + self.detokenize_interval])
             if last_chunk_len < self.detokenize_interval:
                 # remove the padded audio
                 audio_int16 = audio_int16[:int(audio_int16.shape[1] * last_chunk_len / self.detokenize_interval)]
@@ -528,8 +528,8 @@ class ModelWorker:
             print("Warming up detokenization...")
             for req in dummy_requests:
                 # Ensure we have enough tokens for detokenization
-                while len(req.lm_output_tokens) < self.detokenize_interval:
-                    req.lm_output_tokens.append(torch.randint(0, 1000, (self.model.n_codebooks,)).tolist())
+                while len(req.lm_output_audio_tokens) < self.detokenize_interval:
+                    req.lm_output_audio_tokens.append(torch.randint(0, 1000, (self.model.n_codebooks,)).tolist())
 
             # Run detokenization warmup
             self.run_detokenize(dummy_requests)
@@ -548,7 +548,7 @@ class ModelWorker:
         """
         Check if the request is ready for detokenization.
         """
-        return (len(request.lm_output_tokens) - request.next_audio_decode_idx >= self.detokenize_interval)
+        return (len(request.lm_output_audio_tokens) - request.next_audio_decode_idx >= self.detokenize_interval)
 
     def is_finished(self, request: Request):
         # TODO: request-specific max_tokens

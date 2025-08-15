@@ -151,7 +151,8 @@ class BaseLM(ABC):
         **kwargs,
     ) -> torch.Tensor:
         """
-        Sampling for generating output tokens.
+        Sampling and other model-specific logics for generating output tokens.
+        `requests` will be updated with the sampled tokens.
         
         Args:
             logits: Output logits from the model. Shape: (batch_size, n_codebooks, vocab_size)
@@ -259,7 +260,8 @@ class BaseLMWithDepth(BaseLM):
         **kwargs,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Sampling for generating output tokens from the backbone model.
+        Sampling and other model-specific logics for generating output tokens.
+        `requests` will be updated with the sampled tokens.
         
         Args:
             logits: Output logits from the model. Shape: (batch_size, n_codebooks, vocab_size)

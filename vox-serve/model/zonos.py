@@ -840,6 +840,10 @@ class ZonosModel(BaseLM):
             
             req.input_features = None # not used in decode phase
 
+            # no additional logic for CSM model for now. TODO: revert delay patterns here?
+            req.lm_output_tokens.append(output_ids[i].tolist())
+            req.lm_output_audio_tokens.append(output_ids[i].tolist())
+
         return output_ids
 
     def postprocess(self, token_ids: torch.Tensor):

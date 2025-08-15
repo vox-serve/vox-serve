@@ -416,6 +416,10 @@ class OrpheusModel(BaseLM):
                 sampling_params.repetition_window, 
             )
 
+            # no additional logic for Orpheus model for now
+            req.lm_output_tokens.append(output_ids[i].tolist())
+            req.lm_output_audio_tokens.append(output_ids[i].tolist())
+
         return output_ids
     
     def _turn_token_into_id(self, output_ids):

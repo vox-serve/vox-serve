@@ -382,7 +382,7 @@ class GLMVoiceModel(BaseLM):
     @property
     def detokenize_overlap(self) -> int:
         """Overlap size for detokenization."""
-        return 5
+        return 0
     
     @property
     def max_tokens(self) -> int:
@@ -472,6 +472,13 @@ class GLMVoiceModel(BaseLM):
         output_ids = torch.zeros(logits.shape[0], logits.shape[1], dtype=torch.long, device=self.device)
         for i in range(self.n_codebooks):
             output_ids[:, i] = Sampler.run_sampling(logits[:, i], config=sampling_params)
+        
+        for i, req in enumerate(requests):
+            # filter out the non-audio tokens
+            req.lm_output_tokens.append(output_ids[i].tolist())
+            if output_ids[i, 0] >= self.audio_offset:
+                # if the first token is an audio token, append it to the audio tokens
+                req.lm_output_audio_tokens.append(output_ids[i].tolist())
 
         return output_ids
 
