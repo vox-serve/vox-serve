@@ -69,6 +69,11 @@ class BaseLM(ABC):
     def has_depth_transformer(self) -> bool:
         """Indicates if the model has a depth transformer."""
         return False
+    
+    @property
+    def supports_audio_input(self) -> bool:
+        """Indicates if the model accepts audio input."""
+        return False
 
     @property
     @abstractmethod

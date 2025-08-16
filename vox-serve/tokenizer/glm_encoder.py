@@ -338,6 +338,7 @@ class GLMVoiceEncoder:
     def __init__(self, repo_id: str, dtype: torch.dtype, device: str):
         self.repo_id = repo_id
         self.device = device
+        self.dtype = dtype
 
         config_path = hf_hub_download(repo_id=repo_id, filename="config.json", revision=None)
         self.config = GLMEncoderConfig.from_dict(json.load(open(config_path)))
@@ -363,7 +364,6 @@ class GLMVoiceEncoder:
             device=self.device,
             padding="longest", 
             pad_to_multiple_of=self.stride,
-        )
-        print(features)
+        ).to(self.device).to(self.dtype)
         speech_tokens = self.encoder(**features)
         return speech_tokens

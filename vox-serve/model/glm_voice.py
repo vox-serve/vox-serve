@@ -382,6 +382,11 @@ class GLMVoiceModel(BaseLM):
     def hidden_size(self) -> int:
         """Hidden size of the model."""
         return self._hidden_size
+    
+    @property
+    def supports_audio_input(self) -> bool:
+        """Indicates if the model accepts audio input."""
+        return True
 
     @property
     def detokenize_interval(self) -> int:
@@ -422,6 +427,8 @@ class GLMVoiceModel(BaseLM):
             tokens = self.audio_encoder.encode(audio_segment)
 
             output_tokens.extend(tokens.tolist())
+
+            time_step += 30
 
         return output_tokens
     
@@ -503,6 +510,7 @@ class GLMVoiceModel(BaseLM):
                 # if the first token is an audio token, append it to the audio tokens
                 req.lm_output_audio_tokens.append(output_ids[i].tolist())
 
+        print(f"Sampling output: {output_ids.tolist()}")
         return output_ids
 
     def postprocess(self, token_ids: torch.Tensor):

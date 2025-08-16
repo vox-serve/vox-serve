@@ -510,6 +510,11 @@ class ModelWorker:
             request.input_features = None
             request.input_masks = None
             request.repetition_cache = None
+
+            # TODO: add example audio
+            # if self.model.supports_audio_input:
+            #     # Create dummy audio tokens
+            #     request.audio_path = ...
             
             dummy_requests.append(request)
         
