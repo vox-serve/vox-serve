@@ -7,12 +7,14 @@ import flashinfer
 import torch
 from torch import nn
 from torch.nn import functional as F
+import torchaudio 
 from huggingface_hub import hf_hub_download
 
 from ..flashinfer_utils import FlashInferWrapper
 from ..sampling import SamplingConfig, Sampler
 from ..requests import Request
 from ..utils import load_hf_safetensor_state_dict
+from ..tokenizer.glm_encoder import GLMVoiceEncoder
 from ..tokenizer.glm_decoder import GLMAudioDecoder
 from .base import BaseLM, PreprocessOutput
 
@@ -318,6 +320,13 @@ class GLMVoiceModel(BaseLM):
         # Use provided tokenizer path or default to model_name
         self.text_tokenizer = self._load_tokenizer(model_name)
 
+        audio_encoder_repo = "zai-org/glm-4-voice-tokenizer"
+        self.audio_encoder = GLMVoiceEncoder(
+            repo_id=audio_encoder_repo,
+            dtype=dtype,
+            device=device,
+        )
+
         audio_decoder_repo = "zai-org/glm-4-voice-decoder"
         audio_decoder_config_path = hf_hub_download(repo_id=audio_decoder_repo, filename="config.yaml", revision=None)
         audio_decoder_flow_path = hf_hub_download(repo_id=audio_decoder_repo, filename="flow.pt", revision=None)
@@ -399,11 +408,26 @@ class GLMVoiceModel(BaseLM):
         from transformers import AutoTokenizer
         return AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
     
+    def _extract_speech_token(self, audio_path: str) -> List[List[int]]:
+        """Extract speech tokens from audio file."""
+        audio, sr = torchaudio.load(audio_path)
+        if sr != 16000:
+            # audio = torchaudio.transforms.Resample(orig_freq=sr, new_freq=16000)[0]
+            audio = torchaudio.functional.resample(audio, orig_freq=sr, new_freq=16000)
+        
+        output_tokens = [] 
+        time_step = 0 
+        while time_step * 16000 < audio.shape[0]:
+            audio_segment = audio[0, time_step * 16000: (time_step + 30) * 16000]
+            tokens = self.audio_encoder.encode(audio_segment)
+
+            output_tokens.extend(tokens.tolist())
+
+        return output_tokens
+    
     def _format_prompt(self, input_mode: str, prompt: str | None, audio_path: str | None) -> str:
         if input_mode == "audio":
-            audio_tokens = extract_speech_token(
-                whisper_model, feature_extractor, [audio_path]
-            )[0]
+            audio_tokens = self._extract_speech_token(audio_path)[0]
             audio_tokens = "".join([f"<|audio_{x}|>" for x in audio_tokens])
             audio_tokens = "<|begin_of_audio|>" + audio_tokens + "<|end_of_audio|>"
             user_input = audio_tokens
@@ -421,7 +445,6 @@ class GLMVoiceModel(BaseLM):
         self, 
         prompt: str | None = None, 
         audio_path: str | None = None,
-        input_audio: torch.Tensor | None = None,
     ) -> PreprocessOutput:
         """Prepare the prompt for the model, formatting it according to GLMVoice specifications."""
         text_input = self._format_prompt(

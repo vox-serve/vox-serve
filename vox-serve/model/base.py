@@ -104,12 +104,13 @@ class BaseLM(ABC):
         pass
     
     @abstractmethod
-    def preprocess(self, prompt: str, **kwargs) -> PreprocessOutput:
+    def preprocess(self, prompt: str = None, audio_path: str = None, **kwargs) -> PreprocessOutput:
         """
         Preprocess the input prompt for the model.
         
         Args:
-            prompt: Input text prompt
+            prompt: Input text prompt (optional if audio_path provided)
+            audio_path: Path to input audio file (optional)
             **kwargs: Additional model-specific parameters
             
         Returns:

@@ -13,7 +13,8 @@ class Request:
     Base class for all requests.
     """
     request_id: str 
-    prompt: str
+    prompt: str = None
+    audio_path: str = None
     sampling_config: SamplingConfig = None
 
     # next_position_id == len(input_tokens) + len(lm_output_tokens) + 1

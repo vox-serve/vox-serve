@@ -333,11 +333,13 @@ class OrpheusModel(BaseLM):
     
     def preprocess(
         self, 
-        prompt: str, 
+        prompt: str = None, 
+        audio_path: str = None,
         voice="tara", 
         model_type="larger",
     ) -> PreprocessOutput:
         """Prepare the prompt for the model, formatting it according to Orpheus specifications."""
+        assert audio_path is None 
         self._validate_voice(voice)
         input_ids, _ = self._orpheus_format_prompt(prompt, voice, model_type)
         input_ids = input_ids.view(-1, 1) # add codebook dimension

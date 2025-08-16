@@ -147,7 +147,10 @@ class ModelWorker:
         for req in requests:
             if not req.done_lm_prefill:
                 # prefill request
-                preprocess_output = self.model.preprocess(req.prompt)
+                preprocess_output = self.model.preprocess(
+                    prompt=req.prompt,
+                    audio_path=req.audio_path
+                )
                 req.input_tokens = preprocess_output.input_tokens
 
                 if preprocess_output.input_features is not None:

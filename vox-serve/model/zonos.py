@@ -737,9 +737,10 @@ class ZonosModel(BaseLM):
         #     ]
         # )
     
-    def preprocess(self, prompt: str) -> PreprocessOutput:
+    def preprocess(self, prompt: str = None, audio_path: str = None) -> PreprocessOutput:
         """Prepare the prompt for the model, formatting it according to Orpheus specifications."""
         # TODO: add API support for custom voice
+        assert audio_path is None 
         cond_dict = self._make_cond_dict(text=prompt)
         input_features = self._prepare_conditioning(cond_dict)
 
