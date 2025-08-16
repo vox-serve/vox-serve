@@ -13,7 +13,8 @@ class Request:
     Base class for all requests.
     """
     request_id: str 
-    prompt: str
+    prompt: str = None
+    audio_path: str = None
     sampling_config: SamplingConfig = None
 
     # next_position_id == len(input_tokens) + len(lm_output_tokens) + 1
@@ -25,8 +26,13 @@ class Request:
     kv_last_page_len: int = None
     # kv_token_len == (len(kv_pages) - 1) * page_size + kv_last_page_len
 
-    input_tokens: List[List[int]] = None # shape: (seq_len, n_codebooks)
-    lm_output_tokens: List[List[int]] = field(default_factory=list) # shape: (seq_len, n_codebooks)
+    # input prompt tokens. shape: (seq_len, n_codebooks)
+    input_tokens: List[List[int]] = None 
+    # raw output tokens from LM to be given to the next step of LM inference. shape: (seq_len, n_codebooks)
+    lm_output_tokens: List[List[int]] = field(default_factory=list) 
+    # audio tokens to be given to the detokenizer, after filtering or reverting delay patterns. 
+    # shape: (seq_len, n_codebooks)
+    lm_output_audio_tokens: List[List[int]] = field(default_factory=list) 
     output_audio: Queue = field(default_factory=Queue)
 
     # progress status

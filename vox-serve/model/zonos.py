@@ -737,9 +737,10 @@ class ZonosModel(BaseLM):
         #     ]
         # )
     
-    def preprocess(self, prompt: str) -> PreprocessOutput:
+    def preprocess(self, prompt: str = None, audio_path: str = None) -> PreprocessOutput:
         """Prepare the prompt for the model, formatting it according to Orpheus specifications."""
         # TODO: add API support for custom voice
+        assert audio_path is None 
         cond_dict = self._make_cond_dict(text=prompt)
         input_features = self._prepare_conditioning(cond_dict)
 
@@ -839,6 +840,10 @@ class ZonosModel(BaseLM):
                     output_ids[i, j] = self.masked_token_id
             
             req.input_features = None # not used in decode phase
+
+            # no additional logic for CSM model for now. TODO: revert delay patterns here?
+            req.lm_output_tokens.append(output_ids[i].tolist())
+            req.lm_output_audio_tokens.append(output_ids[i].tolist())
 
         return output_ids
 

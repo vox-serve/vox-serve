@@ -129,7 +129,7 @@ class FlashInferDecodeWrapper():
         paged_kv_indices_buffer=None,
         paged_kv_last_page_len_buffer=None,
         use_cuda_graph=False, 
-        use_tensor_cores=False,
+        use_tensor_cores=True,
     ):
         self.device = device
         # self.attn_buffer = torch.empty(256 * 1024 * 1024, dtype=torch.uint8, device=device)

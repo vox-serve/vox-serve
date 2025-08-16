@@ -109,6 +109,9 @@ class ModelWorker:
         self.empty_pages = queue.Queue()
         for i in range(self.max_num_pages):
             self.empty_pages.put(i)
+        
+        self.warmup()
+        self.kv_cache.zero_()
     
     @property
     def detokenize_interval(self) -> int:
@@ -144,7 +147,10 @@ class ModelWorker:
         for req in requests:
             if not req.done_lm_prefill:
                 # prefill request
-                preprocess_output = self.model.preprocess(req.prompt)
+                preprocess_output = self.model.preprocess(
+                    prompt=req.prompt,
+                    audio_path=req.audio_path
+                )
                 req.input_tokens = preprocess_output.input_tokens
 
                 if preprocess_output.input_features is not None:
@@ -163,7 +169,7 @@ class ModelWorker:
                 n_pages_to_allocate = (len(req.input_tokens) + self.page_size - 1) // self.page_size
                 req.kv_token_len = len(req.input_tokens)
 
-                req.kv_pages = [self.empty_pages.get() for _ in range(n_pages_to_allocate)]
+                req.kv_pages = [self.empty_pages.get_nowait() for _ in range(n_pages_to_allocate)]
                 req.kv_last_page_len = len(req.input_tokens) % self.page_size
                 if req.kv_last_page_len == 0:
                     req.kv_last_page_len = self.page_size
@@ -190,7 +196,7 @@ class ModelWorker:
                 req.kv_token_len += 1
                 req.kv_last_page_len += 1
                 if req.kv_last_page_len > self.page_size:
-                    req.kv_pages.append(self.empty_pages.get())
+                    req.kv_pages.append(self.empty_pages.get_nowait())
                     req.kv_last_page_len = 1
                 
                 qo_indptr.append(qo_indptr[-1] + 1)
@@ -312,8 +318,8 @@ class ModelWorker:
                 requests=requests,
             )
 
-        for i, req in enumerate(requests):
-            req.lm_output_tokens.append(output_ids[i].tolist())
+        # for i, req in enumerate(requests):
+        #     req.lm_output_tokens.append(output_ids[i].tolist())
         
         return 
     
@@ -412,8 +418,8 @@ class ModelWorker:
                 requests=requests,
             )
 
-        for i, req in enumerate(requests):
-            req.lm_output_tokens.append(output_ids[i].tolist())
+        # for i, req in enumerate(requests):
+        #     req.lm_output_tokens.append(output_ids[i].tolist())
 
         return 
 
@@ -423,7 +429,7 @@ class ModelWorker:
 
         token_ids = []
         for req in requests: 
-            new_tokens = req.lm_output_tokens[req.next_audio_decode_idx : req.next_audio_decode_idx + self.detokenize_interval] 
+            new_tokens = req.lm_output_audio_tokens[req.next_audio_decode_idx : req.next_audio_decode_idx + self.detokenize_interval] 
             
             if req.done_all:
                 # exclude the last token since it is a stop token
@@ -443,7 +449,7 @@ class ModelWorker:
             audio = audio_tensors[i].detach().cpu().numpy()
             audio_int16 = (audio * 32767).astype(np.int16) 
 
-            last_chunk_len = len(req.lm_output_tokens[req.next_audio_decode_idx : req.next_audio_decode_idx + self.detokenize_interval])
+            last_chunk_len = len(req.lm_output_audio_tokens[req.next_audio_decode_idx : req.next_audio_decode_idx + self.detokenize_interval])
             if last_chunk_len < self.detokenize_interval:
                 # remove the padded audio
                 audio_int16 = audio_int16[:int(audio_int16.shape[1] * last_chunk_len / self.detokenize_interval)]
@@ -468,6 +474,89 @@ class ModelWorker:
             request.kv_pages = []
             request.kv_token_len = 0
             request.kv_last_page_len = 0
+
+    def warmup(self, num_requests: int = 1, sequence_length: int = 128):
+        """
+        Warmup function to initialize GPU kernels and optimize inference paths.
+        Runs prefill, decode, and sampling with random input data.
+        
+        Args:
+            num_requests: Number of dummy requests to create for warmup
+            sequence_length: Length of random input sequences
+        """
+        print(f"Warming up model with {num_requests} requests of length {sequence_length}")
+        
+        # Create dummy requests with random data
+        dummy_requests = []
+        for i in range(num_requests):
+            request = Request(
+                request_id=f"warmup_{i}",
+                prompt="warmup dummy prompt"
+            )
+            
+            # Initialize request state
+            request.done_lm_prefill = False
+            request.lm_output_tokens = []
+            request.next_position_id = 1
+            request.next_audio_decode_idx = 0
+            request.done_all = False
+            
+            # Create random input tokens
+            request.input_tokens = torch.randint(
+                0, 1000, (sequence_length,), device=self.device
+            ).tolist()
+            
+            # Set dummy input features and masks if needed
+            request.input_features = None
+            request.input_masks = None
+            request.repetition_cache = None
+
+            # TODO: add example audio
+            # if self.model.supports_audio_input:
+            #     # Create dummy audio tokens
+            #     request.audio_path = ...
+            
+            dummy_requests.append(request)
+        
+        try:
+            # Warmup prefill (includes forward pass and sampling)
+            print("Warming up prefill...")
+            self.run_lm_prefill(dummy_requests)
+            
+            # Warmup decode (run a few decode steps, includes forward pass and sampling)
+            print("Warming up decode and sampling...")
+            for _ in range(5):
+                # # Add dummy output tokens for decode
+                # for req in dummy_requests:
+                #     req.lm_output_tokens.append(torch.randint(0, 1000, (self.model.n_codebooks,)).tolist())
+                
+                self.run_lm_decode(dummy_requests)
+            
+            # Warmup detokenization if we have enough tokens
+            print("Warming up detokenization...")
+            for req in dummy_requests:
+                # Ensure we have enough tokens for detokenization
+                while len(req.lm_output_audio_tokens) < self.detokenize_interval:
+                    req.lm_output_audio_tokens.append(torch.randint(0, 1000, (self.model.n_codebooks,)).tolist())
+
+            # Run detokenization warmup
+            self.run_detokenize(dummy_requests)
+            
+            print("Warmup completed successfully")
+            
+        except Exception as e:
+            print(f"Warmup failed: {e}")
+            
+        finally:
+            # Clean up dummy requests
+            for req in dummy_requests:
+                self.free_kv_cache(req)
+
+    def do_detokenize(self, request: Request):
+        """
+        Check if the request is ready for detokenization.
+        """
+        return (len(request.lm_output_audio_tokens) - request.next_audio_decode_idx >= self.detokenize_interval)
 
     def is_finished(self, request: Request):
         # TODO: request-specific max_tokens

@@ -556,9 +556,10 @@ class CSMModel(BaseLMWithDepth):
         # index -2 since we want to check the final audio codebook before text stream
         return token_ids[-2] == self.stop_token_id
     
-    def preprocess(self, prompt: str, speaker=0, context=None) -> PreprocessOutput:
+    def preprocess(self, prompt: str = None, audio_path: str = None, speaker=0, context=None) -> PreprocessOutput:
         """Prepare the prompt for the model, formatting it according to CSM specifications."""
         # TODO: add reference context to API argument
+        assert audio_path is None 
         prompt_tokens, prompt_tokens_mask = self._tokenize_text_segment(prompt, speaker)
         if context is None:
             prompt_tokens = torch.cat(self.default_context["tokens"] + [prompt_tokens], dim=0)
@@ -635,6 +636,10 @@ class CSMModel(BaseLMWithDepth):
         for i, req in enumerate(requests):
             req.input_masks = torch.ones(self.n_codebooks, dtype=torch.bool, device=self.device)[None, :]
             req.input_masks[:, -1] = False  # only the audio streams are used in decode phase
+
+            # no additional logic for CSM model
+            req.lm_output_tokens.append(output_ids[i].tolist())
+            req.lm_output_audio_tokens.append(output_ids[i].tolist())
 
         return output_ids, hidden_for_depth
     

@@ -69,6 +69,11 @@ class BaseLM(ABC):
     def has_depth_transformer(self) -> bool:
         """Indicates if the model has a depth transformer."""
         return False
+    
+    @property
+    def supports_audio_input(self) -> bool:
+        """Indicates if the model accepts audio input."""
+        return False
 
     @property
     @abstractmethod
@@ -104,12 +109,13 @@ class BaseLM(ABC):
         pass
     
     @abstractmethod
-    def preprocess(self, prompt: str, **kwargs) -> PreprocessOutput:
+    def preprocess(self, prompt: str = None, audio_path: str = None, **kwargs) -> PreprocessOutput:
         """
         Preprocess the input prompt for the model.
         
         Args:
-            prompt: Input text prompt
+            prompt: Input text prompt (optional if audio_path provided)
+            audio_path: Path to input audio file (optional)
             **kwargs: Additional model-specific parameters
             
         Returns:
@@ -151,7 +157,8 @@ class BaseLM(ABC):
         **kwargs,
     ) -> torch.Tensor:
         """
-        Sampling for generating output tokens.
+        Sampling and other model-specific logics for generating output tokens.
+        `requests` will be updated with the sampled tokens.
         
         Args:
             logits: Output logits from the model. Shape: (batch_size, n_codebooks, vocab_size)
@@ -259,7 +266,8 @@ class BaseLMWithDepth(BaseLM):
         **kwargs,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Sampling for generating output tokens from the backbone model.
+        Sampling and other model-specific logics for generating output tokens.
+        `requests` will be updated with the sampled tokens.
         
         Args:
             logits: Output logits from the model. Shape: (batch_size, n_codebooks, vocab_size)

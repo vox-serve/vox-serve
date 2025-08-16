@@ -13,7 +13,7 @@ from collections import defaultdict, deque
 
 import zmq
 import numpy as np
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
@@ -30,13 +30,6 @@ def run_scheduler_daemon(model_name, request_socket_path, result_socket_path):
     )
     print(f"Scheduler started successfully with model: {model_name}")
     scheduler.run_forever()
-
-
-class GenerateRequest(BaseModel):
-    text: str
-    voice: Optional[str] = "tara"
-    
-
     
 
 class APIServer:
@@ -53,6 +46,8 @@ class APIServer:
         self.result_socket_path = result_socket_path
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(exist_ok=True)
+        self.upload_dir = Path(output_dir) / "uploads"
+        self.upload_dir.mkdir(exist_ok=True)
         self.timeout_seconds = timeout_seconds
         self.scheduler_process = None
         
@@ -154,13 +149,14 @@ class APIServer:
                 print(f"Error stopping scheduler: {e}")
             print("Scheduler process stopped")
     
-    def stream_audio_chunks(self, text: str, voice: str = "tara") -> Iterator[bytes]:
+    def stream_audio_chunks(self, text: str = None, voice: str = "tara", audio_path: str = None) -> Iterator[bytes]:
         """
         Generate audio from text and yield audio chunks as they arrive.
         
         Args:
-            text: Input text to synthesize
+            text: Input text to synthesize (optional if audio_path provided)
             voice: Voice to use for synthesis
+            audio_path: Path to input audio file (optional)
             
         Yields:
             Audio chunks as bytes
@@ -186,6 +182,7 @@ class APIServer:
                 'request_id': request_id,
                 'prompt': text,
                 'voice': voice,
+                'audio_path': audio_path,
             }
             
             request_json = json.dumps(request_dict)
@@ -233,13 +230,14 @@ class APIServer:
                 raise
             raise HTTPException(status_code=500, detail=f"Generation failed: {str(e)}")
 
-    def generate_audio(self, text: str, voice: str = "tara") -> str:
+    def generate_audio(self, text: str = None, voice: str = "tara", audio_path: str = None) -> str:
         """
         Generate audio from text and return path to the audio file.
         
         Args:
-            text: Input text to synthesize
+            text: Input text to synthesize (optional if audio_path provided)
             voice: Voice to use for synthesis
+            audio_path: Path to input audio file (optional)
             
         Returns:
             Path to the generated audio file
@@ -263,6 +261,7 @@ class APIServer:
                 'request_id': request_id,
                 'prompt': text,
                 'voice': voice,
+                'audio_path': audio_path,
             }
             
             request_json = json.dumps(request_dict)
@@ -332,12 +331,18 @@ api_server = None
 
 
 @app.post("/generate")
-async def generate(request: GenerateRequest):
+async def generate(
+    text: str = Form(...),
+    voice: Optional[str] = Form("tara"),
+    audio: Optional[UploadFile] = File(None)
+):
     """
     Generate speech from text and return audio file directly.
     
     Args:
-        request: Generation request containing text and optional voice
+        text: Input text to synthesize
+        voice: Voice to use for synthesis
+        audio: Optional input audio file
         
     Returns:
         Audio file as direct response
@@ -345,8 +350,18 @@ async def generate(request: GenerateRequest):
     if api_server is None:
         raise HTTPException(status_code=503, detail="Server not ready")
     
+    audio_path = None
+    if audio:
+        # Save uploaded audio file
+        audio_filename = f"{uuid.uuid4()}_{audio.filename}"
+        audio_path = str(api_server.upload_dir / audio_filename)
+        
+        with open(audio_path, "wb") as f:
+            content = await audio.read()
+            f.write(content)
+    
     try:
-        audio_file = api_server.generate_audio(request.text, request.voice)
+        audio_file = api_server.generate_audio(text, voice, audio_path)
         request_id = Path(audio_file).stem
         
         return FileResponse(
@@ -358,21 +373,48 @@ async def generate(request: GenerateRequest):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        # Schedule cleanup of uploaded file after a delay to ensure processing is complete
+        if audio_path and Path(audio_path).exists():
+            def delayed_cleanup():
+                import time
+                time.sleep(60)  # Wait 60 seconds before cleanup
+                if Path(audio_path).exists():
+                    Path(audio_path).unlink()
+            
+            cleanup_thread = threading.Thread(target=delayed_cleanup, daemon=True)
+            cleanup_thread.start()
 
 
 @app.post("/generate-stream")
-async def generate_stream(request: GenerateRequest):
+async def generate_stream(
+    text: str = Form(...),
+    voice: Optional[str] = Form("tara"),
+    audio: Optional[UploadFile] = File(None)
+):
     """
     Generate speech from text and stream audio chunks as they are generated.
     
     Args:
-        request: Generation request containing text and optional voice
+        text: Input text to synthesize
+        voice: Voice to use for synthesis
+        audio: Optional input audio file
         
     Returns:
         Streaming audio response with WAV format chunks
     """
     if api_server is None:
         raise HTTPException(status_code=503, detail="Server not ready")
+    
+    audio_path = None
+    if audio:
+        # Save uploaded audio file
+        audio_filename = f"{uuid.uuid4()}_{audio.filename}"
+        audio_path = str(api_server.upload_dir / audio_filename)
+        
+        with open(audio_path, "wb") as f:
+            content = await audio.read()
+            f.write(content)
     
     try:
         def audio_stream():
@@ -392,7 +434,7 @@ async def generate_stream(request: GenerateRequest):
             yield header_bytes
             
             # Stream audio chunks
-            for chunk in api_server.stream_audio_chunks(request.text, request.voice):
+            for chunk in api_server.stream_audio_chunks(text, voice, audio_path):
                 yield chunk
         
         return StreamingResponse(
@@ -407,6 +449,17 @@ async def generate_stream(request: GenerateRequest):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        # Schedule cleanup of uploaded file after a delay to ensure processing is complete
+        if audio_path and Path(audio_path).exists():
+            def delayed_cleanup():
+                import time
+                time.sleep(60)  # Wait 60 seconds before cleanup
+                if Path(audio_path).exists():
+                    Path(audio_path).unlink()
+            
+            cleanup_thread = threading.Thread(target=delayed_cleanup, daemon=True)
+            cleanup_thread.start()
 
 
 
