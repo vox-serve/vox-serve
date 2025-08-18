@@ -223,6 +223,8 @@ class OrpheusForCausalLM(LlamaPreTrainedModel):
 
 class OrpheusModel(BaseLM):
     def __init__(self, model_name, dtype=torch.bfloat16, device="cuda:0", tokenizer_path="canopylabs/orpheus-3b-0.1-ft"):
+        if model_name == "orpheus":
+            model_name = "canopylabs/orpheus-3b-0.1-ft"
         super().__init__(model_name, device, dtype)
         self.model_name = model_name
         self.model = OrpheusForCausalLM.from_pretrained(model_name)

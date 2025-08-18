@@ -306,6 +306,8 @@ class GLMVoiceForCausalLM(nn.Module):
 
 class GLMVoiceModel(BaseLM):
     def __init__(self, model_name, dtype=torch.bfloat16, device="cuda:0"):
+        if model_name == "glm":
+            model_name = "zai-org/glm-4-voice-9b"
         super().__init__(model_name, device, dtype)
         config_path = hf_hub_download(repo_id=model_name, filename="config.json", revision=None)
         self.config = GLMVoiceConfig.from_dict(json.load(open(config_path)))

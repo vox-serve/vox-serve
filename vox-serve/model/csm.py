@@ -311,6 +311,8 @@ class CsmForConditionalGeneration(CsmPreTrainedModel):
 
 class CSMModel(BaseLMWithDepth):
     def __init__(self, model_name, dtype=torch.bfloat16, device="cuda:0", tokenizer_path="meta-llama/Llama-3.2-1B"):
+        if model_name == "csm":
+            model_name = "sesame/csm-1b"
         super().__init__(model_name, device, dtype)
         self.model = CsmForConditionalGeneration.from_pretrained(model_name)
         self.model.to(dtype).to(device)

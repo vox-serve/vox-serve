@@ -533,6 +533,8 @@ class ZonosForCausalLM(nn.Module):
 class ZonosModel(BaseLM):
     def __init__(self, model_name, dtype=torch.bfloat16, device="cuda:0"):
         # TODO: Zonos hybrid model is not yet supported
+        if model_name == "zonos":
+            model_name = "Zyphra/Zonos-v0.1-transformer"
         super().__init__(model_name, device, dtype)
         config_path = hf_hub_download(repo_id=model_name, filename="config.json", revision=None)
         model_path = hf_hub_download(repo_id=model_name, filename="model.safetensors", revision=None)
