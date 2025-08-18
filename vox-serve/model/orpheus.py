@@ -294,6 +294,11 @@ class OrpheusModel(BaseLM):
         """
         return 1200
 
+    @property
+    def vocab_size(self) -> int:
+        """Vocabulary size of the model."""
+        return self.model.config.vocab_size
+
     def is_stop_id(self, token_ids: List[int]) -> bool:
         return token_ids[0] == self.stop_token_id
 

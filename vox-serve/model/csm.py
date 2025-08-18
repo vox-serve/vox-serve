@@ -551,6 +551,11 @@ class CSMModel(BaseLMWithDepth):
         Maximum number of tokens the model generates in a single request.
         """
         return 1200
+
+    @property
+    def vocab_size(self) -> int:
+        """Vocabulary size of the model."""
+        return self.model.config.vocab_size
     
     def is_stop_id(self, token_ids: List[int]) -> int:
         # index -2 since we want to check the final audio codebook before text stream
@@ -576,7 +581,7 @@ class CSMModel(BaseLMWithDepth):
         position_ids: torch.Tensor, 
         attn_wrapper: FlashInferWrapper, 
         kv_cache: torch.Tensor, 
-        input_masks: List[torch.Tensor],
+        input_masks: torch.Tensor,
         **kwargs: Any,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Forward pass through the backbone model."""
@@ -584,7 +589,7 @@ class CSMModel(BaseLMWithDepth):
         audio_embeds = self.embed_audio_tokens_all(input_ids[:, :-1])
         inputs_embeds = torch.cat([audio_embeds, text_embeds], dim=1) # [bs, 33, 2048]
 
-        input_masks = torch.cat(input_masks, dim=0)  # [bs, 33]   
+        # input_masks = torch.cat(input_masks, dim=0)  # [bs, 33]
         inputs_embeds = inputs_embeds * input_masks[:, :, None]
         inputs_embeds = inputs_embeds.sum(dim=1)
 

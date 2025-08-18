@@ -627,6 +627,11 @@ class ZonosModel(BaseLM):
         """
         return 2048
 
+    @property
+    def vocab_size(self) -> int:
+        """Vocabulary size of the model."""
+        return 1025
+
     def is_stop_id(self, token_ids: List[int]) -> bool:
         return token_ids[0] == self.eos_token_id
 

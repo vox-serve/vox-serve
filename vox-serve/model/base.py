@@ -95,6 +95,12 @@ class BaseLM(ABC):
         """
         pass
 
+    @property
+    @abstractmethod
+    def vocab_size(self) -> int:
+        """Vocabulary size of the model."""
+        pass
+
     @abstractmethod
     def is_stop_id(self, token_ids: List[int]) -> int:
         """
