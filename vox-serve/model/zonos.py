@@ -569,7 +569,7 @@ class ZonosModel(BaseLM):
         self._num_key_value_heads = self.model.config.backbone.attn_cfg["num_heads_kv"]
         self._num_hidden_layers = self.model.config.backbone.n_layer
         self._hidden_size = self.model.config.backbone.d_model
-        self.vocab_size = 1025 # mask token is not included here since it's not predicted by LM heads
+        # self.vocab_size = 1025 # mask token is not included here since it's not predicted by LM heads
 
         self._n_codebooks = self.model.autoencoder.num_codebooks
         self.logit_bias = torch.zeros(self.n_codebooks, 1025, dtype=dtype, device=device)
@@ -758,7 +758,6 @@ class ZonosModel(BaseLM):
 
         repetition_cache = torch.zeros(
             self.default_sampling_config.repetition_window if self.default_sampling_config.repetition_window > 0 else 1, 
-            self.default_sampling_config.repetition_window, 
             self.n_codebooks, 
             self.vocab_size, 
             dtype=torch.bool, device=self.device

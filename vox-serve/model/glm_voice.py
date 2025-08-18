@@ -345,7 +345,7 @@ class GLMVoiceModel(BaseLM):
         self._num_key_value_heads = self.config.multi_query_group_num
         self._num_hidden_layers = self.config.num_layers
         self._hidden_size = self.config.hidden_size
-        self.vocab_size = self.config.vocab_size
+        # self.vocab_size = self.config.vocab_size
 
         self.stop_token_ids = [151329, 151336, 151338]
         self.audio_offset = self.text_tokenizer.convert_tokens_to_ids("<|audio_0|>")

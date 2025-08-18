@@ -25,6 +25,7 @@ class ModelWorker:
         # Load model
         self.model = load_model(model_name, device="cuda")
         self.device = "cuda:0"
+        self.max_batch_size = max_batch_size
 
         # Store sampling and repetition parameters
         self.top_p = top_p
@@ -33,14 +34,15 @@ class ModelWorker:
         self.repetition_penalty = repetition_penalty
         
         # Tensor to store offset values for each client
-        self.offsets = torch.zeros(max_batch_size, dtype=torch.int32, device=self.device)
+        self.offsets = torch.zeros(self.max_batch_size, dtype=torch.int32, device=self.device)
 
+        # TODO: decide based on memory capacity
         self.max_num_pages = max_batch_size
         self.page_size = 2048
 
-        self.paged_kv_indptr_buffer = torch.zeros(max_batch_size + 1).to(self.device).to(torch.int32)
+        self.paged_kv_indptr_buffer = torch.zeros(self.max_batch_size + 1).to(self.device).to(torch.int32)
         self.paged_kv_indices_buffer = torch.zeros(self.max_num_pages).to(self.device).to(torch.int32)
-        self.paged_kv_last_page_len_buffer = torch.zeros(max_batch_size).to(self.device).to(torch.int32)
+        self.paged_kv_last_page_len_buffer = torch.zeros(self.max_batch_size).to(self.device).to(torch.int32)
 
         self.flashinfer_buffer = torch.empty(256 * 1024 * 1024, dtype=torch.uint8, device=self.device)
 
@@ -57,10 +59,11 @@ class ModelWorker:
             n_kv_head=self.model.num_key_value_heads,
             n_state=self.model.hidden_size,
             page_size=self.page_size,
-            batch_size=max_batch_size,
+            max_batch_size=self.max_batch_size,
             paged_kv_indptr_buffer=self.paged_kv_indptr_buffer,
             paged_kv_indices_buffer=self.paged_kv_indices_buffer,
             paged_kv_last_page_len_buffer=self.paged_kv_last_page_len_buffer,
+            use_cuda_graph=True,
         )
 
         self.kv_cache = torch.zeros(
@@ -77,10 +80,10 @@ class ModelWorker:
         kv_cache_size = self.kv_cache.numel() * self.kv_cache.element_size()
         print(f"KV cache size: {kv_cache_size / 1024 / 1024:.2f} MB")
 
-        self.qo_indptr = torch.arange(max_batch_size + 1).to(self.device).to(torch.int32)
-        self.paged_kv_indptr = torch.arange(max_batch_size + 1).to(self.device).to(torch.int32)
-        self.paged_kv_indices = torch.arange(max_batch_size).to(self.device).to(torch.int32)
-        self.paged_kv_last_page_len = torch.ones(max_batch_size).to(self.device).to(torch.int32)
+        self.qo_indptr = torch.arange(self.max_batch_size + 1).to(self.device).to(torch.int32)
+        self.paged_kv_indptr = torch.arange(self.max_batch_size + 1).to(self.device).to(torch.int32)
+        self.paged_kv_indices = torch.arange(self.max_batch_size).to(self.device).to(torch.int32)
+        self.paged_kv_last_page_len = torch.ones(self.max_batch_size).to(self.device).to(torch.int32)
 
         self.has_depth_transformer = self.model.has_depth_transformer
         if self.has_depth_transformer:
@@ -110,8 +113,113 @@ class ModelWorker:
         for i in range(self.max_num_pages):
             self.empty_pages.put(i)
         
+        # Initialize CUDA graphs for decode phase
+        self._initialize_cuda_graphs()
+        
         self.warmup()
         self.kv_cache.zero_()
+    
+    def _initialize_cuda_graphs(self):
+        """Initialize CUDA graphs for different batch sizes in decode phase."""
+        self.cuda_graphs = {}
+        
+        # Supported batch sizes for CUDA graphs
+        self.cuda_graph_batch_sizes = [1, 2, 4, 8]
+        
+        # Create input buffers
+        input_ids_buffer = torch.zeros(self.max_batch_size, self.model.n_codebooks, dtype=torch.int32, device=self.device)
+        position_ids_buffer = torch.zeros(self.max_batch_size, dtype=torch.int32, device=self.device)
+        input_features_buffer = torch.zeros(self.max_batch_size, self.model.n_codebooks, self.model.hidden_size, dtype=torch.bfloat16, device=self.device)
+        input_masks_buffer = torch.zeros(self.max_batch_size, self.model.n_codebooks, dtype=torch.bool, device=self.device)
+
+        # Create output buffer (assuming vocab size, will be adjusted based on model)
+        logits_buffer = torch.zeros(
+            self.max_batch_size, 
+            1 if self.has_depth_transformer else self.model.n_codebooks, # TODO: revisit here
+            self.model.vocab_size, 
+            dtype=torch.bfloat16, 
+            device=self.device,
+        )
+        backbone_hidden_states_buffer = torch.zeros(self.max_batch_size, self.model.hidden_size, dtype=torch.bfloat16, device=self.device)
+
+        # Store buffers
+        self.cuda_graph_buffers = {
+            'input_ids': input_ids_buffer,
+            'position_ids': position_ids_buffer,
+            'logits': logits_buffer,
+            'input_features': input_features_buffer,
+            'input_masks': input_masks_buffer,
+            'backbone_hidden_states': backbone_hidden_states_buffer,
+        }
+        
+        print("Initializing CUDA graphs for decode phase...")
+        
+        for batch_size in self.cuda_graph_batch_sizes:
+            if batch_size > self.max_batch_size:
+                continue
+                
+            print(f"Capturing CUDA graph for batch size {batch_size}")
+            
+            # Create buffers for flashinfer inputs
+            paged_kv_indptr = torch.zeros(batch_size + 1, dtype=torch.int32, device=self.device)
+            paged_kv_indices = torch.zeros(batch_size, dtype=torch.int32, device=self.device) 
+            paged_kv_last_page_len = torch.zeros(batch_size, dtype=torch.int32, device=self.device)
+            
+            # Plan decode wrapper outside the graph capture
+            self.decode_wrapper.plan(
+                paged_kv_indptr,
+                paged_kv_indices,
+                paged_kv_last_page_len,
+                torch.bfloat16,
+            )
+            torch.cuda.synchronize()
+
+            # do warmup run to initialize the graph
+            for _ in range(5):
+                self.model.forward(
+                    input_ids=self.cuda_graph_buffers['input_ids'][:batch_size],
+                    position_ids=self.cuda_graph_buffers['position_ids'][:batch_size],
+                    attn_wrapper=self.decode_wrapper,
+                    kv_cache=self.kv_cache,
+                    input_features=self.cuda_graph_buffers['input_features'][:batch_size],
+                    input_masks=self.cuda_graph_buffers['input_masks'][:batch_size],
+                )
+            torch.cuda.synchronize()
+
+            # Create and capture CUDA graph
+            graph = torch.cuda.CUDAGraph()
+
+            with torch.cuda.graph(graph):
+                # Only capture model forward pass, NOT the attention wrapper planning
+                if self.has_depth_transformer:
+                    logits_output, backbone_hidden_states = self.model.forward(
+                        input_ids=self.cuda_graph_buffers['input_ids'][:batch_size],
+                        position_ids=self.cuda_graph_buffers['position_ids'][:batch_size],
+                        attn_wrapper=self.decode_wrapper,
+                        kv_cache=self.kv_cache,
+                        input_features=self.cuda_graph_buffers['input_features'][:batch_size],
+                        input_masks=self.cuda_graph_buffers['input_masks'][:batch_size],
+                    )
+
+                    self.cuda_graph_buffers['logits'][:batch_size].copy_(logits_output)
+                    self.cuda_graph_buffers['backbone_hidden_states'][:batch_size].copy_(backbone_hidden_states)
+
+                else:
+                    logits_output = self.model.forward(
+                        input_ids=self.cuda_graph_buffers['input_ids'][:batch_size],
+                        position_ids=self.cuda_graph_buffers['position_ids'][:batch_size],
+                        attn_wrapper=self.decode_wrapper,
+                        kv_cache=self.kv_cache,
+                        input_features=self.cuda_graph_buffers['input_features'][:batch_size],
+                        input_masks=self.cuda_graph_buffers['input_masks'][:batch_size],
+                    )
+                
+                    self.cuda_graph_buffers['logits'][:batch_size].copy_(logits_output)
+            
+            # Store the captured graph
+            self.cuda_graphs[batch_size] = graph
+            
+        print(f"CUDA graphs initialized for batch sizes: {list(self.cuda_graphs.keys())}")
     
     @property
     def detokenize_interval(self) -> int:
@@ -234,6 +342,19 @@ class ModelWorker:
 
         input_ids = torch.tensor(input_ids, device=self.device, dtype=torch.int32)
         position_ids = torch.tensor(position_ids, device=self.device, dtype=torch.int32)
+
+        # TODO: maybe model should have property about this?
+        if input_masks[0] is not None:
+            input_masks = torch.cat(input_masks, dim=0)
+        else:
+            input_masks = None
+
+        # TODO: for zonos's purpose, the input_features has to be list of tensors for prefill. 
+        # This is not a good design and we should fix it.
+        # if input_features[0] is not None:
+        #     input_features = torch.cat(input_features, dim=0)
+        # else:
+        #     input_features = None
         
         qo_indptr_tensor = torch.tensor(qo_indptr, device=self.device, dtype=torch.int32)
         paged_kv_indptr_tensor = torch.tensor(paged_kv_indptr, device=self.device, dtype=torch.int32)
@@ -268,11 +389,11 @@ class ModelWorker:
 
             # assuming that the sequence length is 2 for the initial iteration of depth transformer. 
             # may need to change here for other models.
-            depth_position_ids = torch.tensor([0, 1] * output_ids.shape[0], device=self.device)
-            depth_qo_indptr = torch.arange(output_ids.shape[0] + 1, device=self.device) * 2
-            depth_kv_indptr = torch.arange(output_ids.shape[0] + 1, device=self.device)
-            depth_kv_indices = torch.arange(output_ids.shape[0], device=self.device)
-            depth_kv_last_page_len = torch.tensor([2] * output_ids.shape[0], device=self.device)
+            depth_position_ids = torch.tensor([0, 1] * output_ids.shape[0], device=self.device, dtype=torch.int32)
+            depth_qo_indptr = torch.arange(output_ids.shape[0] + 1, device=self.device, dtype=torch.int32) * 2
+            depth_kv_indptr = torch.arange(output_ids.shape[0] + 1, device=self.device, dtype=torch.int32)
+            depth_kv_indices = torch.arange(output_ids.shape[0], device=self.device, dtype=torch.int32)
+            depth_kv_last_page_len = torch.tensor([2] * output_ids.shape[0], device=self.device, dtype=torch.int32)
             self.depth_kv_cache.zero_()
 
             for i in range(1, self.model.depth_n_codebooks):
@@ -299,8 +420,8 @@ class ModelWorker:
                     requests=requests,
                 )
 
-                depth_position_ids = torch.tensor([i + 1] * output_ids.shape[0], device=self.device)
-                depth_qo_indptr = torch.arange(output_ids.shape[0] + 1, device=self.device)
+                depth_position_ids = torch.tensor([i + 1] * output_ids.shape[0], device=self.device, dtype=torch.int32)
+                depth_qo_indptr = torch.arange(output_ids.shape[0] + 1, device=self.device, dtype=torch.int32)
                 depth_kv_last_page_len += 1
                 
         else:
@@ -335,44 +456,108 @@ class ModelWorker:
         input_features = lm_inputs["input_features"]
         input_masks = lm_inputs["input_masks"]
 
-        input_ids = torch.tensor(input_ids, device=self.device, dtype=torch.int32)
-        position_ids = torch.tensor(position_ids, device=self.device, dtype=torch.int32)
+        batch_size = len(requests)
         
-        # qo_indptr_tensor = torch.tensor(qo_indptr, device=self.device, dtype=torch.int32)
-        paged_kv_indptr_tensor = torch.tensor(paged_kv_indptr, device=self.device, dtype=torch.int32)
-        paged_kv_indices_tensor = torch.tensor(paged_kv_indices, device=self.device, dtype=torch.int32)
-        paged_kv_last_page_len_tensor = torch.tensor(paged_kv_last_page_len, device=self.device, dtype=torch.int32)
+        # Check if we can use CUDA graph optimization
+        # TODO: padding
+        can_use_cuda_graph = batch_size in self.cuda_graphs
+        print(f"Batch size {batch_size} {'can' if can_use_cuda_graph else 'cannot'} use CUDA graph optimization.")
+        
+        if can_use_cuda_graph:
+            # Plan attention wrapper before CUDA graph
+            paged_kv_indptr_tensor = torch.tensor(paged_kv_indptr, device=self.device, dtype=torch.int32)
+            paged_kv_indices_tensor = torch.tensor(paged_kv_indices, device=self.device, dtype=torch.int32)
+            paged_kv_last_page_len_tensor = torch.tensor(paged_kv_last_page_len, device=self.device, dtype=torch.int32)
 
-        self.decode_wrapper.plan(
-            paged_kv_indptr_tensor, 
-            paged_kv_indices_tensor, 
-            paged_kv_last_page_len_tensor, 
-            torch.bfloat16,
-        )
-        torch.cuda.synchronize()
-
-        # decode run 
-        if self.has_depth_transformer:
-            logits, backbone_hidden_states = self.model.forward(
-                input_ids=input_ids,
-                position_ids=position_ids,
-                attn_wrapper=self.decode_wrapper,
-                kv_cache=self.kv_cache,
-                input_features=input_features,
-                input_masks=input_masks,
+            self.decode_wrapper.plan(
+                paged_kv_indptr_tensor, 
+                paged_kv_indices_tensor, 
+                paged_kv_last_page_len_tensor, 
+                torch.bfloat16,
             )
+            torch.cuda.synchronize()
+            
+            graph = self.cuda_graphs[batch_size]
+            
+            self.cuda_graph_buffers['input_ids'][:batch_size].copy_(torch.tensor(input_ids, device=self.device, dtype=torch.int32))
+            self.cuda_graph_buffers['position_ids'][:batch_size].copy_(torch.tensor(position_ids, device=self.device, dtype=torch.int32))
+            
+            # TODO: maybe model should have property about this?
+            if input_masks[0] is not None:
+                self.cuda_graph_buffers['input_masks'][:batch_size].copy_(torch.cat(input_masks, dim=0))
+            if input_features[0] is not None:
+                self.cuda_graph_buffers['input_features'][:batch_size].copy_(torch.cat(input_features, dim=0))
 
+            # Replay the CUDA graph
+            graph.replay()
+            
+            # Copy output from buffer
+            logits = self.cuda_graph_buffers['logits'][:batch_size]
+
+            if self.has_depth_transformer:
+                backbone_hidden_states = self.cuda_graph_buffers['backbone_hidden_states'][:batch_size]
+
+        else:
+            # Use regular path
+            input_ids = torch.tensor(input_ids, device=self.device, dtype=torch.int32)
+            position_ids = torch.tensor(position_ids, device=self.device, dtype=torch.int32)
+
+            # TODO: maybe model should have property about this?
+            if input_masks[0] is not None:
+                input_masks = torch.cat(input_masks, dim=0)
+            else:
+                input_masks = None
+
+            if input_features[0] is not None:
+                input_features = torch.cat(input_features, dim=0)
+            else:
+                input_features = None
+            
+            paged_kv_indptr_tensor = torch.tensor(paged_kv_indptr, device=self.device, dtype=torch.int32)
+            paged_kv_indices_tensor = torch.tensor(paged_kv_indices, device=self.device, dtype=torch.int32)
+            paged_kv_last_page_len_tensor = torch.tensor(paged_kv_last_page_len, device=self.device, dtype=torch.int32)
+
+            self.decode_wrapper.plan(
+                paged_kv_indptr_tensor, 
+                paged_kv_indices_tensor, 
+                paged_kv_last_page_len_tensor, 
+                torch.bfloat16,
+            )
+            torch.cuda.synchronize()
+
+            # decode run 
+            if self.has_depth_transformer:
+                logits, backbone_hidden_states = self.model.forward(
+                    input_ids=input_ids,
+                    position_ids=position_ids,
+                    attn_wrapper=self.decode_wrapper,
+                    kv_cache=self.kv_cache,
+                    input_features=input_features,
+                    input_masks=input_masks,
+                )
+            else:
+                logits = self.model.forward(
+                    input_ids=input_ids,
+                    position_ids=position_ids,
+                    attn_wrapper=self.decode_wrapper,
+                    kv_cache=self.kv_cache,
+                    input_features=input_features,
+                    input_masks=input_masks,
+                )
+
+        # Sampling is not part of CUDA graph
+        if self.has_depth_transformer:
             output_ids, hidden_for_depth = self.model.sampling(
                 logits=logits,
                 hidden_states=backbone_hidden_states,
                 requests=requests,
             )
 
-            depth_position_ids = torch.tensor([0, 1] * output_ids.shape[0], device=self.device)
-            depth_qo_indptr = torch.arange(output_ids.shape[0] + 1, device=self.device) * 2
-            depth_kv_indptr = torch.arange(output_ids.shape[0] + 1, device=self.device)
-            depth_kv_indices = torch.arange(output_ids.shape[0], device=self.device)
-            depth_kv_last_page_len = torch.tensor([2] * output_ids.shape[0], device=self.device)
+            depth_position_ids = torch.tensor([0, 1] * output_ids.shape[0], device=self.device, dtype=torch.int32)
+            depth_qo_indptr = torch.arange(output_ids.shape[0] + 1, device=self.device, dtype=torch.int32) * 2
+            depth_kv_indptr = torch.arange(output_ids.shape[0] + 1, device=self.device, dtype=torch.int32)
+            depth_kv_indices = torch.arange(output_ids.shape[0], device=self.device, dtype=torch.int32)
+            depth_kv_last_page_len = torch.tensor([2] * output_ids.shape[0], device=self.device, dtype=torch.int32)
             self.depth_kv_cache.zero_()
 
             for i in range(1, self.model.depth_n_codebooks):
@@ -399,20 +584,11 @@ class ModelWorker:
                     requests=requests,
                 )
 
-                depth_position_ids = torch.tensor([i + 1] * output_ids.shape[0], device=self.device)
-                depth_qo_indptr = torch.arange(output_ids.shape[0] + 1, device=self.device)
+                depth_position_ids = torch.tensor([i + 1] * output_ids.shape[0], device=self.device, dtype=torch.int32)
+                depth_qo_indptr = torch.arange(output_ids.shape[0] + 1, device=self.device, dtype=torch.int32)
                 depth_kv_last_page_len += 1
-                
-        else:
-            logits = self.model.forward(
-                input_ids=input_ids,
-                position_ids=position_ids,
-                attn_wrapper=self.decode_wrapper,
-                kv_cache=self.kv_cache,
-                input_features=input_features,
-                input_masks=input_masks,
-            )
 
+        else:
             output_ids = self.model.sampling(
                 logits=logits,
                 requests=requests,
@@ -421,7 +597,7 @@ class ModelWorker:
         # for i, req in enumerate(requests):
         #     req.lm_output_tokens.append(output_ids[i].tolist())
 
-        return 
+        return
 
     def run_detokenize(self, requests: List[Request]):
         if len(requests) == 0:

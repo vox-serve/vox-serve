@@ -322,6 +322,7 @@ class CSMModel(BaseLMWithDepth):
 
         from huggingface_hub import hf_hub_download
         import moshi 
+        # TODO: drop moshi dependency
         mimi_weight = hf_hub_download('kyutai/moshiko-pytorch-bf16', 'tokenizer-e351c8d8-checkpoint125.safetensors')
         self.audio_tokenizer = moshi.models.loaders.get_mimi(mimi_weight, device=device)
         self.audio_tokenizer.set_num_codebooks(32)
@@ -334,7 +335,7 @@ class CSMModel(BaseLMWithDepth):
         self._depth_num_key_value_heads = self.model.config.depth_decoder_config.num_key_value_heads
         self._depth_num_hidden_layers = self.model.config.depth_decoder_config.num_hidden_layers
         self._depth_hidden_size = self.model.config.depth_decoder_config.hidden_size
-        self.vocab_size = self.model.config.vocab_size
+        # self.vocab_size = self.model.config.vocab_size
 
         self.stop_token_id = 0
 
@@ -529,7 +530,7 @@ class CSMModel(BaseLMWithDepth):
         }
     
     def _load_watermarker(self):
-        import silentcipher
+        from ..watermarker import silentcipher
         self.watermark_model = silentcipher.get_model(
             model_type="44.1k",
             device=self.device,
@@ -687,6 +688,11 @@ class CSMModel(BaseLMWithDepth):
         
         output_ids = Sampler.run_sampling(logits, config=sampling_params)
         ci_embed = self.embed_audio_tokens_single(output_ids, i_iteration)
+
+        for i, req in enumerate(requests):
+            req.lm_output_tokens[-1][i_iteration] = output_ids[i].item()
+            req.lm_output_audio_tokens[-1][i_iteration] = output_ids[i].item()
+
         return output_ids, ci_embed
 
     def postprocess(self, token_ids: torch.Tensor) -> torch.Tensor:

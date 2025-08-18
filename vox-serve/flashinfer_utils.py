@@ -6,16 +6,16 @@ class FlashInferPrefillWrapper():
     def __init__(
         self, 
         attn_buffer: torch.Tensor,
-        n_qo_head=24, 
-        n_kv_head=8,
-        n_state=3072, 
-        page_size=16,
+        n_qo_head: int, 
+        n_kv_head: int,
+        n_state: int,
+        page_size: int,
         seq_len=16,
-        device=torch.device("cuda"),
-        qo_indptr_buf=None,
-        paged_kv_indptr_buf=None,
-        paged_kv_indices_buf=None,
-        paged_kv_last_page_len_buf=None,
+        device: torch.device = torch.device("cuda"),
+        qo_indptr_buf: torch.Tensor = None,
+        paged_kv_indptr_buf: torch.Tensor = None,
+        paged_kv_indices_buf: torch.Tensor = None,
+        paged_kv_last_page_len_buf: torch.Tensor = None,
     ):
         self.device = device
         # self.attn_buffer = torch.empty(256 * 1024 * 1024, dtype=torch.uint8, device=device)
@@ -73,6 +73,7 @@ class FlashInferPrefillWrapper():
             last_len = paged_kv_last_page_len[i]
             
             # Store all location parameters in a single tensor row
+            # TODO: simplify here
             self.kv_cache_locations[i, 0] = qo_indptr[i]                # start_idx
             self.kv_cache_locations[i, 1] = qo_indptr[i + 1]            # end_idx
             self.kv_cache_locations[i, 2] = page_idx                    # page_idx
@@ -119,21 +120,21 @@ class FlashInferDecodeWrapper():
     def __init__(
         self, 
         attn_buffer: torch.Tensor,
-        n_qo_head=24, 
-        n_kv_head=8,
-        n_state=3072, 
-        page_size=16,
-        batch_size=1,
-        device=torch.device("cuda"),
-        paged_kv_indptr_buffer=None,
-        paged_kv_indices_buffer=None,
-        paged_kv_last_page_len_buffer=None,
-        use_cuda_graph=False, 
-        use_tensor_cores=True,
+        n_qo_head: int, 
+        n_kv_head: int,
+        n_state: int,
+        page_size: int,
+        max_batch_size: int,
+        device: torch.device = torch.device("cuda"),
+        paged_kv_indptr_buffer: torch.Tensor = None,
+        paged_kv_indices_buffer: torch.Tensor = None,
+        paged_kv_last_page_len_buffer: torch.Tensor = None,
+        use_cuda_graph: bool = False, 
+        use_tensor_cores: bool = True,
     ):
         self.device = device
         # self.attn_buffer = torch.empty(256 * 1024 * 1024, dtype=torch.uint8, device=device)
-        self.batch_size = batch_size
+        self.max_batch_size = max_batch_size
 
         self.attn_wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
             attn_buffer, "NHD", 
@@ -150,7 +151,7 @@ class FlashInferDecodeWrapper():
         self.head_dim = n_state // n_qo_head
         self.page_size = page_size
 
-        self.kv_cache_locations = torch.zeros((batch_size, 2), dtype=torch.long, device=self.device)
+        self.kv_cache_locations = torch.zeros((max_batch_size, 2), dtype=torch.long, device=self.device)
     
     def plan(
         self, 
@@ -160,6 +161,8 @@ class FlashInferDecodeWrapper():
         paged_kv_last_page_len: torch.Tensor, # [n_req]
         dtype: torch.dtype = torch.float16,
     ):
+        self.batch_size = paged_kv_indptr.shape[0] - 1
+
         self.attn_wrapper.plan(
             indptr=paged_kv_indptr, 
             indices=paged_kv_indices, 
@@ -183,9 +186,7 @@ class FlashInferDecodeWrapper():
         pos_idx = paged_kv_last_page_len - 1                # shape: (n_req,)
 
         # Store as a single tensor of shape (n_req, 2) [page_idx, pos_idx]
-        self.kv_cache_locations.copy_(torch.stack([page_idx, pos_idx], dim=1))
-
-        # print(f"{self.kv_cache_locations=}")
+        self.kv_cache_locations[:self.batch_size].copy_(torch.stack([page_idx, pos_idx], dim=1))
 
         return 
     
@@ -201,8 +202,8 @@ class FlashInferDecodeWrapper():
         """
         # Assuming self.kv_cache_locations is a tensor of shape (batch_size, 2)
         # with the first column being page indices and the second column being pos indices.
-        pages = self.kv_cache_locations[:, 0].long()
-        positions = self.kv_cache_locations[:, 1].long()
+        pages = self.kv_cache_locations[:self.batch_size, 0].long()
+        positions = self.kv_cache_locations[:self.batch_size, 1].long()
 
         # Vectorized assignment replaces the loop:
         kv_cache[pages, 0, positions] = k

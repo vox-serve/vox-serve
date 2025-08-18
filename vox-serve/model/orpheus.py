@@ -240,7 +240,7 @@ class OrpheusModel(BaseLM):
         self._num_key_value_heads = self.model.config.num_key_value_heads
         self._num_hidden_layers = self.model.config.num_hidden_layers
         self._hidden_size = self.model.config.hidden_size
-        self.vocab_size = self.model.config.vocab_size
+        # self.vocab_size = self.model.config.vocab_size
 
         self.stop_token_id = 128258
 
