@@ -10,7 +10,7 @@ class FlashInferPrefillWrapper():
         n_kv_head: int,
         n_state: int,
         page_size: int,
-        max_batch_size: int = None,
+        batch_size: int = None,
         device: torch.device = torch.device("cuda"),
         qo_indptr_buf: torch.Tensor = None,
         paged_kv_indptr_buf: torch.Tensor = None,
@@ -25,7 +25,7 @@ class FlashInferPrefillWrapper():
 
         if self.use_cuda_graph:
             # used for depth transformer
-            assert max_batch_size is not None, "max_batch_size must be specified for cuda graph optimization"
+            assert batch_size is not None, "batch_size must be specified for cuda graph optimization"
             self.attn_wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
                 attn_buffer, "NHD",
                 use_cuda_graph=use_cuda_graph,
@@ -36,8 +36,8 @@ class FlashInferPrefillWrapper():
             )
             # TODO: support the sequence length per request of >1, such as the first step in depth transformer
             # or transformers inside Mimi
-            self.token_to_page = torch.zeros(max_batch_size, dtype=torch.long, device=device)
-            self.token_to_cache = torch.zeros(max_batch_size, dtype=torch.long, device=device)
+            self.token_to_page = torch.zeros(batch_size, dtype=torch.long, device=device)
+            self.token_to_cache = torch.zeros(batch_size, dtype=torch.long, device=device)
 
         else:
             self.attn_wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
@@ -139,7 +139,7 @@ class FlashInferDecodeWrapper():
         n_kv_head: int,
         n_state: int,
         page_size: int,
-        max_batch_size: int,
+        batch_size: int = None,
         device: torch.device = torch.device("cuda"),
         paged_kv_indptr_buffer: torch.Tensor = None,
         paged_kv_indices_buffer: torch.Tensor = None,
@@ -148,8 +148,9 @@ class FlashInferDecodeWrapper():
         use_tensor_cores: bool = True,
     ):
         self.device = device
+        self.use_cuda_graph = use_cuda_graph
         # self.attn_buffer = torch.empty(256 * 1024 * 1024, dtype=torch.uint8, device=device)
-        self.max_batch_size = max_batch_size
+        self.batch_size = batch_size
 
         self.attn_wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
             attn_buffer, "NHD", 
@@ -166,8 +167,10 @@ class FlashInferDecodeWrapper():
         self.head_dim = n_state // n_qo_head
         self.page_size = page_size
 
-        self.kv_cache_locations = torch.zeros((max_batch_size, 2), dtype=torch.long, device=self.device)
-    
+        if self.use_cuda_graph:
+            assert self.batch_size is not None, "batch_size must be specified for cuda graph optimization"
+            self.kv_cache_locations = torch.zeros((self.batch_size, 2), dtype=torch.long, device=self.device)
+
     def plan(
         self, 
         # qo_indptr: torch.Tensor, # [n_req + 1] 
@@ -201,7 +204,10 @@ class FlashInferDecodeWrapper():
         pos_idx = paged_kv_last_page_len - 1                # shape: (n_req,)
 
         # Store as a single tensor of shape (n_req, 2) [page_idx, pos_idx]
-        self.kv_cache_locations[:self.batch_size].copy_(torch.stack([page_idx, pos_idx], dim=1))
+        if self.use_cuda_graph:
+            self.kv_cache_locations[:self.batch_size].copy_(torch.stack([page_idx, pos_idx], dim=1))
+        else:
+            self.kv_cache_locations = torch.stack([page_idx, pos_idx], dim=1).to(self.device)
 
         return 
     

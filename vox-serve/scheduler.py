@@ -5,7 +5,7 @@ import json
 from typing import List, Dict, Any, Optional, Tuple, Type
 
 from .requests import Request 
-from .worker import ModelWorker
+from .worker import CudaGraphWorker
 from .sampling import SamplingConfig
 
 class Scheduler:
@@ -13,13 +13,14 @@ class Scheduler:
         self, 
         model_name_or_path: str,
         device: torch.device = torch.device("cuda"),
-        max_batch_size: int = 1,
+        max_batch_size: int = 8,
         request_socket_path: str = "/tmp/vox_serve_request.ipc",
-        result_socket_path: str = "/tmp/vox_serve_reqult.ipc"
+        result_socket_path: str = "/tmp/vox_serve_result.ipc"
     ):
         self.device = device
         self.max_batch_size = max_batch_size
-        self.model_worker = ModelWorker(model_name_or_path, max_batch_size=max_batch_size)
+        # TODO: switch between CudaGraphWorker and ModelWorker based on user input
+        self.model_worker = CudaGraphWorker(model_name_or_path, max_batch_size=max_batch_size)
 
         self.active_requests: List[Request] = []
 
