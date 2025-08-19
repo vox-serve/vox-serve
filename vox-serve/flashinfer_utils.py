@@ -10,25 +10,39 @@ class FlashInferPrefillWrapper():
         n_kv_head: int,
         n_state: int,
         page_size: int,
-        seq_len=16,
+        max_batch_size: int = None,
         device: torch.device = torch.device("cuda"),
         qo_indptr_buf: torch.Tensor = None,
         paged_kv_indptr_buf: torch.Tensor = None,
         paged_kv_indices_buf: torch.Tensor = None,
         paged_kv_last_page_len_buf: torch.Tensor = None,
+        use_cuda_graph: bool = False, 
     ):
         self.device = device
+        self.use_cuda_graph = use_cuda_graph
         # self.attn_buffer = torch.empty(256 * 1024 * 1024, dtype=torch.uint8, device=device)
         # self.seq_len = seq_len # number of tokens, not number of batches
 
-        self.attn_wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
-            attn_buffer, "NHD",
-            # use_cuda_graph=True,
-            # qo_indptr_buf=qo_indptr_buf,
-            # paged_kv_indptr_buf=paged_kv_indptr_buf,
-            # paged_kv_indices_buf=paged_kv_indices_buf,
-            # paged_kv_last_page_len_buf=paged_kv_last_page_len_buf,
-        )
+        if self.use_cuda_graph:
+            # used for depth transformer
+            assert max_batch_size is not None, "max_batch_size must be specified for cuda graph optimization"
+            self.attn_wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
+                attn_buffer, "NHD",
+                use_cuda_graph=use_cuda_graph,
+                qo_indptr_buf=qo_indptr_buf,
+                paged_kv_indptr_buf=paged_kv_indptr_buf,
+                paged_kv_indices_buf=paged_kv_indices_buf,
+                paged_kv_last_page_len_buf=paged_kv_last_page_len_buf,
+            )
+            # TODO: support the sequence length per request of >1, such as the first step in depth transformer
+            # or transformers inside Mimi
+            self.token_to_page = torch.zeros(max_batch_size, dtype=torch.long, device=device)
+            self.token_to_cache = torch.zeros(max_batch_size, dtype=torch.long, device=device)
+
+        else:
+            self.attn_wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
+                attn_buffer, "NHD",
+            )
 
         self.n_qo_head = n_qo_head
         self.n_kv_head = n_kv_head
@@ -65,28 +79,38 @@ class FlashInferPrefillWrapper():
         # Precompute KV cache update locations as a single tensor
         # Format: [start_idx, end_idx, page_idx, cache_start, cache_end, n_new_token]
         n_req = qo_indptr.shape[0] - 1
-        self.kv_cache_locations = torch.zeros((n_req, 5), dtype=torch.long, device=self.device)
-        
-        for i in range(n_req):
-            n_new_token = qo_indptr[i + 1] - qo_indptr[i]
-            page_idx = paged_kv_indices[paged_kv_indptr[i]]
-            last_len = paged_kv_last_page_len[i]
-            
-            # Store all location parameters in a single tensor row
-            # TODO: simplify here
-            self.kv_cache_locations[i, 0] = qo_indptr[i]                # start_idx
-            self.kv_cache_locations[i, 1] = qo_indptr[i + 1]            # end_idx
-            self.kv_cache_locations[i, 2] = page_idx                    # page_idx
-            self.kv_cache_locations[i, 3] = last_len - n_new_token      # cache_start
-            self.kv_cache_locations[i, 4] = last_len                    # cache_end
+
+        # 1) compute per-request starts, lengths, page indices, cache starts/ends
+        starts = qo_indptr[:-1]  # shape [n_req]
+        ends = qo_indptr[1:]
+        lengths = ends - starts  # shape [n_req]
+        page_idxs = paged_kv_indices[paged_kv_indptr[:-1]]  # shape [n_req]
+        cache_ends = paged_kv_last_page_len  # shape [n_req]
+        cache_starts = cache_ends - lengths  # shape [n_req]
+
+        # 2) now build the flat mappings
+        total_tokens = int(lengths.sum().item())  # total across all requests
+
+        # for each new token, which request (0…n_req-1) it belongs to
+        segment_ids = torch.repeat_interleave(torch.arange(n_req, device=self.device), lengths)  # shape [total_tokens]
+
+        # global token positions 0…total_tokens-1
+        token_pos = torch.arange(total_tokens, device=self.device)
+
+        # 3) fill the two output tensors in one shot
+        if self.use_cuda_graph:
+            self.token_to_page[:] = page_idxs[segment_ids]
+            self.token_to_cache[:] = cache_starts[segment_ids] + (token_pos - starts[segment_ids])
+        else:
+            self.token_to_page = page_idxs[segment_ids]
+            self.token_to_cache = cache_starts[segment_ids] + (token_pos - starts[segment_ids])
 
         return 
     
     def run(self, q, kv_cache):
-        if q.isnan().any() or kv_cache.isnan().any(): 
-            # somehow we need this for robust initialization
-            # this is okay since prefill is not cuda-graph optimized
-            print("[WARNING] NaN detected in input tensors!")
+        if not self.use_cuda_graph:
+            if q.isnan().any() or kv_cache.isnan().any(): 
+                print("[WARNING] NaN detected in input tensors!")
         return self.attn_wrapper.run(q, kv_cache)
     
     def set_kv_cache(self, kv_cache, k, v):
@@ -96,22 +120,13 @@ class FlashInferPrefillWrapper():
             n_cts is either 1500 or 448
         k, v   : torch.Tensor, shape = (n_token, n_heads, head_dim)
         """
-        # Use precomputed tensor locations to update KV cache
-        for i in range(len(self.kv_cache_locations)):
-            # Extract location data from tensor
-            start_idx = self.kv_cache_locations[i, 0].item()
-            end_idx = self.kv_cache_locations[i, 1].item()
-            page_idx = self.kv_cache_locations[i, 2].item()
-            cache_start = self.kv_cache_locations[i, 3].item()
-            cache_end = self.kv_cache_locations[i, 4].item()
-            
-            # Extract slices based on precomputed indices
-            k_ = k[start_idx:end_idx]  # (n_new_token, n_heads, head_dim)
-            v_ = v[start_idx:end_idx]  # (n_new_token, n_heads, head_dim)
-            
-            # Copy data to the precomputed locations in cache
-            kv_cache[page_idx, 0, cache_start:cache_end].copy_(k_)
-            kv_cache[page_idx, 1, cache_start:cache_end].copy_(v_)
+        # these were created in `plan()`
+        page_idx = self.token_to_page  # (total_tokens,)
+        cache_idx = self.token_to_cache  # (total_tokens,)
+
+        # two pure‐tensor assignments—no Python loop, no .item():
+        kv_cache[page_idx, 0, cache_idx] = k  # keys
+        kv_cache[page_idx, 1, cache_idx] = v  # values
         
         return 
     
