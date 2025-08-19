@@ -85,19 +85,31 @@ class CudaGraphWorker(ModelWorker):
             self.depth_paged_kv_indices_buffer = torch.zeros(self.max_num_pages).to(self.device).to(torch.int32)
             self.depth_paged_kv_last_page_len_buffer = torch.zeros(2 * self.max_batch_size).to(self.device).to(torch.int32)
 
-            self.depth_attn_wrapper = FlashInferPrefillWrapper(
+            self.depth_prefill_wrapper = FlashInferPrefillWrapper(
                 attn_buffer=self.flashinfer_buffer,
                 n_qo_head=self.model.depth_num_attention_heads,
                 n_kv_head=self.model.depth_num_key_value_heads,
                 n_state=self.model.depth_hidden_size,
                 page_size=self.page_size,
-                max_batch_size=self.max_batch_size,
-                qo_indptr_buf=self.depth_qo_indptr_buffer,
-                paged_kv_indptr_buf=self.depth_paged_kv_indptr_buffer,
-                paged_kv_indices_buf=self.depth_paged_kv_indices_buffer,
-                paged_kv_last_page_len_buf=self.depth_paged_kv_last_page_len_buffer,
                 use_cuda_graph=False,
             )
+
+            self.depth_decode_wrappers = {} 
+
+            for batch_size in self.cuda_graph_batch_sizes:
+                self.depth_decode_wrappers[batch_size] = FlashInferDecodeWrapper(
+                    attn_buffer=self.flashinfer_buffer,
+                    n_qo_head=self.model.depth_num_attention_heads,
+                    n_kv_head=self.model.depth_num_key_value_heads,
+                    n_state=self.model.depth_hidden_size,
+                    page_size=self.page_size,
+                    batch_size=batch_size,
+                    paged_kv_indptr_buffer=self.depth_paged_kv_indptr_buffer[:batch_size + 1],
+                    paged_kv_indices_buffer=self.depth_paged_kv_indices_buffer,
+                    paged_kv_last_page_len_buffer=self.depth_paged_kv_last_page_len_buffer[:batch_size],
+                    use_cuda_graph=True,
+                )
+
             self.depth_kv_cache = torch.zeros(
                 self.model.depth_num_hidden_layers,
                 self.max_num_pages,
@@ -109,7 +121,8 @@ class CudaGraphWorker(ModelWorker):
                 device="cuda",
             )
         else:
-            self.depth_attn_wrapper = None
+            self.depth_prefill_wrapper = None
+            self.depth_decode_wrappers = None
             self.depth_kv_cache = None
     
     def _initialize_cuda_graphs(self):
@@ -232,6 +245,8 @@ class CudaGraphWorker(ModelWorker):
             if batch_size > self.max_batch_size:
                 continue
 
+            print(f"Capturing CUDA graph of depth transformer for batch size {batch_size}")
+
             # Create buffers for flashinfer inputs for depth transformer
             depth_qo_indptr = torch.arange(batch_size + 1, dtype=torch.int32, device=self.device)
             depth_paged_kv_indptr = torch.zeros(batch_size + 1, dtype=torch.int32, device=self.device)
@@ -239,8 +254,7 @@ class CudaGraphWorker(ModelWorker):
             depth_paged_kv_last_page_len = torch.zeros(batch_size, dtype=torch.int32, device=self.device)
 
             # Plan depth attention wrapper outside the graph capture
-            self.depth_attn_wrapper.plan(
-                depth_qo_indptr,
+            self.depth_decode_wrappers[batch_size].plan(
                 depth_paged_kv_indptr,
                 depth_paged_kv_indices,
                 depth_paged_kv_last_page_len,
@@ -253,7 +267,7 @@ class CudaGraphWorker(ModelWorker):
                 self.model.depth_forward(
                     hidden_states=self.cuda_graph_depth_buffers['hidden_states'][:batch_size],
                     position_ids=self.cuda_graph_depth_buffers['position_ids'][:batch_size],
-                    attn_wrapper=self.depth_attn_wrapper,
+                    attn_wrapper=self.depth_decode_wrappers[batch_size],
                     kv_cache=self.depth_kv_cache,
                 )
             torch.cuda.synchronize()
@@ -265,7 +279,7 @@ class CudaGraphWorker(ModelWorker):
                 depth_logits_output = self.model.depth_forward(
                     hidden_states=self.cuda_graph_depth_buffers['hidden_states'][:batch_size],
                     position_ids=self.cuda_graph_depth_buffers['position_ids'][:batch_size],
-                    attn_wrapper=self.depth_attn_wrapper,
+                    attn_wrapper=self.depth_decode_wrappers[batch_size],
                     kv_cache=self.depth_kv_cache,
                 )
                 
@@ -276,9 +290,10 @@ class CudaGraphWorker(ModelWorker):
         
         print(f"CUDA graphs initialized for batch sizes: {list(self.cuda_graphs.keys())}")
     
-    def run_lm_decode(self, requests: List[Request]):
+    def run_lm_prefill(self, requests: List[Request]):
         """
-        Override parent's run_lm_decode to add CUDA graph optimization.
+        Override parent's run_lm_prefill to add CUDA graph optimization.
+        We use CUDA graph only for depth transformer.
         """
         lm_inputs = self._prepare_lm_inputs(requests)
         
@@ -291,59 +306,61 @@ class CudaGraphWorker(ModelWorker):
         input_features = lm_inputs["input_features"]
         input_masks = lm_inputs["input_masks"]
 
+        input_ids = torch.tensor(input_ids, device=self.device, dtype=torch.int32)
+        position_ids = torch.tensor(position_ids, device=self.device, dtype=torch.int32)
+
         batch_size = len(requests)
-        
-        # Check if we can use CUDA graph optimization
-        # TODO: padding
-        can_use_cuda_graph = batch_size in self.cuda_graphs
-        print(f"Batch size {batch_size} {'can' if can_use_cuda_graph else 'cannot'} use CUDA graph optimization.")
-        
-        if can_use_cuda_graph:
-            # Plan attention wrapper before CUDA graph
-            paged_kv_indptr_tensor = torch.tensor(paged_kv_indptr, device=self.device, dtype=torch.int32)
-            paged_kv_indices_tensor = torch.tensor(paged_kv_indices, device=self.device, dtype=torch.int32)
-            paged_kv_last_page_len_tensor = torch.tensor(paged_kv_last_page_len, device=self.device, dtype=torch.int32)
 
-            self.decode_wrappers[batch_size].plan(
-                paged_kv_indptr_tensor, 
-                paged_kv_indices_tensor, 
-                paged_kv_last_page_len_tensor, 
-                torch.bfloat16,
-            )
-            torch.cuda.synchronize()
-            
-            graph = self.cuda_graphs[batch_size]
-            
-            self.cuda_graph_buffers['input_ids'][:batch_size].copy_(torch.tensor(input_ids, device=self.device, dtype=torch.int32))
-            self.cuda_graph_buffers['position_ids'][:batch_size].copy_(torch.tensor(position_ids, device=self.device, dtype=torch.int32))
-            
-            # TODO: maybe model should have property about this?
-            if input_masks[0] is not None:
-                self.cuda_graph_buffers['input_masks'][:batch_size].copy_(torch.cat(input_masks, dim=0))
-            if input_features[0] is not None:
-                self.cuda_graph_buffers['input_features'][:batch_size].copy_(torch.cat(input_features, dim=0))
-
-            # Replay the CUDA graph
-            graph.replay()
-            
-            # Copy output from buffer
-            logits = self.cuda_graph_buffers['logits'][:batch_size]
-
-            if self.has_depth_transformer:
-                backbone_hidden_states = self.cuda_graph_buffers['backbone_hidden_states'][:batch_size]
-
+        # TODO: maybe model should have property about this?
+        if input_masks[0] is not None:
+            input_masks = torch.cat(input_masks, dim=0)
         else:
-            # Fall back to parent's implementation for non-CUDA graph path
-            return super().run_lm_decode(requests)
+            input_masks = None
 
-        # Sampling is not part of CUDA graph
+        # TODO: for zonos's purpose, the input_features has to be list of tensors for prefill. 
+        # This is not a good design and we should fix it.
+        # if input_features[0] is not None:
+        #     input_features = torch.cat(input_features, dim=0)
+        # else:
+        #     input_features = None
+        
+        qo_indptr_tensor = torch.tensor(qo_indptr, device=self.device, dtype=torch.int32)
+        paged_kv_indptr_tensor = torch.tensor(paged_kv_indptr, device=self.device, dtype=torch.int32)
+        paged_kv_indices_tensor = torch.tensor(paged_kv_indices, device=self.device, dtype=torch.int32)
+        paged_kv_last_page_len_tensor = torch.tensor(paged_kv_last_page_len, device=self.device, dtype=torch.int32)
+
+        self.prefill_wrapper.plan(
+            qo_indptr_tensor, 
+            paged_kv_indptr_tensor, 
+            paged_kv_indices_tensor, 
+            paged_kv_last_page_len_tensor, 
+            torch.bfloat16,
+        )
+        torch.cuda.synchronize()
+
+        # prefill run 
         if self.has_depth_transformer:
+            logits, backbone_hidden_states = self.model.forward(
+                input_ids=input_ids,
+                position_ids=position_ids,
+                attn_wrapper=self.prefill_wrapper,
+                kv_cache=self.kv_cache,
+                input_features=input_features,
+                input_masks=input_masks,
+            )
+
             output_ids, hidden_for_depth = self.model.sampling(
                 logits=logits,
                 hidden_states=backbone_hidden_states,
                 requests=requests,
             )
 
+            # Check if we can use CUDA graph optimization for depth transformer
+            # TODO: padding
+            can_use_cuda_graph = batch_size in self.cuda_graphs
+
+            # assuming that the sequence length is 2 for the initial iteration of depth transformer. 
+            # may need to change here for other models.
             depth_position_ids = torch.tensor([0, 1] * output_ids.shape[0], device=self.device, dtype=torch.int32)
             depth_qo_indptr = torch.arange(output_ids.shape[0] + 1, device=self.device, dtype=torch.int32) * 2
             depth_kv_indptr = torch.arange(output_ids.shape[0] + 1, device=self.device, dtype=torch.int32)
@@ -353,8 +370,7 @@ class CudaGraphWorker(ModelWorker):
 
             for i in range(1, self.model.depth_n_codebooks):
                 if i > 1 and can_use_cuda_graph:
-                    self.depth_attn_wrapper.plan(
-                        qo_indptr=depth_qo_indptr,
+                    self.depth_decode_wrappers[batch_size].plan(
                         paged_kv_indptr=depth_kv_indptr, 
                         paged_kv_indices=depth_kv_indices, 
                         paged_kv_last_page_len=depth_kv_last_page_len,
@@ -382,7 +398,7 @@ class CudaGraphWorker(ModelWorker):
                     depth_kv_last_page_len += 1
 
                 else:
-                    self.depth_attn_wrapper.plan(
+                    self.depth_prefill_wrapper.plan(
                         qo_indptr=depth_qo_indptr,
                         paged_kv_indptr=depth_kv_indptr, 
                         paged_kv_indices=depth_kv_indices, 
@@ -394,7 +410,154 @@ class CudaGraphWorker(ModelWorker):
                     depth_logits = self.model.depth_forward(
                         hidden_states=hidden_for_depth,
                         position_ids=depth_position_ids,
-                        attn_wrapper=self.depth_attn_wrapper,
+                        attn_wrapper=self.depth_prefill_wrapper,
+                        kv_cache=self.depth_kv_cache,
+                    )
+
+                    output_ids[:, i], hidden_for_depth = self.model.depth_sampling(
+                        logits=depth_logits,
+                        i_iteration=i,
+                        requests=requests,
+                    )
+
+                    depth_position_ids = torch.tensor([i + 1] * output_ids.shape[0], device=self.device, dtype=torch.int32)
+                    depth_qo_indptr = torch.arange(output_ids.shape[0] + 1, device=self.device, dtype=torch.int32)
+                    depth_kv_last_page_len += 1
+                
+        else:
+            logits = self.model.forward(
+                input_ids=input_ids,
+                position_ids=position_ids,
+                attn_wrapper=self.prefill_wrapper,
+                kv_cache=self.kv_cache,
+                input_features=input_features,
+                input_masks=input_masks,
+            )
+
+            output_ids = self.model.sampling(
+                logits=logits,
+                requests=requests,
+            )
+        
+        return 
+    
+    def run_lm_decode(self, requests: List[Request]):
+        """
+        Override parent's run_lm_decode to add CUDA graph optimization.
+        """
+        lm_inputs = self._prepare_lm_inputs(requests)
+        
+        qo_indptr = lm_inputs["qo_indptr"]
+        paged_kv_indptr = lm_inputs["paged_kv_indptr"]
+        paged_kv_indices = lm_inputs["paged_kv_indices"]
+        paged_kv_last_page_len = lm_inputs["paged_kv_last_page_len"]
+        input_ids = lm_inputs["input_ids"]
+        position_ids = lm_inputs["position_ids"]
+        input_features = lm_inputs["input_features"]
+        input_masks = lm_inputs["input_masks"]
+
+        batch_size = len(requests)
+        
+        # Check if we can use CUDA graph optimization
+        # TODO: padding
+        can_use_cuda_graph = batch_size in self.cuda_graphs
+        print(f"Batch size {batch_size} {'can' if can_use_cuda_graph else 'cannot'} use CUDA graph optimization.")
+        
+        if not can_use_cuda_graph:
+            # Fallback to parent method if CUDA graph optimization is not applicable
+            return super().run_lm_decode(requests)
+    
+        # Plan attention wrapper before CUDA graph
+        paged_kv_indptr_tensor = torch.tensor(paged_kv_indptr, device=self.device, dtype=torch.int32)
+        paged_kv_indices_tensor = torch.tensor(paged_kv_indices, device=self.device, dtype=torch.int32)
+        paged_kv_last_page_len_tensor = torch.tensor(paged_kv_last_page_len, device=self.device, dtype=torch.int32)
+
+        self.decode_wrappers[batch_size].plan(
+            paged_kv_indptr_tensor, 
+            paged_kv_indices_tensor, 
+            paged_kv_last_page_len_tensor, 
+            torch.bfloat16,
+        )
+        torch.cuda.synchronize()
+        
+        graph = self.cuda_graphs[batch_size]
+        
+        self.cuda_graph_buffers['input_ids'][:batch_size].copy_(torch.tensor(input_ids, device=self.device, dtype=torch.int32))
+        self.cuda_graph_buffers['position_ids'][:batch_size].copy_(torch.tensor(position_ids, device=self.device, dtype=torch.int32))
+        
+        # TODO: maybe model should have property about this?
+        if input_masks[0] is not None:
+            self.cuda_graph_buffers['input_masks'][:batch_size].copy_(torch.cat(input_masks, dim=0))
+        if input_features[0] is not None:
+            self.cuda_graph_buffers['input_features'][:batch_size].copy_(torch.cat(input_features, dim=0))
+
+        # Replay the CUDA graph
+        graph.replay()
+        
+        # Copy output from buffer
+        logits = self.cuda_graph_buffers['logits'][:batch_size]
+
+        if self.has_depth_transformer:
+            backbone_hidden_states = self.cuda_graph_buffers['backbone_hidden_states'][:batch_size]
+
+        # Sampling is not part of CUDA graph
+        if self.has_depth_transformer:
+            output_ids, hidden_for_depth = self.model.sampling(
+                logits=logits,
+                hidden_states=backbone_hidden_states,
+                requests=requests,
+            )
+
+            depth_position_ids = torch.tensor([0, 1] * output_ids.shape[0], device=self.device, dtype=torch.int32)
+            depth_qo_indptr = torch.arange(output_ids.shape[0] + 1, device=self.device, dtype=torch.int32) * 2
+            depth_kv_indptr = torch.arange(output_ids.shape[0] + 1, device=self.device, dtype=torch.int32)
+            depth_kv_indices = torch.arange(output_ids.shape[0], device=self.device, dtype=torch.int32)
+            depth_kv_last_page_len = torch.tensor([2] * output_ids.shape[0], device=self.device, dtype=torch.int32)
+            self.depth_kv_cache.zero_()
+
+            for i in range(1, self.model.depth_n_codebooks):
+                if i > 1:
+                    self.depth_decode_wrappers[batch_size].plan(
+                        paged_kv_indptr=depth_kv_indptr, 
+                        paged_kv_indices=depth_kv_indices, 
+                        paged_kv_last_page_len=depth_kv_last_page_len,
+                        dtype=torch.bfloat16,
+                    )
+                    torch.cuda.synchronize()
+
+                    graph = self.cuda_graphs_depth[batch_size]
+
+                    self.cuda_graph_depth_buffers['hidden_states'][:batch_size].copy_(hidden_for_depth)
+                    self.cuda_graph_depth_buffers['position_ids'][:batch_size].copy_(depth_position_ids)
+
+                    graph.replay()
+
+                    depth_logits = self.cuda_graph_depth_buffers['logits'][:batch_size]
+
+                    output_ids[:, i], hidden_for_depth = self.model.depth_sampling(
+                        logits=depth_logits,
+                        i_iteration=i,
+                        requests=requests,
+                    )
+
+                    depth_position_ids = torch.tensor([i + 1] * output_ids.shape[0], device=self.device, dtype=torch.int32)
+                    depth_qo_indptr = torch.arange(output_ids.shape[0] + 1, device=self.device, dtype=torch.int32)
+                    depth_kv_last_page_len += 1
+
+                else:
+                    self.depth_prefill_wrapper.plan(
+                        qo_indptr=depth_qo_indptr,
+                        paged_kv_indptr=depth_kv_indptr, 
+                        paged_kv_indices=depth_kv_indices, 
+                        paged_kv_last_page_len=depth_kv_last_page_len,
+                        dtype=torch.bfloat16,
+                    )
+                    torch.cuda.synchronize()
+                    
+                    depth_logits = self.model.depth_forward(
+                        hidden_states=hidden_for_depth,
+                        position_ids=depth_position_ids,
+                        attn_wrapper=self.depth_prefill_wrapper,
                         kv_cache=self.depth_kv_cache,
                     )
 
