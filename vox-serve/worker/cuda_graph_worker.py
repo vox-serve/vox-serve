@@ -18,7 +18,7 @@ class CudaGraphWorker(ModelWorker):
         super().__init__(*args, **kwargs)
         
         # CUDA graph related attributes
-        self.cuda_graphs: Dict[int, torch.cuda.CUDAGraph] = {}
+        self.cuda_graphs_lm: Dict[int, torch.cuda.CUDAGraph] = {}
         self.cuda_graphs_depth: Dict[int, torch.cuda.CUDAGraph] = {}
         self.cuda_graph_buffers: Dict[str, torch.Tensor] = {}
         
@@ -216,10 +216,10 @@ class CudaGraphWorker(ModelWorker):
                     self.cuda_graph_buffers['logits'][:batch_size].copy_(logits_output)
             
             # Store the captured graph
-            self.cuda_graphs[batch_size] = graph
+            self.cuda_graphs_lm[batch_size] = graph
             
         if not self.has_depth_transformer:
-            print(f"CUDA graphs initialized for batch sizes: {list(self.cuda_graphs.keys())}")
+            print(f"CUDA graphs initialized for batch sizes: {list(self.cuda_graphs_lm.keys())}")
             return
         
         print("Initializing CUDA graphs for depth transformer decode phase...")
@@ -286,7 +286,7 @@ class CudaGraphWorker(ModelWorker):
             # Store the captured depth graph
             self.cuda_graphs_depth[batch_size] = depth_graph
         
-        print(f"CUDA graphs initialized for batch sizes: {list(self.cuda_graphs.keys())}")
+        print(f"CUDA graphs initialized for batch sizes: {list(self.cuda_graphs_lm.keys())}")
     
     def run_lm_prefill(self, requests: List[Request]):
         """
@@ -355,7 +355,7 @@ class CudaGraphWorker(ModelWorker):
 
             # Check if we can use CUDA graph optimization for depth transformer
             # TODO: padding
-            can_use_cuda_graph = batch_size in self.cuda_graphs
+            can_use_cuda_graph = batch_size in self.cuda_graphs_lm
 
             # assuming that the sequence length is 2 for the initial iteration of depth transformer. 
             # may need to change here for other models.
@@ -458,7 +458,7 @@ class CudaGraphWorker(ModelWorker):
         
         # Check if we can use CUDA graph optimization
         # TODO: padding
-        can_use_cuda_graph = batch_size in self.cuda_graphs
+        can_use_cuda_graph = batch_size in self.cuda_graphs_lm
         print(f"Batch size {batch_size} {'can' if can_use_cuda_graph else 'cannot'} use CUDA graph optimization.")
         
         if not can_use_cuda_graph:
@@ -478,7 +478,7 @@ class CudaGraphWorker(ModelWorker):
         )
         torch.cuda.synchronize()
         
-        graph = self.cuda_graphs[batch_size]
+        graph = self.cuda_graphs_lm[batch_size]
         
         self.cuda_graph_buffers['input_ids'][:batch_size].copy_(torch.tensor(input_ids, device=self.device, dtype=torch.int32))
         self.cuda_graph_buffers['position_ids'][:batch_size].copy_(torch.tensor(position_ids, device=self.device, dtype=torch.int32))
