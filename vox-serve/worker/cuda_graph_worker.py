@@ -77,13 +77,11 @@ class CudaGraphWorker(ModelWorker):
 
         self.has_depth_transformer = self.model.has_depth_transformer
         if self.has_depth_transformer:
-            # TODO: different wrappers for different batch sizes and prefill/decode phases
-            # we reserve tensors with batch size of `2 * self.max_batch_size` since the first step of depth transformer
-            # has two tokens per request.
-            self.depth_qo_indptr_buffer = torch.zeros(2 * self.max_batch_size + 1).to(self.device).to(torch.int32)
-            self.depth_paged_kv_indptr_buffer = torch.zeros(2 * self.max_batch_size + 1).to(self.device).to(torch.int32)
-            self.depth_paged_kv_indices_buffer = torch.zeros(self.max_num_pages).to(self.device).to(torch.int32)
-            self.depth_paged_kv_last_page_len_buffer = torch.zeros(2 * self.max_batch_size).to(self.device).to(torch.int32)
+            # NOTE: for depth, there is always one page per request
+            self.depth_qo_indptr_buffer = torch.zeros(self.max_batch_size + 1).to(self.device).to(torch.int32)
+            self.depth_paged_kv_indptr_buffer = torch.zeros(self.max_batch_size + 1).to(self.device).to(torch.int32)
+            self.depth_paged_kv_indices_buffer = torch.zeros(self.max_batch_size).to(self.device).to(torch.int32)
+            self.depth_paged_kv_last_page_len_buffer = torch.zeros(self.max_batch_size).to(self.device).to(torch.int32)
 
             self.depth_prefill_wrapper = FlashInferPrefillWrapper(
                 attn_buffer=self.flashinfer_buffer,
@@ -105,7 +103,7 @@ class CudaGraphWorker(ModelWorker):
                     page_size=self.page_size,
                     batch_size=batch_size,
                     paged_kv_indptr_buffer=self.depth_paged_kv_indptr_buffer[:batch_size + 1],
-                    paged_kv_indices_buffer=self.depth_paged_kv_indices_buffer,
+                    paged_kv_indices_buffer=self.depth_paged_kv_indices_buffer[:batch_size],
                     paged_kv_last_page_len_buffer=self.depth_paged_kv_last_page_len_buffer[:batch_size],
                     use_cuda_graph=True,
                 )
@@ -361,11 +359,11 @@ class CudaGraphWorker(ModelWorker):
 
             # assuming that the sequence length is 2 for the initial iteration of depth transformer. 
             # may need to change here for other models.
-            depth_position_ids = torch.tensor([0, 1] * output_ids.shape[0], device=self.device, dtype=torch.int32)
-            depth_qo_indptr = torch.arange(output_ids.shape[0] + 1, device=self.device, dtype=torch.int32) * 2
-            depth_kv_indptr = torch.arange(output_ids.shape[0] + 1, device=self.device, dtype=torch.int32)
-            depth_kv_indices = torch.arange(output_ids.shape[0], device=self.device, dtype=torch.int32)
-            depth_kv_last_page_len = torch.tensor([2] * output_ids.shape[0], device=self.device, dtype=torch.int32)
+            depth_position_ids = torch.tensor([0, 1] * batch_size, device=self.device, dtype=torch.int32)
+            depth_qo_indptr = torch.arange(batch_size + 1, device=self.device, dtype=torch.int32) * 2
+            depth_kv_indptr = torch.arange(batch_size + 1, device=self.device, dtype=torch.int32)
+            depth_kv_indices = torch.arange(batch_size, device=self.device, dtype=torch.int32)
+            depth_kv_last_page_len = torch.tensor([2] * batch_size, device=self.device, dtype=torch.int32)
             self.depth_kv_cache.zero_()
 
             for i in range(1, self.model.depth_n_codebooks):
@@ -393,8 +391,8 @@ class CudaGraphWorker(ModelWorker):
                         requests=requests,
                     )
 
-                    depth_position_ids = torch.tensor([i + 1] * output_ids.shape[0], device=self.device, dtype=torch.int32)
-                    depth_qo_indptr = torch.arange(output_ids.shape[0] + 1, device=self.device, dtype=torch.int32)
+                    depth_position_ids = torch.tensor([i + 1] * batch_size, device=self.device, dtype=torch.int32)
+                    depth_qo_indptr = torch.arange(batch_size + 1, device=self.device, dtype=torch.int32)
                     depth_kv_last_page_len += 1
 
                 else:
@@ -420,8 +418,8 @@ class CudaGraphWorker(ModelWorker):
                         requests=requests,
                     )
 
-                    depth_position_ids = torch.tensor([i + 1] * output_ids.shape[0], device=self.device, dtype=torch.int32)
-                    depth_qo_indptr = torch.arange(output_ids.shape[0] + 1, device=self.device, dtype=torch.int32)
+                    depth_position_ids = torch.tensor([i + 1] * batch_size, device=self.device, dtype=torch.int32)
+                    depth_qo_indptr = torch.arange(batch_size + 1, device=self.device, dtype=torch.int32)
                     depth_kv_last_page_len += 1
                 
         else:
@@ -508,11 +506,11 @@ class CudaGraphWorker(ModelWorker):
                 requests=requests,
             )
 
-            depth_position_ids = torch.tensor([0, 1] * output_ids.shape[0], device=self.device, dtype=torch.int32)
-            depth_qo_indptr = torch.arange(output_ids.shape[0] + 1, device=self.device, dtype=torch.int32) * 2
-            depth_kv_indptr = torch.arange(output_ids.shape[0] + 1, device=self.device, dtype=torch.int32)
-            depth_kv_indices = torch.arange(output_ids.shape[0], device=self.device, dtype=torch.int32)
-            depth_kv_last_page_len = torch.tensor([2] * output_ids.shape[0], device=self.device, dtype=torch.int32)
+            depth_position_ids = torch.tensor([0, 1] * batch_size, device=self.device, dtype=torch.int32)
+            depth_qo_indptr = torch.arange(batch_size + 1, device=self.device, dtype=torch.int32) * 2
+            depth_kv_indptr = torch.arange(batch_size + 1, device=self.device, dtype=torch.int32)
+            depth_kv_indices = torch.arange(batch_size, device=self.device, dtype=torch.int32)
+            depth_kv_last_page_len = torch.tensor([2] * batch_size, device=self.device, dtype=torch.int32)
             self.depth_kv_cache.zero_()
 
             for i in range(1, self.model.depth_n_codebooks):
@@ -540,8 +538,8 @@ class CudaGraphWorker(ModelWorker):
                         requests=requests,
                     )
 
-                    depth_position_ids = torch.tensor([i + 1] * output_ids.shape[0], device=self.device, dtype=torch.int32)
-                    depth_qo_indptr = torch.arange(output_ids.shape[0] + 1, device=self.device, dtype=torch.int32)
+                    depth_position_ids = torch.tensor([i + 1] * batch_size, device=self.device, dtype=torch.int32)
+                    depth_qo_indptr = torch.arange(batch_size + 1, device=self.device, dtype=torch.int32)
                     depth_kv_last_page_len += 1
 
                 else:
@@ -567,8 +565,8 @@ class CudaGraphWorker(ModelWorker):
                         requests=requests,
                     )
 
-                    depth_position_ids = torch.tensor([i + 1] * output_ids.shape[0], device=self.device, dtype=torch.int32)
-                    depth_qo_indptr = torch.arange(output_ids.shape[0] + 1, device=self.device, dtype=torch.int32)
+                    depth_position_ids = torch.tensor([i + 1] * batch_size, device=self.device, dtype=torch.int32)
+                    depth_qo_indptr = torch.arange(batch_size + 1, device=self.device, dtype=torch.int32)
                     depth_kv_last_page_len += 1
 
         else:

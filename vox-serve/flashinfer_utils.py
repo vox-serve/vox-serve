@@ -12,32 +12,29 @@ class FlashInferPrefillWrapper():
         page_size: int,
         batch_size: int = None,
         device: torch.device = torch.device("cuda"),
-        qo_indptr_buf: torch.Tensor = None,
-        paged_kv_indptr_buf: torch.Tensor = None,
-        paged_kv_indices_buf: torch.Tensor = None,
-        paged_kv_last_page_len_buf: torch.Tensor = None,
+        qo_indptr_buffer: torch.Tensor = None,
+        paged_kv_indptr_buffer: torch.Tensor = None,
+        paged_kv_indices_buffer: torch.Tensor = None,
+        paged_kv_last_page_len_buffer: torch.Tensor = None,
         use_cuda_graph: bool = False, 
     ):
         self.device = device
         self.use_cuda_graph = use_cuda_graph
-        # self.attn_buffer = torch.empty(256 * 1024 * 1024, dtype=torch.uint8, device=device)
-        # self.seq_len = seq_len # number of tokens, not number of batches
+        self.batch_size = batch_size
 
         if self.use_cuda_graph:
-            # used for depth transformer
+            # TODO: to be used only for depth transformer, where the sequence length per request is always 2
             assert batch_size is not None, "batch_size must be specified for cuda graph optimization"
             self.attn_wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
                 attn_buffer, "NHD",
                 use_cuda_graph=use_cuda_graph,
-                qo_indptr_buf=qo_indptr_buf,
-                paged_kv_indptr_buf=paged_kv_indptr_buf,
-                paged_kv_indices_buf=paged_kv_indices_buf,
-                paged_kv_last_page_len_buf=paged_kv_last_page_len_buf,
+                qo_indptr_buf=qo_indptr_buffer,
+                paged_kv_indptr_buf=paged_kv_indptr_buffer,
+                paged_kv_indices_buf=paged_kv_indices_buffer,
+                paged_kv_last_page_len_buf=paged_kv_last_page_len_buffer,
             )
-            # TODO: support the sequence length per request of >1, such as the first step in depth transformer
-            # or transformers inside Mimi
-            self.token_to_page = torch.zeros(batch_size, dtype=torch.long, device=device)
-            self.token_to_cache = torch.zeros(batch_size, dtype=torch.long, device=device)
+            self.token_to_page = torch.zeros(2 * batch_size, dtype=torch.long, device=device)
+            self.token_to_cache = torch.zeros(2 * batch_size, dtype=torch.long, device=device)
 
         else:
             self.attn_wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
@@ -99,8 +96,8 @@ class FlashInferPrefillWrapper():
 
         # 3) fill the two output tensors in one shot
         if self.use_cuda_graph:
-            self.token_to_page[:n_req] = page_idxs[segment_ids]
-            self.token_to_cache[:n_req] = cache_starts[segment_ids] + (token_pos - starts[segment_ids])
+            self.token_to_page[:] = page_idxs[segment_ids]
+            self.token_to_cache[:] = cache_starts[segment_ids] + (token_pos - starts[segment_ids])
         else:
             self.token_to_page = page_idxs[segment_ids]
             self.token_to_cache = cache_starts[segment_ids] + (token_pos - starts[segment_ids])
@@ -149,7 +146,6 @@ class FlashInferDecodeWrapper():
     ):
         self.device = device
         self.use_cuda_graph = use_cuda_graph
-        # self.attn_buffer = torch.empty(256 * 1024 * 1024, dtype=torch.uint8, device=device)
         self.batch_size = batch_size
 
         self.attn_wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
