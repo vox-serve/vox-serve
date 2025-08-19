@@ -6,9 +6,9 @@ import numpy as np
 import torch
 import torch.cuda.nvtx as nvtx
 
-from .flashinfer_utils import FlashInferPrefillWrapper, FlashInferDecodeWrapper
-from .model import load_model
-from .requests import Request
+from ..flashinfer_utils import FlashInferPrefillWrapper, FlashInferDecodeWrapper
+from ..model import load_model
+from ..requests import Request
 
 class ModelWorker:
 
