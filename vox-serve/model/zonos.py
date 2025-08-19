@@ -575,6 +575,8 @@ class ZonosModel(BaseLM):
         self.logit_bias = torch.zeros(self.n_codebooks, 1025, dtype=dtype, device=device)
         self.logit_bias[1:, self.eos_token_id] = -torch.inf # only allow codebook 0 to predict EOS
 
+        self.resample_44k_to_24k = torchaudio.transforms.Resample(orig_freq=44100, new_freq=24000).to(self.device)
+
         self.default_sampling_config = SamplingConfig(
             top_k=None, 
             top_p=None,
@@ -621,6 +623,16 @@ class ZonosModel(BaseLM):
     def detokenize_overlap(self) -> int:
         """Overlap size for detokenization."""
         return self._n_codebooks
+    
+    @property
+    def n_channels(self) -> int:
+        """Number of audio channels in the output."""
+        return 1  # Mono audio
+    
+    @property
+    def output_audio_length(self) -> int:
+        """Output audio length (in samples) at each postprocess call."""
+        return 11425
     
     @property
     def max_tokens(self) -> int:
@@ -861,6 +873,7 @@ class ZonosModel(BaseLM):
         codes = torch.stack([token_ids[:, k : interval - n_q + k, k] for k in range(n_q)], dim=1)
 
         wavs = self.model.autoencoder.decode(codes)
-        audio_tensor = torchaudio.functional.resample(wavs, orig_freq=44100, new_freq=24000)
+        # audio_tensor = torchaudio.functional.resample(wavs, orig_freq=44100, new_freq=24000)
+        audio_tensor = self.resample_44k_to_24k(wavs)
 
         return audio_tensor

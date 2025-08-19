@@ -254,6 +254,10 @@ class OrpheusModel(BaseLM):
             cfg_scale=None,
         )
 
+        # for cuda graph-ing of postprocess
+        self.idx_14 = torch.tensor([1, 4], dtype=torch.long, device="cuda")
+        self.idx_2356 = torch.tensor([2, 3, 5, 6], dtype=torch.long, device="cuda")
+
     @property 
     def n_codebooks(self):
         """Number of codebooks in the model."""
@@ -295,6 +299,16 @@ class OrpheusModel(BaseLM):
         Maximum number of tokens the model generates in a single request.
         """
         return 1200
+    
+    @property
+    def n_channels(self) -> int:
+        """Number of audio channels in the output."""
+        return 1  # Mono audio
+    
+    @property
+    def output_audio_length(self) -> int:
+        """Output audio length (in samples) at each postprocess call."""
+        return 2048  # Based on slice [2048:4096] in postprocess
 
     @property
     def vocab_size(self) -> int:
@@ -440,9 +454,17 @@ class OrpheusModel(BaseLM):
         mf = token_ids.view(-1, 4, 7)
         mf = self._turn_token_into_id(mf)
 
+        # codes_0 = mf[:, :, 0] 
+        # codes_1 = mf[:, :, [1, 4]].view(-1, 8)
+        # codes_2 = mf[:, :, [2, 3, 5, 6]].view(-1, 16) 
+
         codes_0 = mf[:, :, 0] 
-        codes_1 = mf[:, :, [1, 4]].view(-1, 8)
-        codes_2 = mf[:, :, [2, 3, 5, 6]].view(-1, 16) 
+
+        c1 = torch.index_select(mf, dim=2, index=self.idx_14) 
+        codes_1 = c1.reshape(-1, 8)
+
+        c2 = torch.index_select(mf, dim=2, index=self.idx_2356) 
+        codes_2 = c2.reshape(-1, 16)
 
         codes = [codes_0, codes_1, codes_2]
 

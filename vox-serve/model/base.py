@@ -76,6 +76,11 @@ class BaseLM(ABC):
         return False
 
     @property
+    def needs_watermarking(self) -> bool:
+        """Indicates if the model requires watermarking."""
+        return False
+
+    @property
     @abstractmethod
     def detokenize_interval(self) -> int:
         """Interval at which to detokenize outputs."""
@@ -178,6 +183,18 @@ class BaseLM(ABC):
         """
         pass
     
+    @property
+    @abstractmethod
+    def n_channels(self) -> int:
+        """Number of audio channels in the output."""
+        pass
+    
+    @property
+    @abstractmethod 
+    def output_audio_length(self) -> int:
+        """Output audio length (in samples) at each postprocess call."""
+        pass
+
     @abstractmethod
     def postprocess(self, token_ids: torch.Tensor) -> torch.Tensor:
         """

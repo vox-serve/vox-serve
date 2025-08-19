@@ -1,3 +1,4 @@
+import numpy as np 
 import torch
 from typing import List, Dict
 
@@ -20,6 +21,7 @@ class CudaGraphWorker(ModelWorker):
         # CUDA graph related attributes
         self.cuda_graphs_lm: Dict[int, torch.cuda.CUDAGraph] = {}
         self.cuda_graphs_depth: Dict[int, torch.cuda.CUDAGraph] = {}
+        self.cuda_graphs_detokenization: Dict[int, torch.cuda.CUDAGraph] = {}
         self.cuda_graph_buffers: Dict[str, torch.Tensor] = {}
         
         # Initialize CUDA graphs after parent initialization
@@ -125,7 +127,7 @@ class CudaGraphWorker(ModelWorker):
     def _initialize_cuda_graphs(self):
         """Initialize CUDA graphs for different batch sizes."""
         
-        print("Initializing CUDA graphs for decode phase...")
+        print("Initializing CUDA graphs for LM decode phase...")
         
         # Create input buffers
         input_ids_buffer = torch.zeros(self.max_batch_size, self.model.n_codebooks, dtype=torch.int32, device=self.device)
@@ -157,7 +159,7 @@ class CudaGraphWorker(ModelWorker):
             if batch_size > self.max_batch_size:
                 continue
                 
-            print(f"Capturing CUDA graph for batch size {batch_size}")
+            print(f"Capturing LM decode CUDA graph for batch size {batch_size}")
             
             # Create buffers for flashinfer inputs
             paged_kv_indptr = torch.zeros(batch_size + 1, dtype=torch.int32, device=self.device)
@@ -218,6 +220,61 @@ class CudaGraphWorker(ModelWorker):
             # Store the captured graph
             self.cuda_graphs_lm[batch_size] = graph
             
+        print("CUDA graphs for decode phase initialized.")
+
+        print("Initializing CUDA graphs for detokenization phase...")
+        
+        detokenize_input_buffer = torch.zeros(
+            self.max_batch_size, 
+            self.model.detokenize_interval, 
+            self.model.n_codebooks, 
+            dtype=torch.int32, 
+            device=self.device
+        )
+        
+        detokenize_output_buffer = torch.zeros(
+            self.max_batch_size, 
+            self.model.n_channels, 
+            self.model.output_audio_length, 
+            dtype=torch.float32, 
+            device=self.device
+        )
+        
+        # Add detokenization buffers to unified buffer dictionary
+        self.cuda_graph_buffers.update({
+            'detokenize_input': detokenize_input_buffer,
+            'detokenize_output': detokenize_output_buffer,
+        })
+        
+        for batch_size in self.cuda_graph_batch_sizes:
+            if batch_size > self.max_batch_size:
+                continue
+                
+            print(f"Capturing detokenization CUDA graph for batch size {batch_size}")
+            
+            # Warmup runs for detokenization
+            for _ in range(5):
+                self.model.postprocess(
+                    self.cuda_graph_buffers['detokenize_input'][:batch_size]
+                )
+            torch.cuda.synchronize()
+            
+            # Create and capture CUDA graph for detokenization
+            detokenize_graph = torch.cuda.CUDAGraph()
+            
+            with torch.cuda.graph(detokenize_graph):
+                audio_output = self.model.postprocess(
+                    self.cuda_graph_buffers['detokenize_input'][:batch_size]
+                )
+                
+                # Copy the entire output since we've sized the buffer correctly
+                self.cuda_graph_buffers['detokenize_output'][:batch_size].copy_(audio_output)
+            
+            # Store the captured detokenization graph
+            self.cuda_graphs_detokenization[batch_size] = detokenize_graph
+        
+        print("CUDA graphs for detokenization phase initialized.")
+        
         if not self.has_depth_transformer:
             print(f"CUDA graphs initialized for batch sizes: {list(self.cuda_graphs_lm.keys())}")
             return
@@ -237,13 +294,11 @@ class CudaGraphWorker(ModelWorker):
             'depth_logits': depth_logits_buffer,
         })
 
-        print(f"Capturing depth transformer CUDA graph for batch size {batch_size}")
-
         for batch_size in self.cuda_graph_batch_sizes:
             if batch_size > self.max_batch_size:
                 continue
 
-            print(f"Capturing CUDA graph of depth transformer for batch size {batch_size}")
+            print(f"Capturing depth CUDA graph for batch size {batch_size}")
 
             # Create buffers for flashinfer inputs for depth transformer
             depth_qo_indptr = torch.arange(batch_size + 1, dtype=torch.int32, device=self.device)
@@ -285,6 +340,8 @@ class CudaGraphWorker(ModelWorker):
 
             # Store the captured depth graph
             self.cuda_graphs_depth[batch_size] = depth_graph
+        
+        print("CUDA graphs for depth transformer decode phase initialized.")
         
         print(f"CUDA graphs initialized for batch sizes: {list(self.cuda_graphs_lm.keys())}")
     
@@ -575,4 +632,67 @@ class CudaGraphWorker(ModelWorker):
                 requests=requests,
             )
 
+        return
+    
+    def run_detokenize(self, requests: List[Request]):
+        """
+        Override parent's run_detokenize to add CUDA graph optimization for postprocess.
+        """
+        if len(requests) == 0:
+            return
+
+        batch_size = len(requests)
+        
+        # Check if we can use CUDA graph optimization for detokenization
+        can_use_cuda_graph = batch_size in self.cuda_graphs_detokenization
+        print(f"Detokenization batch size {batch_size} {'can' if can_use_cuda_graph else 'cannot'} use CUDA graph optimization.")
+        
+        if not can_use_cuda_graph:
+            # Fallback to parent method if CUDA graph optimization is not applicable
+            return super().run_detokenize(requests)
+
+        # Prepare token_ids the same way as parent method
+        token_ids = []
+        for req in requests: 
+            new_tokens = req.lm_output_audio_tokens[req.next_audio_decode_idx : req.next_audio_decode_idx + self.detokenize_interval] 
+            
+            if req.done_all:
+                # exclude the last token since it is a stop token
+                if len(new_tokens) > 1:
+                    new_tokens = new_tokens[:-1]
+
+            if len(new_tokens) < self.detokenize_interval:
+                new_tokens.extend([new_tokens[-1]] * (self.detokenize_interval - len(new_tokens)))
+            
+            token_ids.append(new_tokens)
+        
+        token_ids_tensor = torch.tensor(token_ids, device=self.device, dtype=torch.int32)
+        
+        self.cuda_graph_buffers['detokenize_input'][:batch_size].copy_(token_ids_tensor)
+        
+        graph = self.cuda_graphs_detokenization[batch_size]
+        
+        graph.replay()
+        
+        audio_tensors = self.cuda_graph_buffers['detokenize_output'][:batch_size]
+
+        if self.needs_watermarking:
+            for i in range(audio_tensors.shape[0]):
+                audio_tensors[i, 0] = self.run_watermark(audio_tensors[i, 0], orig_sr=24000)
+        
+        # Process the audio the same way as parent method
+        for i, req in enumerate(requests):
+            audio = audio_tensors[i].detach().cpu().numpy()
+            audio_int16 = (audio * 32767).astype(np.int16) 
+
+            last_chunk_len = len(req.lm_output_audio_tokens[req.next_audio_decode_idx : req.next_audio_decode_idx + self.detokenize_interval])
+            if last_chunk_len < self.detokenize_interval:
+                # remove the padded audio
+                audio_int16 = audio_int16[:int(audio_int16.shape[1] * last_chunk_len / self.detokenize_interval)]
+
+            audio_bytes = audio_int16.tobytes()
+            req.output_audio.put(audio_bytes)
+
+            req.next_audio_decode_idx += self.detokenize_interval - self.detokenize_overlap
+        
         return

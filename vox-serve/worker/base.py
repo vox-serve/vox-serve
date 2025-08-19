@@ -3,10 +3,12 @@ import queue
 
 import numpy as np 
 import torch
+import torchaudio
 
 from ..flashinfer_utils import FlashInferPrefillWrapper, FlashInferDecodeWrapper
 from ..model import load_model
 from ..requests import Request
+from ..watermarker import silentcipher
 
 class ModelWorker:
 
@@ -42,6 +44,15 @@ class ModelWorker:
         self.empty_pages = queue.Queue()
         for i in range(self.max_num_pages):
             self.empty_pages.put(i)
+        
+        self.needs_watermarking = self.model.needs_watermarking
+        if self.needs_watermarking:
+            self.watermark_model = silentcipher.get_model(
+                model_type="44.1k",
+                device=self.device,
+            )
+            # TODO: This should be specified at server start time
+            self.watermark_key = [11, 91, 60, 147, 209]
         
         self._prepare_attention_wrappers()
         
@@ -460,6 +471,10 @@ class ModelWorker:
 
         audio_tensors = self.model.postprocess(token_ids)
 
+        if self.needs_watermarking:
+            for i in range(audio_tensors.shape[0]):
+                audio_tensors[i, 0] = self.run_watermark(audio_tensors[i, 0], orig_sr=24000)
+
         for i, req in enumerate(requests):
             audio = audio_tensors[i].detach().cpu().numpy()
             audio_int16 = (audio * 32767).astype(np.int16) 
@@ -475,6 +490,21 @@ class ModelWorker:
             req.next_audio_decode_idx += self.detokenize_interval - self.detokenize_overlap
         
         return
+
+    def run_watermark(self, audio_tensor: torch.Tensor, orig_sr: int = 24000):
+        """
+        Run watermarking on the given audio array.
+        """
+        assert self.needs_watermarking
+        
+        audio_array_44khz = torchaudio.functional.resample(audio_tensor, orig_freq=orig_sr, new_freq=44100)
+
+        # Run watermarking
+        encoded, _ = self.watermark_model.encode_wav(audio_array_44khz, 44100, self.watermark_key, calc_sdr=False, message_sdr=36)
+
+        encoded = torchaudio.functional.resample(encoded, orig_freq=44100, new_freq=orig_sr)
+
+        return encoded
 
     def free_kv_cache(self, request: Request):
         """

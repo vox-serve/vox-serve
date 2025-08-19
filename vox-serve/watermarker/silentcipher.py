@@ -117,7 +117,7 @@ class STFT(torch.nn.Module, metaclass=Singleton):
         self.filter_length = filter_length
         self.hop_len = hop_length
         self.win_len = filter_length
-        self.window = torch.hann_window(self.win_len)
+        self.window = torch.hann_window(self.win_len).to("cuda")
         self.num_samples = -1
 
     def transform(self, x):
@@ -181,7 +181,7 @@ class Model():
         self.dec_c = self.dec_c.to(self.device)
         self.dec_m = [m.to(self.device) for m in self.dec_m]
 
-        self.average_energy_VCTK=0.002837200844477648
+        self.average_energy_VCTK = torch.tensor(0.002837200844477648, device=self.device)
         self.stft = STFT(self.config.N_FFT, self.config.HOP_LENGTH)
         self.stft.to(self.device)
         self.load_models(config.load_ckpt)
@@ -423,7 +423,7 @@ class Model():
                         print('WARNING! The input audio has a power of 0. This means the audio is likely just silence. Skipping encoding.')
                         return orig_y, 0
 
-                y = y * torch.sqrt(torch.tensor(self.average_energy_VCTK, device=self.device) / original_power)
+                y = y * torch.sqrt(self.average_energy_VCTK / original_power)
                 y = y.unsqueeze(0).unsqueeze(0).to(self.device)
                 carrier, carrier_phase = self.stft.transform(y.squeeze(1))
                 carrier = carrier[:, None]
@@ -466,7 +466,7 @@ class Model():
                 self.stft.num_samples = y.shape[2]
 
                 y = self.stft.inverse(carrier_reconst.squeeze(1), carrier_phase.squeeze(1))[0, 0]
-                y = y * torch.sqrt(original_power / torch.tensor(self.average_energy_VCTK, device=self.device))  # Noise has a power of 5% power of VCTK samples
+                y = y * torch.sqrt(original_power / self.average_energy_VCTK)  # Noise has a power of 5% power of VCTK samples
 
                 if orig_sr != self.sr:
                     y = torchaudio.functional.resample(y.view(1, -1), orig_freq=self.sr, new_freq=orig_sr).squeeze()
@@ -528,7 +528,7 @@ class Model():
                         y = torchaudio.functional.resample(y.view(1, -1), orig_freq=orig_sr, new_freq=self.sr).squeeze()
 
                     original_power = torch.mean(y**2)
-                    y = y * torch.sqrt(torch.tensor(self.average_energy_VCTK) / original_power)  # Noise has a power of 5% power of VCTK samples
+                    y = y * torch.sqrt(self.average_energy_VCTK / original_power)  # Noise has a power of 5% power of VCTK samples
 
                     if phase_shift_decoding and phase_shift_decoding != 'false':
                         ps = self.get_best_ps(y)

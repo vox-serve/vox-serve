@@ -4,6 +4,7 @@ import torch
 import flashinfer
 import torch
 from torch import nn
+import torchaudio 
 from transformers.activations import ACT2FN
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from transformers import AutoTokenizer, LlamaConfig, CsmConfig, CsmDepthDecoderConfig, CsmPreTrainedModel
@@ -351,8 +352,6 @@ class CSMModel(BaseLMWithDepth):
 
         self._set_default_context()
 
-        self._load_watermarker()
-
     @property
     def n_codebooks(self) -> int:
         """Number of codebooks in the model."""
@@ -402,6 +401,11 @@ class CSMModel(BaseLMWithDepth):
     def depth_hidden_size(self) -> int:
         """Hidden size of the model."""
         return self._depth_hidden_size
+    
+    @property
+    def needs_watermarking(self) -> bool:
+        """Indicates if the model requires watermarking."""
+        return True
     
     @property
     def embed_text_tokens(self):
@@ -529,15 +533,6 @@ class CSMModel(BaseLMWithDepth):
             "tokens_mask": tokens_mask,
         }
     
-    def _load_watermarker(self):
-        from ..watermarker import silentcipher
-        self.watermark_model = silentcipher.get_model(
-            model_type="44.1k",
-            device=self.device,
-        )
-        # TODO: This should be specified at server start time
-        self.watermark_key = [11, 91, 60, 147, 209]
-    
     @property
     def detokenize_interval(self) -> int:
         """Interval at which to detokenize outputs."""
@@ -547,6 +542,16 @@ class CSMModel(BaseLMWithDepth):
     def detokenize_overlap(self) -> int:
         """Overlap size for detokenization."""
         return 0
+    
+    @property
+    def n_channels(self) -> int:
+        """Number of audio channels in the output."""
+        return 1  # Mono audio
+    
+    @property
+    def output_audio_length(self) -> int:
+        """Output audio length (in samples) at each postprocess call."""
+        return 1920  # 24000 / 12.5
     
     @property
     def max_tokens(self) -> int:
@@ -703,20 +708,8 @@ class CSMModel(BaseLMWithDepth):
         # TODO: caching for mimi
         audio_tensor = self.audio_tokenizer.decode(tokens_to_process)
         # audio_tensor: (batch_size, 1, N)
-
-        # silentcipher seems not supporting batch inference
-        for i in range(audio_tensor.shape[0]):
-            audio_tensor[i, 0] = self.watermark(audio_tensor[i, 0])
         
         return audio_tensor
-    
-    def watermark(self, audio):
-        import torchaudio
-        audio_array_44khz = torchaudio.functional.resample(audio, orig_freq=self.audio_tokenizer.sample_rate, new_freq=44100)
-        encoded, _ = self.watermark_model.encode_wav(audio_array_44khz, 44100, self.watermark_key, calc_sdr=False, message_sdr=36)
-        output_sample_rate = min(44100, self.audio_tokenizer.sample_rate)
-        encoded = torchaudio.functional.resample(encoded, orig_freq=44100, new_freq=output_sample_rate)
-        return encoded
 
 
 if __name__ == "__main__":
