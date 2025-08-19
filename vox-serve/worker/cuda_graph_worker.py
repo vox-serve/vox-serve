@@ -21,7 +21,6 @@ class CudaGraphWorker(ModelWorker):
         self.cuda_graphs: Dict[int, torch.cuda.CUDAGraph] = {}
         self.cuda_graphs_depth: Dict[int, torch.cuda.CUDAGraph] = {}
         self.cuda_graph_buffers: Dict[str, torch.Tensor] = {}
-        self.cuda_graph_depth_buffers: Dict[str, torch.Tensor] = {}
         
         # Initialize CUDA graphs after parent initialization
         self._initialize_cuda_graphs()
@@ -125,6 +124,9 @@ class CudaGraphWorker(ModelWorker):
     
     def _initialize_cuda_graphs(self):
         """Initialize CUDA graphs for different batch sizes."""
+        
+        print("Initializing CUDA graphs for decode phase...")
+        
         # Create input buffers
         input_ids_buffer = torch.zeros(self.max_batch_size, self.model.n_codebooks, dtype=torch.int32, device=self.device)
         position_ids_buffer = torch.zeros(self.max_batch_size, dtype=torch.int32, device=self.device)
@@ -150,8 +152,6 @@ class CudaGraphWorker(ModelWorker):
             'input_masks': input_masks_buffer,
             'backbone_hidden_states': backbone_hidden_states_buffer,
         }
-        
-        print("Initializing CUDA graphs for decode phase...")
         
         for batch_size in self.cuda_graph_batch_sizes:
             if batch_size > self.max_batch_size:
@@ -230,12 +230,12 @@ class CudaGraphWorker(ModelWorker):
         
         depth_logits_buffer = torch.zeros(self.max_batch_size, self.model.vocab_size, dtype=torch.bfloat16, device=self.device)
 
-        # Store depth transformer buffers
-        self.cuda_graph_depth_buffers = {
-            'hidden_states': depth_hidden_states_buffer,
-            'position_ids': depth_position_ids_buffer,
-            'logits': depth_logits_buffer,
-        }
+        # Add depth transformer buffers to the unified buffer dictionary
+        self.cuda_graph_buffers.update({
+            'depth_hidden_states': depth_hidden_states_buffer,
+            'depth_position_ids': depth_position_ids_buffer,
+            'depth_logits': depth_logits_buffer,
+        })
 
         print(f"Capturing depth transformer CUDA graph for batch size {batch_size}")
 
@@ -263,8 +263,8 @@ class CudaGraphWorker(ModelWorker):
             # Warmup runs for depth transformer
             for _ in range(5):
                 self.model.depth_forward(
-                    hidden_states=self.cuda_graph_depth_buffers['hidden_states'][:batch_size],
-                    position_ids=self.cuda_graph_depth_buffers['position_ids'][:batch_size],
+                    hidden_states=self.cuda_graph_buffers['depth_hidden_states'][:batch_size],
+                    position_ids=self.cuda_graph_buffers['depth_position_ids'][:batch_size],
                     attn_wrapper=self.depth_decode_wrappers[batch_size],
                     kv_cache=self.depth_kv_cache,
                 )
@@ -275,13 +275,13 @@ class CudaGraphWorker(ModelWorker):
 
             with torch.cuda.graph(depth_graph):
                 depth_logits_output = self.model.depth_forward(
-                    hidden_states=self.cuda_graph_depth_buffers['hidden_states'][:batch_size],
-                    position_ids=self.cuda_graph_depth_buffers['position_ids'][:batch_size],
+                    hidden_states=self.cuda_graph_buffers['depth_hidden_states'][:batch_size],
+                    position_ids=self.cuda_graph_buffers['depth_position_ids'][:batch_size],
                     attn_wrapper=self.depth_decode_wrappers[batch_size],
                     kv_cache=self.depth_kv_cache,
                 )
                 
-                self.cuda_graph_depth_buffers['logits'][:batch_size].copy_(depth_logits_output)
+                self.cuda_graph_buffers['depth_logits'][:batch_size].copy_(depth_logits_output)
 
             # Store the captured depth graph
             self.cuda_graphs_depth[batch_size] = depth_graph
@@ -378,12 +378,12 @@ class CudaGraphWorker(ModelWorker):
 
                     graph = self.cuda_graphs_depth[batch_size]
 
-                    self.cuda_graph_depth_buffers['hidden_states'][:batch_size].copy_(hidden_for_depth)
-                    self.cuda_graph_depth_buffers['position_ids'][:batch_size].copy_(depth_position_ids)
+                    self.cuda_graph_buffers['depth_hidden_states'][:batch_size].copy_(hidden_for_depth)
+                    self.cuda_graph_buffers['depth_position_ids'][:batch_size].copy_(depth_position_ids)
 
                     graph.replay()
 
-                    depth_logits = self.cuda_graph_depth_buffers['logits'][:batch_size]
+                    depth_logits = self.cuda_graph_buffers['depth_logits'][:batch_size]
 
                     output_ids[:, i], hidden_for_depth = self.model.depth_sampling(
                         logits=depth_logits,
@@ -525,12 +525,12 @@ class CudaGraphWorker(ModelWorker):
 
                     graph = self.cuda_graphs_depth[batch_size]
 
-                    self.cuda_graph_depth_buffers['hidden_states'][:batch_size].copy_(hidden_for_depth)
-                    self.cuda_graph_depth_buffers['position_ids'][:batch_size].copy_(depth_position_ids)
+                    self.cuda_graph_buffers['depth_hidden_states'][:batch_size].copy_(hidden_for_depth)
+                    self.cuda_graph_buffers['depth_position_ids'][:batch_size].copy_(depth_position_ids)
 
                     graph.replay()
 
-                    depth_logits = self.cuda_graph_depth_buffers['logits'][:batch_size]
+                    depth_logits = self.cuda_graph_buffers['depth_logits'][:batch_size]
 
                     output_ids[:, i], hidden_for_depth = self.model.depth_sampling(
                         logits=depth_logits,
