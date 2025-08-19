@@ -99,8 +99,8 @@ class FlashInferPrefillWrapper():
 
         # 3) fill the two output tensors in one shot
         if self.use_cuda_graph:
-            self.token_to_page[:] = page_idxs[segment_ids]
-            self.token_to_cache[:] = cache_starts[segment_ids] + (token_pos - starts[segment_ids])
+            self.token_to_page[:n_req] = page_idxs[segment_ids]
+            self.token_to_cache[:n_req] = cache_starts[segment_ids] + (token_pos - starts[segment_ids])
         else:
             self.token_to_page = page_idxs[segment_ids]
             self.token_to_cache = cache_starts[segment_ids] + (token_pos - starts[segment_ids])

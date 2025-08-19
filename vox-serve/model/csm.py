@@ -653,7 +653,6 @@ class CSMModel(BaseLMWithDepth):
     
     def depth_forward(
         self, 
-        input_ids: torch.Tensor, 
         hidden_states: torch.Tensor,
         position_ids: torch.Tensor, 
         attn_wrapper: FlashInferWrapper, 
