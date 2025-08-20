@@ -112,9 +112,7 @@ class FlashInferPrefillWrapper():
     
     def set_kv_cache(self, kv_cache, k, v):
         """
-        kv_cache : torch.Tensor, shape = (n_pages, 2, n_ctx, n_heads, head_dim)
-            the KV cache for cross-attention
-            n_cts is either 1500 or 448
+        kv_cache : torch.Tensor, shape = (n_pages, 2, page_size, n_heads, head_dim)
         k, v   : torch.Tensor, shape = (n_token, n_heads, head_dim)
         """
         # these were created in `plan()`
@@ -213,8 +211,6 @@ class FlashInferDecodeWrapper():
     def set_kv_cache(self, kv_cache, k, v):
         """
         kv_cache : torch.Tensor, shape = (n_pages, 2, page_size, n_heads, head_dim)
-            the KV cache for cross-attention
-            n_cts is either 1500 or 448
         k, v   : torch.Tensor, shape = (n_req, n_heads, head_dim)
         """
         # Assuming self.kv_cache_locations is a tensor of shape (batch_size, 2)

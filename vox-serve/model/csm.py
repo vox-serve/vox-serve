@@ -672,9 +672,10 @@ class CSMModel(BaseLMWithDepth):
             kv_cache=kv_cache,
         )
 
-        # select last token for each request for prefill 
-        if getattr(attn_wrapper, "qo_indptr", None) is not None:
-            depth_logits = depth_logits[attn_wrapper.qo_indptr[:-1] - 1]
+        # We don't do this here since prefill is also captured in cuda graph
+        # for depth transformer 
+        # if getattr(attn_wrapper, "qo_indptr", None) is not None:
+        #     depth_logits = depth_logits[attn_wrapper.qo_indptr[:-1] - 1]
 
         return depth_logits
     
