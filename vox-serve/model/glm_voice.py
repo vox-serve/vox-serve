@@ -360,6 +360,9 @@ class GLMVoiceModel(BaseLM):
             cfg_scale=None,
         )
 
+        # for cuda graph compatibility
+        self.detokenize_token_len = torch.tensor([self.detokenize_interval], dtype=torch.int32, device=self.device)
+
     @property 
     def n_codebooks(self):
         """Number of codebooks in the model."""
@@ -399,6 +402,16 @@ class GLMVoiceModel(BaseLM):
     def detokenize_overlap(self) -> int:
         """Overlap size for detokenization."""
         return 0
+    
+    @property
+    def n_channels(self) -> int:
+        """Number of audio channels in the output."""
+        return 1  # Mono audio
+    
+    @property
+    def output_audio_length(self) -> int:
+        """Output audio length (in samples) at each postprocess call."""
+        return 44032
     
     @property
     def max_tokens(self) -> int:
@@ -521,4 +534,5 @@ class GLMVoiceModel(BaseLM):
         return output_ids
 
     def postprocess(self, token_ids: torch.Tensor):
-        return self.audio_decoder(token_ids[:, :, 0] - self.audio_offset)
+        audio_tensor = self.audio_decoder(token_ids[:, :, 0] - self.audio_offset, self.detokenize_token_len)
+        return audio_tensor[:, None, :] # add channel dimension

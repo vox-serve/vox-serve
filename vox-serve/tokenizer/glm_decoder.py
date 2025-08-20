@@ -53,107 +53,107 @@ def subsequent_chunk_mask(
     return ret
 
 
-def add_optional_chunk_mask(xs: torch.Tensor,
-                            masks: torch.Tensor,
-                            use_dynamic_chunk: bool,
-                            use_dynamic_left_chunk: bool,
-                            decoding_chunk_size: int,
-                            static_chunk_size: int,
-                            num_decoding_left_chunks: int,
-                            enable_full_context: bool = True):
-    """ Apply optional mask for encoder.
+# def add_optional_chunk_mask(xs: torch.Tensor,
+#                             masks: torch.Tensor,
+#                             use_dynamic_chunk: bool,
+#                             use_dynamic_left_chunk: bool,
+#                             decoding_chunk_size: int,
+#                             static_chunk_size: int,
+#                             num_decoding_left_chunks: int,
+#                             enable_full_context: bool = True):
+#     """ Apply optional mask for encoder.
 
-    Args:
-        xs (torch.Tensor): padded input, (B, L, D), L for max length
-        mask (torch.Tensor): mask for xs, (B, 1, L)
-        use_dynamic_chunk (bool): whether to use dynamic chunk or not
-        use_dynamic_left_chunk (bool): whether to use dynamic left chunk for
-            training.
-        decoding_chunk_size (int): decoding chunk size for dynamic chunk, it's
-            0: default for training, use random dynamic chunk.
-            <0: for decoding, use full chunk.
-            >0: for decoding, use fixed chunk size as set.
-        static_chunk_size (int): chunk size for static chunk training/decoding
-            if it's greater than 0, if use_dynamic_chunk is true,
-            this parameter will be ignored
-        num_decoding_left_chunks: number of left chunks, this is for decoding,
-            the chunk size is decoding_chunk_size.
-            >=0: use num_decoding_left_chunks
-            <0: use all left chunks
-        enable_full_context (bool):
-            True: chunk size is either [1, 25] or full context(max_len)
-            False: chunk size ~ U[1, 25]
+#     Args:
+#         xs (torch.Tensor): padded input, (B, L, D), L for max length
+#         mask (torch.Tensor): mask for xs, (B, 1, L)
+#         use_dynamic_chunk (bool): whether to use dynamic chunk or not
+#         use_dynamic_left_chunk (bool): whether to use dynamic left chunk for
+#             training.
+#         decoding_chunk_size (int): decoding chunk size for dynamic chunk, it's
+#             0: default for training, use random dynamic chunk.
+#             <0: for decoding, use full chunk.
+#             >0: for decoding, use fixed chunk size as set.
+#         static_chunk_size (int): chunk size for static chunk training/decoding
+#             if it's greater than 0, if use_dynamic_chunk is true,
+#             this parameter will be ignored
+#         num_decoding_left_chunks: number of left chunks, this is for decoding,
+#             the chunk size is decoding_chunk_size.
+#             >=0: use num_decoding_left_chunks
+#             <0: use all left chunks
+#         enable_full_context (bool):
+#             True: chunk size is either [1, 25] or full context(max_len)
+#             False: chunk size ~ U[1, 25]
 
-    Returns:
-        torch.Tensor: chunk mask of the input xs.
-    """
-    # Whether to use chunk mask or not
-    if use_dynamic_chunk:
-        max_len = xs.size(1)
-        if decoding_chunk_size < 0:
-            chunk_size = max_len
-            num_left_chunks = -1
-        elif decoding_chunk_size > 0:
-            chunk_size = decoding_chunk_size
-            num_left_chunks = num_decoding_left_chunks
-        else:
-            # chunk size is either [1, 25] or full context(max_len).
-            # Since we use 4 times subsampling and allow up to 1s(100 frames)
-            # delay, the maximum frame is 100 / 4 = 25.
-            chunk_size = torch.randint(1, max_len, (1, )).item()
-            num_left_chunks = -1
-            if chunk_size > max_len // 2 and enable_full_context:
-                chunk_size = max_len
-            else:
-                chunk_size = chunk_size % 25 + 1
-                if use_dynamic_left_chunk:
-                    max_left_chunks = (max_len - 1) // chunk_size
-                    num_left_chunks = torch.randint(0, max_left_chunks,
-                                                    (1, )).item()
-        chunk_masks = subsequent_chunk_mask(xs.size(1), chunk_size,
-                                            num_left_chunks,
-                                            xs.device)  # (L, L)
-        chunk_masks = chunk_masks.unsqueeze(0)  # (1, L, L)
-        chunk_masks = masks & chunk_masks  # (B, L, L)
-    elif static_chunk_size > 0:
-        num_left_chunks = num_decoding_left_chunks
-        chunk_masks = subsequent_chunk_mask(xs.size(1), static_chunk_size,
-                                            num_left_chunks,
-                                            xs.device)  # (L, L)
-        chunk_masks = chunk_masks.unsqueeze(0)  # (1, L, L)
-        chunk_masks = masks & chunk_masks  # (B, L, L)
-    else:
-        chunk_masks = masks
-    return chunk_masks
+#     Returns:
+#         torch.Tensor: chunk mask of the input xs.
+#     """
+#     # Whether to use chunk mask or not
+#     if use_dynamic_chunk:
+#         max_len = xs.size(1)
+#         if decoding_chunk_size < 0:
+#             chunk_size = max_len
+#             num_left_chunks = -1
+#         elif decoding_chunk_size > 0:
+#             chunk_size = decoding_chunk_size
+#             num_left_chunks = num_decoding_left_chunks
+#         else:
+#             # chunk size is either [1, 25] or full context(max_len).
+#             # Since we use 4 times subsampling and allow up to 1s(100 frames)
+#             # delay, the maximum frame is 100 / 4 = 25.
+#             chunk_size = torch.randint(1, max_len, (1, )).item()
+#             num_left_chunks = -1
+#             if chunk_size > max_len // 2 and enable_full_context:
+#                 chunk_size = max_len
+#             else:
+#                 chunk_size = chunk_size % 25 + 1
+#                 if use_dynamic_left_chunk:
+#                     max_left_chunks = (max_len - 1) // chunk_size
+#                     num_left_chunks = torch.randint(0, max_left_chunks,
+#                                                     (1, )).item()
+#         chunk_masks = subsequent_chunk_mask(xs.size(1), chunk_size,
+#                                             num_left_chunks,
+#                                             xs.device)  # (L, L)
+#         chunk_masks = chunk_masks.unsqueeze(0)  # (1, L, L)
+#         chunk_masks = masks & chunk_masks  # (B, L, L)
+#     elif static_chunk_size > 0:
+#         num_left_chunks = num_decoding_left_chunks
+#         chunk_masks = subsequent_chunk_mask(xs.size(1), static_chunk_size,
+#                                             num_left_chunks,
+#                                             xs.device)  # (L, L)
+#         chunk_masks = chunk_masks.unsqueeze(0)  # (1, L, L)
+#         chunk_masks = masks & chunk_masks  # (B, L, L)
+#     else:
+#         chunk_masks = masks
+#     return chunk_masks
 
 
-def make_pad_mask(lengths: torch.Tensor, max_len: int = 0) -> torch.Tensor:
-    """Make mask tensor containing indices of padded part.
+# def make_pad_mask(lengths: torch.Tensor, max_len: int = 0) -> torch.Tensor:
+#     """Make mask tensor containing indices of padded part.
 
-    See description of make_non_pad_mask.
+#     See description of make_non_pad_mask.
 
-    Args:
-        lengths (torch.Tensor): Batch of lengths (B,).
-    Returns:
-        torch.Tensor: Mask tensor containing indices of padded part.
+#     Args:
+#         lengths (torch.Tensor): Batch of lengths (B,).
+#     Returns:
+#         torch.Tensor: Mask tensor containing indices of padded part.
 
-    Examples:
-        >>> lengths = [5, 3, 2]
-        >>> make_pad_mask(lengths)
-        masks = [[0, 0, 0, 0 ,0],
-                 [0, 0, 0, 1, 1],
-                 [0, 0, 1, 1, 1]]
-    """
-    batch_size = lengths.size(0)
-    max_len = max_len if max_len > 0 else lengths.max().item()
-    seq_range = torch.arange(0,
-                             max_len,
-                             dtype=torch.int64,
-                             device=lengths.device)
-    seq_range_expand = seq_range.unsqueeze(0).expand(batch_size, max_len)
-    seq_length_expand = lengths.unsqueeze(-1)
-    mask = seq_range_expand >= seq_length_expand
-    return mask
+#     Examples:
+#         >>> lengths = [5, 3, 2]
+#         >>> make_pad_mask(lengths)
+#         masks = [[0, 0, 0, 0 ,0],
+#                  [0, 0, 0, 1, 1],
+#                  [0, 0, 1, 1, 1]]
+#     """
+#     batch_size = lengths.size(0)
+#     max_len = max_len if max_len > 0 else lengths.max().item()
+#     seq_range = torch.arange(0,
+#                              max_len,
+#                              dtype=torch.int64,
+#                              device=lengths.device)
+#     seq_range_expand = seq_range.unsqueeze(0).expand(batch_size, max_len)
+#     seq_length_expand = lengths.unsqueeze(-1)
+#     mask = seq_range_expand >= seq_length_expand
+#     return mask
 
 
 
@@ -187,7 +187,7 @@ class LinearNoSubsampling(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        x_mask: torch.Tensor,
+        # x_mask: torch.Tensor,
         offset: Union[int, torch.Tensor] = 0
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Input x.
@@ -205,7 +205,7 @@ class LinearNoSubsampling(nn.Module):
         """
         x = self.out(x)
         x, pos_emb = self.pos_enc(x, offset)
-        return x, pos_emb, x_mask
+        return x, pos_emb
 
 
 class EspnetRelPositionalEncoding(torch.nn.Module):
@@ -444,76 +444,6 @@ class MultiHeadedAttention(nn.Module):
 
         return self.linear_out(x)  # (batch, time1, d_model)
 
-    # def forward(
-    #     self,
-    #     query: torch.Tensor,
-    #     key: torch.Tensor,
-    #     value: torch.Tensor,
-    #     mask: torch.Tensor = torch.ones((0, 0, 0), dtype=torch.bool),
-    #     pos_emb: torch.Tensor = torch.empty(0),
-    #     cache: torch.Tensor = torch.zeros((0, 0, 0, 0))
-    # ) -> Tuple[torch.Tensor, torch.Tensor]:
-    #     """Compute scaled dot product attention.
-
-    #     Args:
-    #         query (torch.Tensor): Query tensor (#batch, time1, size).
-    #         key (torch.Tensor): Key tensor (#batch, time2, size).
-    #         value (torch.Tensor): Value tensor (#batch, time2, size).
-    #         mask (torch.Tensor): Mask tensor (#batch, 1, time2) or
-    #             (#batch, time1, time2).
-    #             1.When applying cross attention between decoder and encoder,
-    #             the batch padding mask for input is in (#batch, 1, T) shape.
-    #             2.When applying self attention of encoder,
-    #             the mask is in (#batch, T, T)  shape.
-    #             3.When applying self attention of decoder,
-    #             the mask is in (#batch, L, L)  shape.
-    #             4.If the different position in decoder see different block
-    #             of the encoder, such as Mocha, the passed in mask could be
-    #             in (#batch, L, T) shape. But there is no such case in current
-    #             CosyVoice.
-    #         cache (torch.Tensor): Cache tensor (1, head, cache_t, d_k * 2),
-    #             where `cache_t == chunk_size * num_decoding_left_chunks`
-    #             and `head * d_k == size`
-
-
-    #     Returns:
-    #         torch.Tensor: Output tensor (#batch, time1, d_model).
-    #         torch.Tensor: Cache tensor (1, head, cache_t + time1, d_k * 2)
-    #             where `cache_t == chunk_size * num_decoding_left_chunks`
-    #             and `head * d_k == size`
-
-    #     """
-    #     q, k, v = self.forward_qkv(query, key, value)
-
-    #     # NOTE(xcsong):
-    #     #   when export onnx model, for 1st chunk, we feed
-    #     #       cache(1, head, 0, d_k * 2) (16/-1, -1/-1, 16/0 mode)
-    #     #       or cache(1, head, real_cache_t, d_k * 2) (16/4 mode).
-    #     #       In all modes, `if cache.size(0) > 0` will alwayse be `True`
-    #     #       and we will always do splitting and
-    #     #       concatnation(this will simplify onnx export). Note that
-    #     #       it's OK to concat & split zero-shaped tensors(see code below).
-    #     #   when export jit  model, for 1st chunk, we always feed
-    #     #       cache(0, 0, 0, 0) since jit supports dynamic if-branch.
-    #     # >>> a = torch.ones((1, 2, 0, 4))
-    #     # >>> b = torch.ones((1, 2, 3, 4))
-    #     # >>> c = torch.cat((a, b), dim=2)
-    #     # >>> torch.equal(b, c)        # True
-    #     # >>> d = torch.split(a, 2, dim=-1)
-    #     # >>> torch.equal(d[0], d[1])  # True
-    #     if cache.size(0) > 0:
-    #         key_cache, value_cache = torch.split(cache,
-    #                                              cache.size(-1) // 2,
-    #                                              dim=-1)
-    #         k = torch.cat([key_cache, k], dim=2)
-    #         v = torch.cat([value_cache, v], dim=2)
-    #     # NOTE(xcsong): We do cache slicing in encoder.forward_chunk, since it's
-    #     #   non-trivial to calculate `next_cache_start` here.
-    #     new_cache = torch.cat((k, v), dim=-1)
-
-    #     scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.d_k)
-    #     return self.forward_attention(v, scores, mask), new_cache
-
 
 class BlockRelPositionMultiHeadedAttention(MultiHeadedAttention):
     """Multi-Head Attention layer with relative position encoding.
@@ -546,7 +476,7 @@ class BlockRelPositionMultiHeadedAttention(MultiHeadedAttention):
 
         # 先不考虑seen_length创建一个grid mask：
         if fill_triangle:
-            mask = 1 - torch.triu(torch.ones(seq_length, seq_length), diagonal=1)
+            mask = 1 - torch.triu(torch.ones(seq_length, seq_length, device="cuda"), diagonal=1)
             # 下三角与主对角线都为1
         else:
             mask = torch.zeros(seq_length, seq_length)
@@ -588,7 +518,7 @@ class BlockRelPositionMultiHeadedAttention(MultiHeadedAttention):
             query: torch.Tensor,
             key: torch.Tensor,
             value: torch.Tensor,
-            mask: torch.Tensor = torch.ones((0, 0, 0), dtype=torch.bool),
+            # mask: torch.Tensor = torch.ones((0, 0, 0), dtype=torch.bool),
             pos_emb: torch.Tensor = torch.empty(0),
             cache: torch.Tensor = torch.zeros((0, 0, 0, 0))
     ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -620,7 +550,7 @@ class BlockRelPositionMultiHeadedAttention(MultiHeadedAttention):
         # mask[:, 0:block_size] = 1
         block_mask = self._create_grid_mask(time_len,self.block_size,fill_triangle=True).to(query).int()
         block_mask = block_mask[None].repeat(bs, 1, 1)
-        mask=mask*block_mask
+        mask = block_mask
 
         # NOTE(xcsong):
         #   when export onnx model, for 1st chunk, we feed
@@ -731,9 +661,9 @@ class ConformerEncoderLayer(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        mask: torch.Tensor,
+        # mask: torch.Tensor,
         pos_emb: torch.Tensor,
-        mask_pad: torch.Tensor = torch.ones((0, 0, 0), dtype=torch.bool),
+        # mask_pad: torch.Tensor = torch.ones((0, 0, 0), dtype=torch.bool),
         att_cache: torch.Tensor = torch.zeros((0, 0, 0, 0)),
         cnn_cache: torch.Tensor = torch.zeros((0, 0, 0, 0)),
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -773,8 +703,7 @@ class ConformerEncoderLayer(nn.Module):
         residual = x
         if self.normalize_before:
             x = self.norm_mha(x)
-        x_att, new_att_cache = self.self_attn(x, x, x, mask, pos_emb,
-                                              att_cache)
+        x_att, new_att_cache = self.self_attn(x, x, x, pos_emb, att_cache)
         x = residual + self.dropout(x_att)
         if not self.normalize_before:
             x = self.norm_mha(x)
@@ -786,7 +715,7 @@ class ConformerEncoderLayer(nn.Module):
             residual = x
             if self.normalize_before:
                 x = self.norm_conv(x)
-            x, new_cnn_cache = self.conv_module(x, mask_pad, cnn_cache)
+            x, new_cnn_cache = self.conv_module(x, cnn_cache)
             x = residual + self.dropout(x)
 
             if not self.normalize_before:
@@ -804,7 +733,7 @@ class ConformerEncoderLayer(nn.Module):
         if self.conv_module is not None:
             x = self.norm_final(x)
 
-        return x, mask, new_att_cache, new_cnn_cache
+        return x, new_att_cache, new_cnn_cache
 
 
 class BaseEncoder(nn.Module):
@@ -913,50 +842,31 @@ class BaseEncoder(nn.Module):
             checkpointing API because `__call__` attaches all the hooks of the module.
             https://discuss.pytorch.org/t/any-different-between-model-input-and-model-forward-input/3690/2
         """
+        # NOTE (keisuke): removing all the masks since they are always true
         T = xs.size(1)
-        masks = ~make_pad_mask(xs_lens, T).unsqueeze(1)  # (B, 1, T)
+        # masks = ~make_pad_mask(xs_lens, T).unsqueeze(1)  # (B, 1, T)
         if self.global_cmvn is not None:
             xs = self.global_cmvn(xs)
-        xs, pos_emb, masks = self.embed(xs, masks)
-        mask_pad = masks  # (B, 1, T/subsample_rate)
-        chunk_masks = add_optional_chunk_mask(xs, masks,
-                                              self.use_dynamic_chunk,
-                                              self.use_dynamic_left_chunk,
-                                              decoding_chunk_size,
-                                              self.static_chunk_size,
-                                              num_decoding_left_chunks)
+        xs, pos_emb = self.embed(xs)
+        # mask_pad = masks  # (B, 1, T/subsample_rate)
+        # chunk_masks = add_optional_chunk_mask(xs, masks,
+        #                                       self.use_dynamic_chunk,
+        #                                       self.use_dynamic_left_chunk,
+        #                                       decoding_chunk_size,
+        #                                       self.static_chunk_size,
+        #                                       num_decoding_left_chunks)
         
-        # print(f"{xs.shape=}, {chunk_masks.shape=}, {pos_emb.shape=}, {mask_pad.shape=} {chunk_masks=}")
-        # xs.shape=torch.Size([1, 200, 512]), chunk_masks.shape=torch.Size([1, 1, 200]), pos_emb.shape=torch.Size([1, 399, 512]), mask_pad.shape=torch.Size([1, 1, 200]) 
-        # mask is all true
-        if self.gradient_checkpointing and self.training:
-            xs = self.forward_layers_checkpointed(xs, chunk_masks, pos_emb,
-                                                  mask_pad)
-        else:
-            xs = self.forward_layers(xs, chunk_masks, pos_emb, mask_pad)
+        xs = self.forward_layers(xs, pos_emb)
         if self.normalize_before:
             xs = self.after_norm(xs)
         # Here we assume the mask is not changed in encoder layers, so just
         # return the masks before encoder layers, and the masks will be used
         # for cross attention with decoder later
-        return xs, masks
-
-    def forward_layers(self, xs: torch.Tensor, chunk_masks: torch.Tensor,
-                       pos_emb: torch.Tensor,
-                       mask_pad: torch.Tensor) -> torch.Tensor:
-        for layer in self.encoders:
-            xs, chunk_masks, _, _ = layer(xs, chunk_masks, pos_emb, mask_pad)
         return xs
 
-    @torch.jit.ignore(drop=True)
-    def forward_layers_checkpointed(self, xs: torch.Tensor,
-                                    chunk_masks: torch.Tensor,
-                                    pos_emb: torch.Tensor,
-                                    mask_pad: torch.Tensor) -> torch.Tensor:
+    def forward_layers(self, xs: torch.Tensor, pos_emb: torch.Tensor) -> torch.Tensor:
         for layer in self.encoders:
-            xs, chunk_masks, _, _ = ckpt.checkpoint(layer.__call__, xs,
-                                                    chunk_masks, pos_emb,
-                                                    mask_pad)
+            xs, _, _ = layer(xs, pos_emb)
         return xs
 
     def forward_chunk(
@@ -1229,13 +1139,19 @@ class InterpolateRegulator(nn.Module):
         )
         self.model = nn.Sequential(*model)
 
+        # NOTE (keisuke): to be compatible with cuda graph; assuming shape doesn't change
+        self.ylens = None
+
     def forward(self, x, ylens=None):
+        # NOTE (keisuke): removing all the masks since they are always true
         # x in (B, T, D)
-        mask = (~make_pad_mask(ylens)).to(x).unsqueeze(-1)
-        x = F.interpolate(x.transpose(1, 2).contiguous(), size=ylens.max(), mode='nearest')
+        # mask = (~make_pad_mask(ylens)).to(x).unsqueeze(-1)
+        if self.ylens is None:
+            self.ylens = ylens.max().item()
+        x = F.interpolate(x.transpose(1, 2).contiguous(), size=self.ylens, mode='nearest')
         out = self.model(x).transpose(1, 2).contiguous()
         olens = ylens
-        return out * mask, olens
+        return out, olens
 
 
 @dataclass
@@ -1384,9 +1300,9 @@ class Block1D(torch.nn.Module):
             nn.Mish(),
         )
 
-    def forward(self, x, mask):
-        output = self.block(x * mask)
-        return output * mask
+    def forward(self, x):
+        output = self.block(x)
+        return output
 
 
 class ResnetBlock1D(torch.nn.Module):
@@ -1399,11 +1315,11 @@ class ResnetBlock1D(torch.nn.Module):
 
         self.res_conv = torch.nn.Conv1d(dim, dim_out, 1)
 
-    def forward(self, x, mask, time_emb):
-        h = self.block1(x, mask)
+    def forward(self, x, time_emb):
+        h = self.block1(x)
         h += self.mlp(time_emb).unsqueeze(-1)
-        h = self.block2(h, mask)
-        output = h + self.res_conv(x * mask)
+        h = self.block2(h)
+        output = h + self.res_conv(x)
         return output
 
 
@@ -1704,7 +1620,7 @@ class BasicTransformerBlock(nn.Module):
     def forward(
         self,
         hidden_states: torch.FloatTensor,
-        attention_mask: Optional[torch.FloatTensor] = None,
+        # attention_mask: Optional[torch.FloatTensor] = None,
         encoder_hidden_states: Optional[torch.FloatTensor] = None,
         encoder_attention_mask: Optional[torch.FloatTensor] = None,
         timestep: Optional[torch.LongTensor] = None,
@@ -1727,7 +1643,7 @@ class BasicTransformerBlock(nn.Module):
         attn_output = self.attn1(
             norm_hidden_states,
             encoder_hidden_states=encoder_hidden_states if self.only_cross_attention else None,
-            attention_mask=encoder_attention_mask if self.only_cross_attention else attention_mask,
+            # attention_mask=encoder_attention_mask if self.only_cross_attention else attention_mask,
             **cross_attention_kwargs,
         )
         if self.use_ada_layer_norm_zero:
@@ -1901,7 +1817,7 @@ class ConditionalDecoder(nn.Module):
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
 
-    def forward(self, x, mask, mu, t, spks=None, cond=None):
+    def forward(self, x, mu, t, spks=None, cond=None):
         """Forward pass of the UNet1DConditional model.
 
         Args:
@@ -1930,56 +1846,57 @@ class ConditionalDecoder(nn.Module):
         if cond is not None:
             x = pack([x, cond], "b * t")[0]
 
+        # NOTE (keisuke): remove all the masks since they are always true 
         hiddens = []
-        masks = [mask]
+        # masks = [mask]
         for resnet, transformer_blocks, downsample in self.down_blocks:
-            mask_down = masks[-1]
-            x = resnet(x, mask_down, t)
+            # mask_down = masks[-1]
+            x = resnet(x, t)
             x = rearrange(x, "b c t -> b t c").contiguous()
-            attn_mask = torch.matmul(mask_down.transpose(1, 2).contiguous(), mask_down)
+            # attn_mask = torch.matmul(mask_down.transpose(1, 2).contiguous(), mask_down)
             for transformer_block in transformer_blocks:
                 x = transformer_block(
                     hidden_states=x,
-                    attention_mask=attn_mask,
+                    # attention_mask=attn_mask,
                     timestep=t,
                 )
             x = rearrange(x, "b t c -> b c t").contiguous()
             hiddens.append(x)  # Save hidden states for skip connections
-            x = downsample(x * mask_down)
-            masks.append(mask_down[:, :, ::2])
-        masks = masks[:-1]
-        mask_mid = masks[-1]
+            x = downsample(x)
+            # masks.append(mask_down[:, :, ::2])
+        # masks = masks[:-1]
+        # mask_mid = masks[-1]
 
         for resnet, transformer_blocks in self.mid_blocks:
-            x = resnet(x, mask_mid, t)
+            x = resnet(x, t)
             x = rearrange(x, "b c t -> b t c").contiguous()
-            attn_mask = torch.matmul(mask_mid.transpose(1, 2).contiguous(), mask_mid)
+            # attn_mask = torch.matmul(mask_mid.transpose(1, 2).contiguous(), mask_mid)
             for transformer_block in transformer_blocks:
                 x = transformer_block(
                     hidden_states=x,
-                    attention_mask=attn_mask,
+                    # attention_mask=attn_mask,
                     timestep=t,
                 )
             x = rearrange(x, "b t c -> b c t").contiguous()
 
         for resnet, transformer_blocks, upsample in self.up_blocks:
-            mask_up = masks.pop()
+            # mask_up = masks.pop()
             skip = hiddens.pop()
             x = pack([x[:, :, :skip.shape[-1]], skip], "b * t")[0]
-            x = resnet(x, mask_up, t)
+            x = resnet(x, t)
             x = rearrange(x, "b c t -> b t c").contiguous()
-            attn_mask = torch.matmul(mask_up.transpose(1, 2).contiguous(), mask_up)
+            # attn_mask = torch.matmul(mask_up.transpose(1, 2).contiguous(), mask_up)
             for transformer_block in transformer_blocks:
                 x = transformer_block(
                     hidden_states=x,
-                    attention_mask=attn_mask,
+                    # attention_mask=attn_mask,
                     timestep=t,
                 )
             x = rearrange(x, "b t c -> b c t").contiguous()
-            x = upsample(x * mask_up)
-        x = self.final_block(x, mask_up)
-        output = self.final_proj(x * mask_up)
-        return output * mask
+            x = upsample(x)
+        x = self.final_block(x)
+        output = self.final_proj(x)
+        return output
 
 
 class ConditionalCFM(BASECFM):
@@ -2003,9 +1920,11 @@ class ConditionalCFM(BASECFM):
         in_channels = in_channels + (spk_emb_dim if n_spks > 0 else 0)
         # Just change the architecture of the estimator here
         self.estimator = estimator
+        
+        torch.manual_seed(42)
 
     @torch.inference_mode()
-    def forward(self, mu, mask, n_timesteps, temperature=1.0, spks=None, cond=None):
+    def forward(self, mu, n_timesteps, temperature=1.0, spks=None, cond=None):
         """Forward diffusion
 
         Args:
@@ -2023,16 +1942,14 @@ class ConditionalCFM(BASECFM):
             sample: generated mel-spectrogram
                 shape: (batch_size, n_feats, mel_timesteps)
         """
-        torch.manual_seed(42)
-
         z = torch.randn_like(mu) * temperature
         
         t_span = torch.linspace(0, 1, n_timesteps + 1, device=mu.device)
         if self.t_scheduler == 'cosine':
             t_span = 1 - torch.cos(t_span * 0.5 * torch.pi)
-        return self.solve_euler(z, t_span=t_span, mu=mu, mask=mask, spks=spks, cond=cond)
+        return self.solve_euler(z, t_span=t_span, mu=mu, spks=spks, cond=cond)
 
-    def solve_euler(self, x, t_span, mu, mask, spks, cond):
+    def solve_euler(self, x, t_span, mu, spks, cond):
         """
         Fixed euler solver for ODEs.
         Args:
@@ -2054,11 +1971,11 @@ class ConditionalCFM(BASECFM):
         sol = []
 
         for step in range(1, len(t_span)):
-            dphi_dt = self.estimator(x, mask, mu, t, spks, cond)
+            dphi_dt = self.estimator(x, mu, t, spks, cond)
             # Classifier-Free Guidance inference introduced in VoiceBox
             if self.inference_cfg_rate > 0:
                 cfg_dphi_dt = self.estimator(
-                    x, mask,
+                    x,
                     torch.zeros_like(mu), t,
                     torch.zeros_like(spks) if spks is not None else None,
                     torch.zeros_like(cond)
@@ -2144,6 +2061,9 @@ class GLMFlowModel(nn.Module):
         self.length_regulator = length_regulator
         self.only_mask_loss = only_mask_loss
 
+        # NOTE (keisuke): to be compatible with cuda graph; assuming shape doesn't change
+        self.feat_len = None
+
     @torch.inference_mode()
     def inference(
         self,
@@ -2156,7 +2076,7 @@ class GLMFlowModel(nn.Module):
         embedding
     ):
         
-        assert token.shape[0] == 1
+        # assert token.shape[0] == 1
         # xvec projection
         embedding = F.normalize(embedding, dim=1)
         embedding = self.spk_embed_affine_layer(embedding)
@@ -2168,22 +2088,25 @@ class GLMFlowModel(nn.Module):
         token = self.input_embedding(torch.clamp(token, min=0)) #* mask
 
         # text encode
-        h, h_lengths = self.encoder(token, token_len)
+        h = self.encoder(token, token_len)
         h = self.encoder_proj(h)
         feat_len = (token_len / self.input_frame_rate * 22050 / 256).int()
         h, h_lengths = self.length_regulator(h, feat_len)
 
+        if self.feat_len is None: 
+            self.feat_len = feat_len.max().item()
+
         # get conditions
-        conds = torch.zeros([1, feat_len.max().item(), self.output_size], device=token.device)
+        conds = torch.zeros([token.shape[0], self.feat_len, self.output_size], device=token.device)
         # if prompt_feat.shape[1] != 0:
         #     for i, j in enumerate(prompt_feat_len):
         #         conds[i, :j] = prompt_feat[i]
         conds = conds.transpose(1, 2)
 
-        mask = (~make_pad_mask(feat_len)).to(h)
+        # mask = (~make_pad_mask(feat_len)).to(h)
         feat = self.decoder(
             mu=h.transpose(1, 2).contiguous(),
-            mask=mask.unsqueeze(1),
+            # mask=mask.unsqueeze(1),
             spks=embedding,
             cond=conds,
             n_timesteps=10
@@ -2384,6 +2307,12 @@ class SineGen(torch.nn.Module):
         self.sampling_rate = samp_rate
         self.voiced_threshold = voiced_threshold
 
+        # NOTE (keisuke): this is for compatibility with cuda graph
+        self.f0_shapes = None
+        low = torch.tensor(-np.pi, device="cuda")
+        high = torch.tensor(np.pi, device="cuda")
+        self.u_dist = torch.distributions.uniform.Uniform(low=low, high=high)
+
     def _f02uv(self, f0):
         # generate uv signal
         uv = (f0 > self.voiced_threshold).type(torch.float32)
@@ -2396,13 +2325,15 @@ class SineGen(torch.nn.Module):
         :return: [B, 1, sample_len]
         """
 
-        F_mat = torch.zeros((f0.size(0), self.harmonic_num + 1, f0.size(-1))).to(f0.device)
+        # if self.f0_shapes is None:
+        #     self.f0_shapes = [f0.size(0), f0.size(1), f0.size(2)]
+        F_mat = torch.zeros((f0.shape[0], self.harmonic_num + 1, f0.shape[-1]), device=f0.device)
         for i in range(self.harmonic_num + 1):
             F_mat[:, i: i + 1, :] = f0 * (i + 1) / self.sampling_rate
 
         theta_mat = 2 * np.pi * (torch.cumsum(F_mat, dim=-1) % 1)
-        u_dist = torch.distributions.uniform.Uniform(low=-np.pi, high=np.pi)
-        phase_vec = u_dist.sample(sample_shape=(f0.size(0), self.harmonic_num + 1, 1)).to(F_mat.device)
+        # u_dist = torch.distributions.uniform.Uniform(low=-np.pi, high=np.pi)
+        phase_vec = self.u_dist.sample(sample_shape=(f0.shape[0], self.harmonic_num + 1, 1)) #.to(F_mat.device)
         phase_vec[:, 0, :] = 0
 
         # generate sine waveforms
@@ -2568,7 +2499,7 @@ class GLMHiFTModel(nn.Module):
         self.ups.apply(init_weights)
         self.conv_post.apply(init_weights)
         self.reflection_pad = nn.ReflectionPad1d((1, 0))
-        self.stft_window = torch.from_numpy(scipy.signal.get_window("hann", istft_params["n_fft"], fftbins=True).astype(np.float32))
+        self.stft_window = torch.from_numpy(scipy.signal.get_window("hann", istft_params["n_fft"], fftbins=True).astype(np.float32)).to("cuda")
         self.f0_predictor = f0_predictor
 
     def _f02source(self, f0: torch.Tensor) -> torch.Tensor:
@@ -2580,7 +2511,7 @@ class GLMHiFTModel(nn.Module):
     def _stft(self, x):
         spec = torch.stft(
             x,
-            self.istft_params["n_fft"], self.istft_params["hop_len"], self.istft_params["n_fft"], window=self.stft_window.to(x.device),
+            self.istft_params["n_fft"], self.istft_params["hop_len"], self.istft_params["n_fft"], window=self.stft_window,
             return_complex=True)
         spec = torch.view_as_real(spec)  # [B, F, TT, 2]
         return spec[..., 0], spec[..., 1]
@@ -2589,9 +2520,59 @@ class GLMHiFTModel(nn.Module):
         magnitude = torch.clip(magnitude, max=1e2)
         real = magnitude * torch.cos(phase)
         img = magnitude * torch.sin(phase)
-        inverse_transform = torch.istft(torch.complex(real, img), self.istft_params["n_fft"], self.istft_params["hop_len"],
-                                        self.istft_params["n_fft"], window=self.stft_window.to(magnitude.device))
+        comp = torch.complex(real, img)
+        # inverse_transform = torch.istft(comp, self.istft_params["n_fft"], self.istft_params["hop_len"],
+        #                                 self.istft_params["n_fft"], window=self.stft_window)
+        inverse_transform = self._istft_graph_safe(comp, self.istft_params["n_fft"], self.istft_params["hop_len"], self.stft_window)
         return inverse_transform
+
+    def _istft_graph_safe(self, comp_tensor, n_fft, hop_len, window):
+        """A cuda graph-compatible implementation of torch.istft."""
+
+        # Get dimensions from the original spectrogram
+        _, _, n_frames = comp_tensor.shape
+
+        # 1. Calculate the full output signal length before trimming
+        # This is the length that the overlap-add procedure will produce
+        expected_signal_len = n_fft + hop_len * (n_frames - 1)
+
+        # 2. Inverse FFT
+        # Perform iFFT on the original, unpadded spectrogram
+        frames = torch.fft.irfft(comp_tensor.permute(0, 2, 1), n=n_fft)
+
+        # 3. Apply the synthesis window
+        windowed_frames = frames * window
+
+        # 4. Overlap-Add using F.fold
+        frames_for_fold = windowed_frames.permute(0, 2, 1)
+        reconstructed_full = F.fold(
+            frames_for_fold,
+            output_size=(1, expected_signal_len),
+            kernel_size=(1, n_fft),
+            stride=(1, hop_len)
+        )
+
+        # 5. Build the normalization denominator using the squared window
+        win_sq = window.pow(2)
+        ones = torch.ones_like(frames_for_fold)
+        win_sq_padded = ones * win_sq.view(1, -1, 1)
+        denom = F.fold(
+            win_sq_padded,
+            output_size=(1, expected_signal_len),
+            kernel_size=(1, n_fft),
+            stride=(1, hop_len)
+        )
+
+        # Apply normalization, avoiding division by zero
+        denom = torch.where(denom > 1e-8, denom, torch.ones_like(denom))
+        reconstructed_full /= denom
+
+        # 6. Trim the ends to match the behavior of `center=True`
+        # This is the correct way to handle the centering logic in the inverse transform
+        pad_amount = n_fft // 2
+        final_signal = reconstructed_full.squeeze(2).squeeze(1)[:, pad_amount:-pad_amount]
+
+        return final_signal
 
     def forward(self, x: torch.Tensor, cache_source: torch.Tensor = torch.zeros(1, 1, 0)) -> torch.Tensor:
         f0 = self.f0_predictor(x)
@@ -2680,11 +2661,12 @@ class GLMAudioDecoder(nn.Module):
     def forward(
         self,
         audio_ids: torch.Tensor,
+        token_len: torch.Tensor,
     ):
         mel = self.flow.inference(
             token=audio_ids, 
-            token_len=torch.tensor([audio_ids.shape[1]], dtype=torch.int32, device=self.device),
-            embedding=torch.zeros(1, 192, device=self.device),
+            token_len=token_len,
+            embedding=torch.zeros(audio_ids.shape[0], 192, device=self.device),
         )
-        speech = self.hift.inference(mel=mel)
+        speech, _ = self.hift.inference(mel=mel)
         return speech

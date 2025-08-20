@@ -470,6 +470,7 @@ class ModelWorker:
         token_ids = torch.tensor(token_ids, device=self.device, dtype=torch.int32)
 
         audio_tensors = self.model.postprocess(token_ids)
+        print(audio_tensors)
 
         if self.needs_watermarking:
             for i in range(audio_tensors.shape[0]):

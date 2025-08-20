@@ -254,12 +254,11 @@ class CudaGraphWorker(ModelWorker):
             
             # Warmup runs for detokenization
             for _ in range(5):
-                self.model.postprocess(
+                audio_output = self.model.postprocess(
                     self.cuda_graph_buffers['detokenize_input'][:batch_size]
                 )
             torch.cuda.synchronize()
             
-            # Create and capture CUDA graph for detokenization
             detokenize_graph = torch.cuda.CUDAGraph()
             
             with torch.cuda.graph(detokenize_graph):
@@ -267,10 +266,8 @@ class CudaGraphWorker(ModelWorker):
                     self.cuda_graph_buffers['detokenize_input'][:batch_size]
                 )
                 
-                # Copy the entire output since we've sized the buffer correctly
                 self.cuda_graph_buffers['detokenize_output'][:batch_size].copy_(audio_output)
             
-            # Store the captured detokenization graph
             self.cuda_graphs_detokenization[batch_size] = detokenize_graph
         
         print("CUDA graphs for detokenization phase initialized.")
