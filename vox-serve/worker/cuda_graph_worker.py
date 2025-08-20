@@ -461,73 +461,7 @@ class CudaGraphWorker(ModelWorker):
             # TODO: padding
             can_use_cuda_graph = batch_size in self.cuda_graphs_lm
 
-            # assuming that the sequence length is 2 for the initial iteration of depth transformer. 
-            # may need to change here for other models.
-            depth_position_ids = torch.tensor([0, 1] * batch_size, device=self.device, dtype=torch.int32)
-            depth_qo_indptr = torch.arange(batch_size + 1, device=self.device, dtype=torch.int32) * 2
-            depth_kv_indptr = torch.arange(batch_size + 1, device=self.device, dtype=torch.int32)
-            depth_kv_indices = torch.arange(batch_size, device=self.device, dtype=torch.int32)
-            depth_kv_last_page_len = torch.tensor([2] * batch_size, device=self.device, dtype=torch.int32)
-            self.depth_kv_cache.zero_()
-
-            for i in range(1, self.model.depth_n_codebooks):
-                if i > 1 and can_use_cuda_graph:
-                    self.depth_decode_wrappers[batch_size].plan(
-                        paged_kv_indptr=depth_kv_indptr, 
-                        paged_kv_indices=depth_kv_indices, 
-                        paged_kv_last_page_len=depth_kv_last_page_len,
-                        dtype=torch.bfloat16,
-                    )
-                    torch.cuda.synchronize()
-
-                    graph = self.cuda_graphs_depth_decode[batch_size]
-
-                    self.cuda_graph_buffers['depth_hidden_states'][:batch_size].copy_(hidden_for_depth)
-                    self.cuda_graph_buffers['depth_position_ids'][:batch_size].copy_(depth_position_ids)
-
-                    graph.replay()
-
-                    depth_logits = self.cuda_graph_buffers['depth_logits'][:batch_size]
-
-                    output_ids[:, i], hidden_for_depth = self.model.depth_sampling(
-                        logits=depth_logits,
-                        i_iteration=i,
-                        requests=requests,
-                    )
-
-                    depth_position_ids = torch.tensor([i + 1] * batch_size, device=self.device, dtype=torch.int32)
-                    depth_qo_indptr = torch.arange(batch_size + 1, device=self.device, dtype=torch.int32)
-                    depth_kv_last_page_len += 1
-
-                else:
-                    self.depth_prefill_wrappers[batch_size].plan(
-                        qo_indptr=depth_qo_indptr,
-                        paged_kv_indptr=depth_kv_indptr, 
-                        paged_kv_indices=depth_kv_indices, 
-                        paged_kv_last_page_len=depth_kv_last_page_len,
-                        dtype=torch.bfloat16,
-                    )
-                    torch.cuda.synchronize()
-                    
-                    graph = self.cuda_graphs_depth_prefill[batch_size]
-
-                    self.cuda_graph_buffers['depth_hidden_states'][:2 * batch_size].copy_(hidden_for_depth)
-                    self.cuda_graph_buffers['depth_position_ids'][:2 * batch_size].copy_(depth_position_ids)
-
-                    graph.replay()
-
-                    depth_logits = self.cuda_graph_buffers['depth_logits'][:2 * batch_size]
-                    depth_logits = depth_logits[depth_qo_indptr[:-1] - 1]
-
-                    output_ids[:, i], hidden_for_depth = self.model.depth_sampling(
-                        logits=depth_logits,
-                        i_iteration=i,
-                        requests=requests,
-                    )
-
-                    depth_position_ids = torch.tensor([i + 1] * batch_size, device=self.device, dtype=torch.int32)
-                    depth_qo_indptr = torch.arange(batch_size + 1, device=self.device, dtype=torch.int32)
-                    depth_kv_last_page_len += 1
+            output_ids = self.run_lm_depth(output_ids, hidden_for_depth, requests, batch_size, can_use_cuda_graph)
                 
         else:
             logits = self.model.forward(
@@ -613,71 +547,7 @@ class CudaGraphWorker(ModelWorker):
                 requests=requests,
             )
 
-            depth_position_ids = torch.tensor([0, 1] * batch_size, device=self.device, dtype=torch.int32)
-            depth_qo_indptr = torch.arange(batch_size + 1, device=self.device, dtype=torch.int32) * 2
-            depth_kv_indptr = torch.arange(batch_size + 1, device=self.device, dtype=torch.int32)
-            depth_kv_indices = torch.arange(batch_size, device=self.device, dtype=torch.int32)
-            depth_kv_last_page_len = torch.tensor([2] * batch_size, device=self.device, dtype=torch.int32)
-            self.depth_kv_cache.zero_()
-
-            for i in range(1, self.model.depth_n_codebooks):
-                if i > 1:
-                    self.depth_decode_wrappers[batch_size].plan(
-                        paged_kv_indptr=depth_kv_indptr, 
-                        paged_kv_indices=depth_kv_indices, 
-                        paged_kv_last_page_len=depth_kv_last_page_len,
-                        dtype=torch.bfloat16,
-                    )
-                    torch.cuda.synchronize()
-
-                    graph = self.cuda_graphs_depth_decode[batch_size]
-
-                    self.cuda_graph_buffers['depth_hidden_states'][:batch_size].copy_(hidden_for_depth)
-                    self.cuda_graph_buffers['depth_position_ids'][:batch_size].copy_(depth_position_ids)
-
-                    graph.replay()
-
-                    depth_logits = self.cuda_graph_buffers['depth_logits'][:batch_size]
-
-                    output_ids[:, i], hidden_for_depth = self.model.depth_sampling(
-                        logits=depth_logits,
-                        i_iteration=i,
-                        requests=requests,
-                    )
-
-                    depth_position_ids = torch.tensor([i + 1] * batch_size, device=self.device, dtype=torch.int32)
-                    depth_qo_indptr = torch.arange(batch_size + 1, device=self.device, dtype=torch.int32)
-                    depth_kv_last_page_len += 1
-
-                else:
-                    self.depth_prefill_wrappers[batch_size].plan(
-                        qo_indptr=depth_qo_indptr,
-                        paged_kv_indptr=depth_kv_indptr, 
-                        paged_kv_indices=depth_kv_indices, 
-                        paged_kv_last_page_len=depth_kv_last_page_len,
-                        dtype=torch.bfloat16,
-                    )
-                    torch.cuda.synchronize()
-
-                    graph = self.cuda_graphs_depth_prefill[batch_size]
-
-                    self.cuda_graph_buffers['depth_hidden_states'][:2 * batch_size].copy_(hidden_for_depth)
-                    self.cuda_graph_buffers['depth_position_ids'][:2 * batch_size].copy_(depth_position_ids)
-                    
-                    graph.replay()
-
-                    depth_logits = self.cuda_graph_buffers['depth_logits'][:2 * batch_size]
-                    depth_logits = depth_logits[depth_qo_indptr[:-1] - 1]
-
-                    output_ids[:, i], hidden_for_depth = self.model.depth_sampling(
-                        logits=depth_logits,
-                        i_iteration=i,
-                        requests=requests,
-                    )
-
-                    depth_position_ids = torch.tensor([i + 1] * batch_size, device=self.device, dtype=torch.int32)
-                    depth_qo_indptr = torch.arange(batch_size + 1, device=self.device, dtype=torch.int32)
-                    depth_kv_last_page_len += 1
+            output_ids = self.run_lm_depth(output_ids, hidden_for_depth, requests, batch_size, can_use_cuda_graph=True)
 
         else:
             output_ids = self.model.sampling(
@@ -686,6 +556,78 @@ class CudaGraphWorker(ModelWorker):
             )
 
         return
+    
+    def run_lm_depth(self, output_ids, hidden_for_depth, requests, batch_size, can_use_cuda_graph=True):
+        """
+        Shared depth transformer processing logic for both prefill and decode phases.
+        """
+        depth_position_ids = torch.tensor([0, 1] * batch_size, device=self.device, dtype=torch.int32)
+        depth_qo_indptr = torch.arange(batch_size + 1, device=self.device, dtype=torch.int32) * 2
+        depth_kv_indptr = torch.arange(batch_size + 1, device=self.device, dtype=torch.int32)
+        depth_kv_indices = torch.arange(batch_size, device=self.device, dtype=torch.int32)
+        depth_kv_last_page_len = torch.tensor([2] * batch_size, device=self.device, dtype=torch.int32)
+        self.depth_kv_cache.zero_()
+
+        for i in range(1, self.model.depth_n_codebooks):
+            if i > 1 and can_use_cuda_graph:
+                self.depth_decode_wrappers[batch_size].plan(
+                    paged_kv_indptr=depth_kv_indptr, 
+                    paged_kv_indices=depth_kv_indices, 
+                    paged_kv_last_page_len=depth_kv_last_page_len,
+                    dtype=torch.bfloat16,
+                )
+                torch.cuda.synchronize()
+
+                graph = self.cuda_graphs_depth_decode[batch_size]
+
+                self.cuda_graph_buffers['depth_hidden_states'][:batch_size].copy_(hidden_for_depth)
+                self.cuda_graph_buffers['depth_position_ids'][:batch_size].copy_(depth_position_ids)
+
+                graph.replay()
+
+                depth_logits = self.cuda_graph_buffers['depth_logits'][:batch_size]
+
+                output_ids[:, i], hidden_for_depth = self.model.depth_sampling(
+                    logits=depth_logits,
+                    i_iteration=i,
+                    requests=requests,
+                )
+
+                depth_position_ids = torch.tensor([i + 1] * batch_size, device=self.device, dtype=torch.int32)
+                depth_qo_indptr = torch.arange(batch_size + 1, device=self.device, dtype=torch.int32)
+                depth_kv_last_page_len += 1
+
+            else:
+                self.depth_prefill_wrappers[batch_size].plan(
+                    qo_indptr=depth_qo_indptr,
+                    paged_kv_indptr=depth_kv_indptr, 
+                    paged_kv_indices=depth_kv_indices, 
+                    paged_kv_last_page_len=depth_kv_last_page_len,
+                    dtype=torch.bfloat16,
+                )
+                torch.cuda.synchronize()
+                
+                graph = self.cuda_graphs_depth_prefill[batch_size]
+
+                self.cuda_graph_buffers['depth_hidden_states'][:2 * batch_size].copy_(hidden_for_depth)
+                self.cuda_graph_buffers['depth_position_ids'][:2 * batch_size].copy_(depth_position_ids)
+
+                graph.replay()
+
+                depth_logits = self.cuda_graph_buffers['depth_logits'][:2 * batch_size]
+                depth_logits = depth_logits[depth_qo_indptr[:-1] - 1]
+
+                output_ids[:, i], hidden_for_depth = self.model.depth_sampling(
+                    logits=depth_logits,
+                    i_iteration=i,
+                    requests=requests,
+                )
+
+                depth_position_ids = torch.tensor([i + 1] * batch_size, device=self.device, dtype=torch.int32)
+                depth_qo_indptr = torch.arange(batch_size + 1, device=self.device, dtype=torch.int32)
+                depth_kv_last_page_len += 1
+        
+        return output_ids
     
     def run_detokenize(self, requests: List[Request]):
         """
