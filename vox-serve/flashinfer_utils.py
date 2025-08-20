@@ -1,6 +1,9 @@
 import torch 
 import flashinfer
 from typing import Union
+from .utils import get_logger
+
+logger = get_logger(__name__)
 
 class FlashInferPrefillWrapper():
     def __init__(
@@ -107,7 +110,7 @@ class FlashInferPrefillWrapper():
     def run(self, q, kv_cache):
         if not self.use_cuda_graph:
             if q.isnan().any() or kv_cache.isnan().any(): 
-                print("[WARNING] NaN detected in input tensors!")
+                logger.warning("NaN detected in input tensors!")
         return self.attn_wrapper.run(q, kv_cache)
     
     def set_kv_cache(self, kv_cache, k, v):

@@ -13,6 +13,9 @@ from torch import nn
 from torch.nn import functional as F
 import torch.utils.checkpoint as ckpt
 from huggingface_hub import hf_hub_download
+from ..utils import get_logger
+
+logger = get_logger(__name__)
 
 
 def subsequent_chunk_mask(
@@ -2616,7 +2619,7 @@ class GLMHiFTModel(nn.Module):
         return x, s
 
     def remove_weight_norm(self):
-        print('Removing weight norm...')
+        logger.info('Removing weight norm...')
         for l in self.ups:
             nn.utils.remove_weight_norm(l)
         for l in self.resblocks:

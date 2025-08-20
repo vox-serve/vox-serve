@@ -6,6 +6,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchaudio
 from huggingface_hub import hf_hub_download
+from ..utils import get_logger
+
+logger = get_logger(__name__)
 
 
 class logFbankCal(nn.Module):
@@ -161,7 +164,7 @@ class ResNet(nn.Module):
             self.NormLayer = nn.BatchNorm3d
             self.ConvLayer = nn.Conv3d
         else:
-            print("error")
+            logger.error("Invalid feat_dim specified")
 
         self.in_planes = in_planes
 

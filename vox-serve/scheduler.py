@@ -7,6 +7,7 @@ from typing import List, Dict, Any, Optional, Tuple, Type
 from .requests import Request 
 from .worker import CudaGraphWorker
 from .sampling import SamplingConfig
+from .utils import get_logger
 
 class Scheduler:
     def __init__(
@@ -19,6 +20,7 @@ class Scheduler:
     ):
         self.device = device
         self.max_batch_size = max_batch_size
+        self.logger = get_logger(__name__)
         # TODO: switch between CudaGraphWorker and ModelWorker based on user input
         self.model_worker = CudaGraphWorker(model_name_or_path, max_batch_size=max_batch_size)
 
@@ -125,20 +127,20 @@ class Scheduler:
                         audio_path=request_dict.get('audio_path'),
                     )
 
-                    print(f"{new_request=}")
+                    self.logger.debug(f"{new_request=}")
                     
                     # Store voice information as attribute (not part of Request dataclass)
                     # new_request.voice = request_dict.get('voice', 'tara')
                     
                     self.active_requests.append(new_request)
                 else:
-                    print(f"[WARNING] Received malformed audio message: {message_payload[:50]}...")
+                    self.logger.warning(f"Received malformed audio message: {message_payload[:50]}...")
             except zmq.Again:
                 break
             except Exception as e:
-                print(f"[ERROR] Error receiving requests: {str(e)}")
+                self.logger.error(f"Error receiving requests: {str(e)}")
                 import traceback
-                print(f"[ERROR] Traceback: {traceback.format_exc()}")
+                self.logger.error(f"Traceback: {traceback.format_exc()}")
         
         # Filter out completed requests
         self.active_requests = [req for req in self.active_requests if not req.done_all]

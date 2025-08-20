@@ -9,6 +9,7 @@ from ..flashinfer_utils import FlashInferPrefillWrapper, FlashInferDecodeWrapper
 from ..model import load_model
 from ..requests import Request
 from ..watermarker import silentcipher
+from ..utils import get_logger
 
 class ModelWorker:
 
@@ -26,6 +27,7 @@ class ModelWorker:
         self.model = load_model(model_name, device="cuda")
         self.device = "cuda:0"
         self.max_batch_size = max_batch_size
+        self.logger = get_logger(__name__)
 
         # Store sampling and repetition parameters
         self.top_p = top_p
@@ -101,7 +103,7 @@ class ModelWorker:
         )
 
         kv_cache_size = self.kv_cache.numel() * self.kv_cache.element_size()
-        print(f"KV cache size: {kv_cache_size / 1024 / 1024:.2f} MB")
+        self.logger.info(f"KV cache size: {kv_cache_size / 1024 / 1024:.2f} MB")
 
         self.has_depth_transformer = self.model.has_depth_transformer
         if self.has_depth_transformer:
@@ -470,7 +472,7 @@ class ModelWorker:
         token_ids = torch.tensor(token_ids, device=self.device, dtype=torch.int32)
 
         audio_tensors = self.model.postprocess(token_ids)
-        print(audio_tensors)
+        self.logger.debug(f"Audio tensors: {audio_tensors}")
 
         if self.needs_watermarking:
             for i in range(audio_tensors.shape[0]):
@@ -530,7 +532,7 @@ class ModelWorker:
             num_requests: Number of dummy requests to create for warmup
             sequence_length: Length of random input sequences
         """
-        print(f"Warming up model with {num_requests} requests of length {sequence_length}")
+        self.logger.info(f"Warming up model with {num_requests} requests of length {sequence_length}")
         
         # Create dummy requests with random data
         dummy_requests = []
@@ -566,11 +568,11 @@ class ModelWorker:
         
         try:
             # Warmup prefill (includes forward pass and sampling)
-            print("Warming up prefill...")
+            self.logger.info("Warming up prefill...")
             self.run_lm_prefill(dummy_requests)
             
             # Warmup decode (run a few decode steps, includes forward pass and sampling)
-            print("Warming up decode and sampling...")
+            self.logger.info("Warming up decode and sampling...")
             for _ in range(5):
                 # # Add dummy output tokens for decode
                 # for req in dummy_requests:
@@ -579,7 +581,7 @@ class ModelWorker:
                 self.run_lm_decode(dummy_requests)
             
             # Warmup detokenization if we have enough tokens
-            print("Warming up detokenization...")
+            self.logger.info("Warming up detokenization...")
             for req in dummy_requests:
                 # Ensure we have enough tokens for detokenization
                 while len(req.lm_output_audio_tokens) < self.detokenize_interval:
@@ -588,10 +590,10 @@ class ModelWorker:
             # Run detokenization warmup
             self.run_detokenize(dummy_requests)
             
-            print("Warmup completed successfully")
+            self.logger.info("Warmup completed successfully")
             
         except Exception as e:
-            print(f"Warmup failed: {e}")
+            self.logger.error(f"Warmup failed: {e}")
             
         finally:
             # Clean up dummy requests

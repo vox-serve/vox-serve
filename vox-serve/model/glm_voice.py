@@ -13,7 +13,7 @@ from huggingface_hub import hf_hub_download
 from ..flashinfer_utils import FlashInferWrapper
 from ..sampling import SamplingConfig, Sampler
 from ..requests import Request
-from ..utils import load_hf_safetensor_state_dict
+from ..utils import load_hf_safetensor_state_dict, get_logger
 from ..tokenizer.glm_encoder import GLMVoiceEncoder
 from ..tokenizer.glm_decoder import GLMAudioDecoder
 from .base import BaseLM, PreprocessOutput
@@ -309,6 +309,7 @@ class GLMVoiceModel(BaseLM):
         if model_name == "glm":
             model_name = "zai-org/glm-4-voice-9b"
         super().__init__(model_name, device, dtype)
+        self.logger = get_logger(__name__)
         config_path = hf_hub_download(repo_id=model_name, filename="config.json", revision=None)
         self.config = GLMVoiceConfig.from_dict(json.load(open(config_path)))
 
@@ -530,7 +531,7 @@ class GLMVoiceModel(BaseLM):
                 # if the first token is an audio token, append it to the audio tokens
                 req.lm_output_audio_tokens.append(output_ids[i].tolist())
 
-        print(f"Sampling output: {output_ids.tolist()}")
+        self.logger.debug(f"Sampling output: {output_ids.tolist()}")
         return output_ids
 
     def postprocess(self, token_ids: torch.Tensor):

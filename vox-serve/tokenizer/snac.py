@@ -11,6 +11,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.utils.parametrizations import weight_norm
 from einops import rearrange
+from ..utils import get_logger
+
+logger = get_logger(__name__)
 
 
 class LocalMHA(nn.Module):
@@ -27,7 +30,7 @@ class LocalMHA(nn.Module):
         self.to_out = nn.Linear(dim, dim, bias=False)
 
     def forward(self, x):
-        print(x.shape)
+        logger.debug(f"LocalMHA input shape: {x.shape}")
         B, C, T = x.shape
         residual = x
         x = self.norm(x.transpose(1, 2))
@@ -472,6 +475,6 @@ if __name__ == "__main__":
             tick = time.time()
             audio_hat = model.decode(codes) # audio_hat: [bs, 1, 8192]
             torch.cuda.synchronize()
-            print(f"Batch size {bs} took {(time.time() - tick) * 1000:.3f} ms")
-        print("=====")
+            logger.info(f"Batch size {bs} took {(time.time() - tick) * 1000:.3f} ms")
+        logger.info("=====")
         # print(f"Output shape: {audio_hat.shape}, Codes: {len(codes)} codebooks")

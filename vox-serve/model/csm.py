@@ -14,6 +14,7 @@ from ..flashinfer_utils import FlashInferWrapper
 from ..sampling import SamplingConfig, Sampler
 from ..requests import Request
 from .base import BaseLMWithDepth, PreprocessOutput
+from ..utils import get_logger
 
 
 class CsmRMSNorm(nn.Module):
@@ -275,7 +276,8 @@ class CsmDepthDecoderForCausalLM(nn.Module):
 class CsmForConditionalGeneration(CsmPreTrainedModel):
     def __init__(self, config: CsmConfig):
         super().__init__(config)
-        print(config)
+        logger = get_logger(__name__)
+        logger.debug(f"CSM Config: {config}")
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.embed_text_tokens = nn.Embedding(config.text_vocab_size, config.hidden_size)
@@ -315,6 +317,7 @@ class CSMModel(BaseLMWithDepth):
         if model_name == "csm":
             model_name = "sesame/csm-1b"
         super().__init__(model_name, device, dtype)
+        self.logger = get_logger(__name__)
         self.model = CsmForConditionalGeneration.from_pretrained(model_name)
         self.model.to(dtype).to(device)
         

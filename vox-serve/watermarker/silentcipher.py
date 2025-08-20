@@ -8,7 +8,10 @@ from scipy import stats as st
 from pydub import AudioSegment
 import torch
 from torch import nn
-import torchaudio 
+import torchaudio
+from ..utils import get_logger
+
+logger = get_logger(__name__) 
 
 
 class Layer(nn.Module):
@@ -395,7 +398,7 @@ class Model():
 
         if message_sdr is None:
             message_sdr = self.config.message_sdr
-            print(f'Using the default SDR of {self.config.message_sdr} dB')
+            logger.info(f'Using the default SDR of {self.config.message_sdr} dB')
 
         if isinstance(message_list[0], int):
             message_list = [message_list] * y_multi_channel.shape[1]
@@ -413,14 +416,14 @@ class Model():
                 orig_y = y.clone()
                 if orig_sr != self.sr:
                     if orig_sr > self.sr:
-                        print(f'WARNING! Reducing the sampling rate of the original audio from {orig_sr} -> {self.sr}. High frequency components may be lost!')
+                        logger.warning(f'Reducing the sampling rate of the original audio from {orig_sr} -> {self.sr}. High frequency components may be lost!')
                     y = torchaudio.functional.resample(y.view(1, -1), orig_freq=orig_sr, new_freq=self.sr).squeeze()
 
                 original_power = torch.mean(y**2)
 
                 if not disable_checks:
                     if original_power == 0:
-                        print('WARNING! The input audio has a power of 0. This means the audio is likely just silence. Skipping encoding.')
+                        logger.warning('The input audio has a power of 0. This means the audio is likely just silence. Skipping encoding.')
                         return orig_y, 0
 
                 y = y * torch.sqrt(self.average_energy_VCTK / original_power)
@@ -595,7 +598,7 @@ def get_model(model_type='44.1k', ckpt_path='../Models/44_1_khz/73999_iteration'
 
     if model_type == '44.1k':
         if not os.path.exists(ckpt_path) or not os.path.exists(config_path):
-            print('ckpt path or config path does not exist! Downloading the model from the Hugging Face Hub...')
+            logger.info('ckpt path or config path does not exist! Downloading the model from the Hugging Face Hub...')
             from huggingface_hub import snapshot_download
             folder_dir = snapshot_download(repo_id="sony/silentcipher")
             ckpt_path = os.path.join(folder_dir, '44_1_khz/73999_iteration')
@@ -607,7 +610,7 @@ def get_model(model_type='44.1k', ckpt_path='../Models/44_1_khz/73999_iteration'
         model = Model(config, device)
     elif model_type == '16k':
         if not os.path.exists(ckpt_path) or not os.path.exists(config_path):
-            print('ckpt path or config path does not exist! Downloading the model from the Hugging Face Hub...')
+            logger.info('ckpt path or config path does not exist! Downloading the model from the Hugging Face Hub...')
             from huggingface_hub import snapshot_download
             folder_dir = snapshot_download(repo_id="sony/silentcipher")
             ckpt_path = os.path.join(folder_dir, '16_khz/97561_iteration')
@@ -619,6 +622,6 @@ def get_model(model_type='44.1k', ckpt_path='../Models/44_1_khz/73999_iteration'
 
         model = Model(config, device)
     else:
-        print('Please specify a valid model_type [44.1k, 16k]')
+        logger.error('Please specify a valid model_type [44.1k, 16k]')
 
     return model

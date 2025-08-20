@@ -20,6 +20,7 @@ from ..flashinfer_utils import FlashInferWrapper
 from ..sampling import SamplingConfig, Sampler
 from ..requests import Request
 from .base import BaseLM, PreprocessOutput
+from ..utils import get_logger
 
 
 from dataclasses import dataclass, field
@@ -536,6 +537,7 @@ class ZonosModel(BaseLM):
         if model_name == "zonos":
             model_name = "Zyphra/Zonos-v0.1-transformer"
         super().__init__(model_name, device, dtype)
+        self.logger = get_logger(__name__)
         config_path = hf_hub_download(repo_id=model_name, filename="config.json", revision=None)
         model_path = hf_hub_download(repo_id=model_name, filename="model.safetensors", revision=None)
 
@@ -658,7 +660,7 @@ class ZonosModel(BaseLM):
             _, spk_embedding = self.speaker_encoder(wav.to(self.device), sr)
             self.default_speaker_embedding = spk_embedding.unsqueeze(0).bfloat16()
         except:
-            print("Failed to load default speaker embedding, using random embedding instead.")
+            self.logger.warning("Failed to load default speaker embedding, using random embedding instead.")
             self.default_speaker_embedding = None
 
     def _make_cond_dict(

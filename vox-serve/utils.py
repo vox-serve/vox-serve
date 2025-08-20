@@ -1,6 +1,8 @@
 import json
+import logging
 import os
 import requests
+import sys
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional
@@ -133,3 +135,39 @@ def download_github_file(
     resp.raise_for_status()
     dest.write_bytes(resp.content)
     return dest
+
+
+def setup_logger(name: str, level: str = "INFO") -> logging.Logger:
+    """
+    Set up a centralized logger with consistent formatting.
+    
+    Args:
+        name: Logger name (usually __name__)
+        level: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+    
+    Returns:
+        Configured logger instance
+    """
+    logger = logging.getLogger(name)
+    
+    if logger.handlers:
+        return logger
+    
+    logger.setLevel(getattr(logging, level.upper()))
+    
+    handler = logging.StreamHandler(sys.stdout)
+    formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    handler.setFormatter(formatter)
+    
+    logger.addHandler(handler)
+    logger.propagate = False
+    
+    return logger
+
+
+def get_logger(name: str, level: str = "INFO") -> logging.Logger:
+    """Get or create a logger with the given name."""
+    return setup_logger(name, level)

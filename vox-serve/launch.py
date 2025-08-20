@@ -20,15 +20,20 @@ from pydantic import BaseModel
 from .scheduler import Scheduler
 from .requests import Request
 from .sampling import SamplingConfig
+from .utils import get_logger
+
+# Module-level logger
+logger = get_logger(__name__)
 
 def run_scheduler_daemon(model_name, request_socket_path, result_socket_path):
     """Function to run scheduler in daemon subprocess"""
+    logger = get_logger(__name__)
     scheduler = Scheduler(
         model_name_or_path=model_name,
         request_socket_path=request_socket_path,
         result_socket_path=result_socket_path
     )
-    print(f"Scheduler started successfully with model: {model_name}")
+    logger.info(f"Scheduler started successfully with model: {model_name}")
     scheduler.run_forever()
     
 
@@ -50,6 +55,7 @@ class APIServer:
         self.upload_dir.mkdir(exist_ok=True)
         self.timeout_seconds = timeout_seconds
         self.scheduler_process = None
+        self.logger = get_logger(__name__)
         
         # Concurrent request tracking
         self.pending_requests: Dict[str, Dict] = {}  # request_id -> {chunks: [], event: threading.Event()}
@@ -95,10 +101,10 @@ class APIServer:
             )
             self.scheduler_process.start()
             
-            print(f"Started scheduler process with PID: {self.scheduler_process.pid}")
+            self.logger.info(f"Started scheduler process with PID: {self.scheduler_process.pid}")
             
         except Exception as e:
-            print(f"Failed to start scheduler: {e}")
+            self.logger.error(f"Failed to start scheduler: {e}")
             raise RuntimeError(f"Could not start scheduler process: {e}")
     
     def _process_messages(self):
@@ -124,7 +130,7 @@ class APIServer:
                             elif message_type == 'COMPLETION':
                                 # Handle completion notification
                                 completion_info = json.loads(data.decode('utf-8'))
-                                print(f"Request {request_id} completed: {completion_info}")
+                                self.logger.info(f"Request {request_id} completed: {completion_info}")
                                 self.pending_requests[request_id]['event'].set()
                 
             except zmq.Again:
@@ -132,22 +138,22 @@ class APIServer:
                 continue
             except Exception as e:
                 if self.running:  # Only log if we're still supposed to be running
-                    print(f"Error in message processing: {e}")
+                    self.logger.error(f"Error in message processing: {e}")
                 continue
     
     def _stop_scheduler(self):
         if self.scheduler_process and self.scheduler_process.is_alive():
-            print("Stopping scheduler process...")
+            self.logger.info("Stopping scheduler process...")
             try:
                 self.scheduler_process.terminate()
                 self.scheduler_process.join(timeout=1)  # Reduced timeout
                 if self.scheduler_process.is_alive():
-                    print("Scheduler didn't terminate gracefully, forcing kill...")
+                    self.logger.warning("Scheduler didn't terminate gracefully, forcing kill...")
                     self.scheduler_process.kill()
                     self.scheduler_process.join(timeout=1)  # Quick final join
             except Exception as e:
-                print(f"Error stopping scheduler: {e}")
-            print("Scheduler process stopped")
+                self.logger.error(f"Error stopping scheduler: {e}")
+            self.logger.info("Scheduler process stopped")
     
     def stream_audio_chunks(self, text: str = None, voice: str = "tara", audio_path: str = None) -> Iterator[bytes]:
         """
@@ -303,7 +309,7 @@ class APIServer:
     
     def cleanup(self):
         """Clean up ZMQ resources and stop scheduler"""
-        print("Cleaning up API server...")
+        self.logger.info("Cleaning up API server...")
         
         # Stop background message processing
         self.running = False
@@ -318,7 +324,7 @@ class APIServer:
             if hasattr(self, 'context'):
                 self.context.term(linger=0)  # Don't wait for pending messages
         except Exception as e:
-            print(f"Error cleaning up ZMQ: {e}")
+            self.logger.error(f"Error cleaning up ZMQ: {e}")
         
         self._stop_scheduler()
 
@@ -479,7 +485,7 @@ async def shutdown_event():
 
 def signal_handler(signum, frame):
     """Handle shutdown signals"""
-    print(f"\nReceived signal {signum}, shutting down...")
+    logger.info(f"\nReceived signal {signum}, shutting down...")
     if api_server is not None:
         api_server.cleanup()
     import os
@@ -528,11 +534,11 @@ if __name__ == "__main__":
     signal.signal(signal.SIGTERM, signal_handler)
     
     try:
-        print(f"Starting vox-serve API server with model: {args.model}")
-        print("Scheduler and API server will be available shortly...")
+        logger.info(f"Starting vox-serve API server with model: {args.model}")
+        logger.info("Scheduler and API server will be available shortly...")
         uvicorn.run(app, host=args.host, port=args.port, access_log=False)
     except KeyboardInterrupt:
-        print("\nShutdown requested by user")
+        logger.info("\nShutdown requested by user")
     finally:
         if api_server is not None:
             api_server.cleanup()

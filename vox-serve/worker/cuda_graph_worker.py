@@ -78,7 +78,7 @@ class CudaGraphWorker(ModelWorker):
         )
 
         kv_cache_size = self.kv_cache.numel() * self.kv_cache.element_size()
-        print(f"KV cache size: {kv_cache_size / 1024 / 1024:.2f} MB")
+        self.logger.info(f"KV cache size: {kv_cache_size / 1024 / 1024:.2f} MB")
 
         self.has_depth_transformer = self.model.has_depth_transformer
         if self.has_depth_transformer:
@@ -138,7 +138,7 @@ class CudaGraphWorker(ModelWorker):
     def _initialize_cuda_graphs(self):
         """Initialize CUDA graphs for different batch sizes."""
         
-        print("Initializing CUDA graphs for LM decode phase...")
+        self.logger.info("Initializing CUDA graphs for LM decode phase...")
         
         # Create input buffers
         input_ids_buffer = torch.zeros(self.max_batch_size, self.model.n_codebooks, dtype=torch.int32, device=self.device)
@@ -166,13 +166,13 @@ class CudaGraphWorker(ModelWorker):
             'backbone_hidden_states': backbone_hidden_states_buffer,
         }
         
-        print("Initializing CUDA graphs for decode phase...")
+        self.logger.info("Initializing CUDA graphs for decode phase...")
         
         for batch_size in self.cuda_graph_batch_sizes:
             if batch_size > self.max_batch_size:
                 continue
                 
-            print(f"Capturing CUDA graph for batch size {batch_size}")
+            self.logger.info(f"Capturing CUDA graph for batch size {batch_size}")
             
             # Create buffers for flashinfer inputs
             paged_kv_indptr = torch.zeros(batch_size + 1, dtype=torch.int32, device=self.device)
@@ -233,9 +233,9 @@ class CudaGraphWorker(ModelWorker):
             # Store the captured graph
             self.cuda_graphs_lm[batch_size] = graph
             
-        print("CUDA graphs for decode phase initialized.")
+        self.logger.info("CUDA graphs for decode phase initialized.")
 
-        print("Initializing CUDA graphs for detokenization phase...")
+        self.logger.info("Initializing CUDA graphs for detokenization phase...")
         
         detokenize_input_buffer = torch.zeros(
             self.max_batch_size, 
@@ -263,7 +263,7 @@ class CudaGraphWorker(ModelWorker):
             if batch_size > self.max_batch_size:
                 continue
                 
-            print(f"Capturing detokenization CUDA graph for batch size {batch_size}")
+            self.logger.info(f"Capturing detokenization CUDA graph for batch size {batch_size}")
             
             # Warmup runs for detokenization
             for _ in range(5):
@@ -283,13 +283,13 @@ class CudaGraphWorker(ModelWorker):
             
             self.cuda_graphs_detokenization[batch_size] = detokenize_graph
         
-        print("CUDA graphs for detokenization phase initialized.")
+        self.logger.info("CUDA graphs for detokenization phase initialized.")
         
         if not self.has_depth_transformer:
-            print(f"CUDA graphs initialized for batch sizes: {list(self.cuda_graphs_lm.keys())}")
+            self.logger.info(f"CUDA graphs initialized for batch sizes: {list(self.cuda_graphs_lm.keys())}")
             return
         
-        print("Initializing CUDA graphs for depth transformer...")
+        self.logger.info("Initializing CUDA graphs for depth transformer...")
 
         # We reserve input tensors with batch size of `2 * self.max_batch_size` since the first step of depth transformer
         # has sequence length of 2 per request.
@@ -309,7 +309,7 @@ class CudaGraphWorker(ModelWorker):
             if batch_size > self.max_batch_size:
                 continue
 
-            print(f"Capturing depth CUDA graph for batch size {batch_size}")
+            self.logger.info(f"Capturing depth CUDA graph for batch size {batch_size}")
 
             # Create buffers for flashinfer inputs for depth transformer
             depth_qo_indptr = torch.arange(batch_size + 1, dtype=torch.int32, device=self.device) * 2
@@ -388,9 +388,9 @@ class CudaGraphWorker(ModelWorker):
             # Store the captured depth graph
             self.cuda_graphs_depth_decode[batch_size] = depth_graph
         
-        print("CUDA graphs for depth transformer decode phase initialized.")
+        self.logger.info("CUDA graphs for depth transformer decode phase initialized.")
         
-        print(f"CUDA graphs initialized for batch sizes: {list(self.cuda_graphs_lm.keys())}")
+        self.logger.info(f"CUDA graphs initialized for batch sizes: {list(self.cuda_graphs_lm.keys())}")
     
     def run_lm_prefill(self, requests: List[Request]):
         """
@@ -500,7 +500,7 @@ class CudaGraphWorker(ModelWorker):
         # Check if we can use CUDA graph optimization
         # TODO: padding
         can_use_cuda_graph = batch_size in self.cuda_graphs_lm
-        print(f"Batch size {batch_size} {'can' if can_use_cuda_graph else 'cannot'} use CUDA graph optimization.")
+        self.logger.debug(f"Batch size {batch_size} {'can' if can_use_cuda_graph else 'cannot'} use CUDA graph optimization.")
         
         if not can_use_cuda_graph:
             # Fallback to parent method if CUDA graph optimization is not applicable
@@ -640,7 +640,7 @@ class CudaGraphWorker(ModelWorker):
         
         # Check if we can use CUDA graph optimization for detokenization
         can_use_cuda_graph = batch_size in self.cuda_graphs_detokenization
-        print(f"Detokenization batch size {batch_size} {'can' if can_use_cuda_graph else 'cannot'} use CUDA graph optimization.")
+        self.logger.debug(f"Detokenization batch size {batch_size} {'can' if can_use_cuda_graph else 'cannot'} use CUDA graph optimization.")
         
         if not can_use_cuda_graph:
             # Fallback to parent method if CUDA graph optimization is not applicable
