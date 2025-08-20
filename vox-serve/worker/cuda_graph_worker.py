@@ -302,8 +302,8 @@ class CudaGraphWorker(ModelWorker):
 
         self.logger.info("Initializing CUDA graphs for depth transformer...")
 
-        # We reserve input tensors with batch size of `2 * self.max_batch_size` since the first step of depth transformer
-        # has sequence length of 2 per request.
+        # We reserve input tensors with batch size of `2 * self.max_batch_size` since the first step of
+        # depth transformer has sequence length of 2 per request.
         depth_hidden_states_buffer = torch.zeros(
             2 * self.max_batch_size, self.model.hidden_size, dtype=torch.bfloat16, device=self.device
         )
@@ -663,7 +663,8 @@ class CudaGraphWorker(ModelWorker):
         # Check if we can use CUDA graph optimization for detokenization
         can_use_cuda_graph = batch_size in self.cuda_graphs_detokenization
         self.logger.debug(
-            f"Detokenization batch size {batch_size} {'can' if can_use_cuda_graph else 'cannot'} use CUDA graph optimization."
+            f"Detokenization batch size {batch_size} "
+            f"{'can' if can_use_cuda_graph else 'cannot'} use CUDA graph optimization."
         )
 
         if not can_use_cuda_graph:

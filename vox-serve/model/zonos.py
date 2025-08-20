@@ -333,23 +333,26 @@ class ZonosUtils:
         phoneme_ids = [[cls.PAD_ID] * (longest - len(ids)) + ids for ids in phoneme_ids]
         return torch.tensor(phoneme_ids), lengths
 
-    @classmethod
-    def normalize_jp_text(cls, text: str, tokenizer) -> str:
-        from kanjize import number2kanji
+    # @classmethod
+    # def normalize_jp_text(cls, text: str, tokenizer) -> str:
+    #     from kanjize import number2kanji
 
-        text = unicodedata.normalize("NFKC", text)
-        text = re.sub(r"\d+", lambda m: number2kanji(int(m[0])), text)
-        final_text = " ".join([x.reading_form() for x in tokenizer.tokenize(text, SplitMode.A)])
-        return final_text
+    #     text = unicodedata.normalize("NFKC", text)
+    #     text = re.sub(r"\d+", lambda m: number2kanji(int(m[0])), text)
+    #     final_text = " ".join([x.reading_form() for x in tokenizer.tokenize(text, SplitMode.A)])
+    #     return final_text
 
     @classmethod
     def clean(cls, texts: list[str], languages: list[str]) -> list[str]:
         texts_out = []
         for text, language in zip(texts, languages, strict=False):
             if "ja" in language:
-                from sudachipy import Dictionary
+                raise NotImplementedError(
+                    "Japanese text normalization is not implemented"
+                )
 
-                text = cls.normalize_jp_text(text, tokenizer=Dictionary(dict="full").create())
+                # from sudachipy import Dictionary
+                # text = cls.normalize_jp_text(text, tokenizer=Dictionary(dict="full").create())
             else:
                 text = cls.normalize_numbers(text)
             texts_out.append(text)
@@ -551,7 +554,8 @@ class ZonosModel(BaseLM):
                 if k in self.model.state_dict():
                     if self.model.state_dict()[k].shape != f.get_tensor(k).shape:
                         raise ValueError(
-                            f"Shape mismatch for weight '{k}': expected {self.model.state_dict()[k].shape}, got {f.get_tensor(k).shape}"
+                            f"Shape mismatch for weight '{k}': "
+                            f"expected {self.model.state_dict()[k].shape}, got {f.get_tensor(k).shape}"
                         )
                     self.model.state_dict()[k].copy_(f.get_tensor(k))
                 else:
@@ -660,8 +664,9 @@ class ZonosModel(BaseLM):
             wav, sr = torchaudio.load(download_github_file("Zyphra", "Zonos", "assets/exampleaudio.mp3"))
             _, spk_embedding = self.speaker_encoder(wav.to(self.device), sr)
             self.default_speaker_embedding = spk_embedding.unsqueeze(0).bfloat16()
-        except:
-            self.logger.warning("Failed to load default speaker embedding, using random embedding instead.")
+        except Exception as e:
+            self.logger.error(f"Failed to load default speaker embedding: {e}")
+            self.logger.error("Using random embedding instead.")
             self.default_speaker_embedding = None
 
     def _make_cond_dict(

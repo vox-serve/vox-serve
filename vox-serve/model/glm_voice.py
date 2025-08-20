@@ -461,10 +461,16 @@ class GLMVoiceModel(BaseLM):
             audio_tokens = "".join([f"<|audio_{x}|>" for x in audio_tokens])
             audio_tokens = "<|begin_of_audio|>" + audio_tokens + "<|end_of_audio|>"
             user_input = audio_tokens
-            system_prompt = "User will provide you with a speech instruction. Do it step by step. First, think about the instruction and respond in a interleaved manner, with 13 text token followed by 26 audio tokens. "
+            system_prompt = (
+                "User will provide you with a speech instruction. Do it step by step. First, think about the "
+                "instruction and respond in a interleaved manner, with 13 text token followed by 26 audio tokens. "
+            )
         else:
             user_input = prompt
-            system_prompt = "User will provide you with a text instruction. Do it step by step. First, think about the instruction and respond in a interleaved manner, with 13 text token followed by 26 audio tokens."
+            system_prompt = (
+                "User will provide you with a text instruction. Do it step by step. First, think about the "
+                "instruction and respond in a interleaved manner, with 13 text token followed by 26 audio tokens."
+            )
 
         text_input = f"<|system|>\n{system_prompt}"
         text_input += f"<|user|>\n{user_input}<|assistant|>streaming_transcription\n"

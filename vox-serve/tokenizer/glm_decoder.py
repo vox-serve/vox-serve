@@ -1651,7 +1651,9 @@ class BasicTransformerBlock(nn.Module):
             # "feed_forward_chunk_size" can be used to save memory
             if norm_hidden_states.shape[self._chunk_dim] % self._chunk_size != 0:
                 raise ValueError(
-                    f"`hidden_states` dimension to be chunked: {norm_hidden_states.shape[self._chunk_dim]} has to be divisible by chunk size: {self._chunk_size}. Make sure to set an appropriate `chunk_size` when calling `unet.enable_forward_chunking`."
+                    f"`hidden_states` dimension to be chunked: {norm_hidden_states.shape[self._chunk_dim]} "
+                    f"has to be divisible by chunk size: {self._chunk_size}. Make sure to set an "
+                    f"appropriate `chunk_size` when calling `unet.enable_forward_chunking`."
                 )
 
             num_chunks = norm_hidden_states.shape[self._chunk_dim] // self._chunk_size
@@ -2224,10 +2226,10 @@ class ResBlock(torch.nn.Module):
             x = xt + x
         return x
 
-    def remove_weight_norm(self):
-        for idx in range(len(self.convs1)):
-            nn.utils.remove_weight_norm(self.convs1[idx])
-            nn.utils.remove_weight_norm(self.convs2[idx])
+    # def remove_weight_norm(self):
+    #     for idx in range(len(self.convs1)):
+    #         nn.utils.remove_weight_norm(self.convs1[idx])
+    #         nn.utils.remove_weight_norm(self.convs2[idx])
 
 
 class SineGen(torch.nn.Module):
@@ -2560,19 +2562,19 @@ class GLMHiFTModel(nn.Module):
         x = torch.clamp(x, -self.audio_limit, self.audio_limit)
         return x, s
 
-    def remove_weight_norm(self):
-        logger.info("Removing weight norm...")
-        for l in self.ups:
-            nn.utils.remove_weight_norm(l)
-        for l in self.resblocks:
-            nn.utils.remove_weight_norm(l)
-        nn.utils.remove_weight_norm(self.conv_pre)
-        nn.utils.remove_weight_norm(self.conv_post)
-        nn.utils.remove_weight_norm(self.source_module)
-        for l in self.source_downs:
-            nn.utils.remove_weight_norm(l)
-        for l in self.source_resblocks:
-            nn.utils.remove_weight_norm(l)
+    # def remove_weight_norm(self):
+    #     logger.info("Removing weight norm...")
+    #     for l in self.ups:
+    #         nn.utils.remove_weight_norm(l)
+    #     for l in self.resblocks:
+    #         nn.utils.remove_weight_norm(l)
+    #     nn.utils.remove_weight_norm(self.conv_pre)
+    #     nn.utils.remove_weight_norm(self.conv_post)
+    #     nn.utils.remove_weight_norm(self.source_module)
+    #     for l in self.source_downs:
+    #         nn.utils.remove_weight_norm(l)
+    #     for l in self.source_resblocks:
+    #         nn.utils.remove_weight_norm(l)
 
     @torch.inference_mode()
     def inference(self, mel: torch.Tensor, cache_source: torch.Tensor = torch.zeros(1, 1, 0)) -> torch.Tensor:

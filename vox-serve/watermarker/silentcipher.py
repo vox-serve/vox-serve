@@ -89,7 +89,7 @@ class MsgDecoder(nn.Module):
         self.message_band_size = message_band_size
 
         main = [nn.Dropout(0), Layer(dim_in=1, dim_out=channel_dim, kernel_size=3, stride=1, padding=1)]
-        for l in range(num_layers - 2):
+        for _ in range(num_layers - 2):
             main += [
                 nn.Dropout(0),
                 Layer(dim_in=channel_dim, dim_out=channel_dim, kernel_size=3, stride=1, padding=1),
@@ -211,8 +211,10 @@ class Model:
 
         Returns:
             tuple: A tuple containing two numpy arrays:
-                - message: A padded representation of the messages, where each message is repeated to match the patch length.
-                - message_compact: A compact representation of the messages, where each message is encoded as a one-hot vector.
+                - message: A padded representation of the messages, where each message is repeated to match the patch
+                    length.
+                - message_compact: A compact representation of the messages, where each message is encoded as a one-hot
+                    vector.
 
         Raises:
             AssertionError: If the length of any message in message_lst is not equal to self.config.message_len - 1.
@@ -351,7 +353,8 @@ class Model:
         - disable_checks (bool, optional): Whether to disable input checks. Defaults to False.
 
         Returns:
-        - dict: A dictionary containing the status of the encoding process, the SDR value(s), the time taken for encoding, and the time taken per second of audio.
+        - dict: A dictionary containing the status of the encoding process, the SDR value(s), the time taken for
+            encoding, and the time taken per second of audio.
 
         """
         y, orig_sr = self.load_audio(in_path)
@@ -367,7 +370,7 @@ class Model:
         time_taken = time.time() - start
         sf.write(out_path, encoded_y, orig_sr)
 
-        if type(sdr) == list:
+        if isinstance(sdr, list):
             return {
                 "status": True,
                 "sdr": [f"{sdr_i:.2f}" for sdr_i in sdr],
@@ -405,16 +408,20 @@ class Model:
         Args:
             y_multi_channel (torch.Tensor): The multi-channel audio waveform to be encoded.
             orig_sr (int): The original sampling rate of the audio waveform.
-            message_list (list): The list of messages to be encoded. Each message may correspond to a channel in the audio waveform.
-            message_sdr (float, optional): The signal-to-distortion ratio (SDR) of the message. If not provided, the default SDR from the configuration is used.
-            calc_sdr (bool, optional): Flag indicating whether to calculate the SDR of the encoded waveform. Defaults to True.
+            message_list (list): The list of messages to be encoded. Each message may correspond to a channel in the
+                audio waveform.
+            message_sdr (float, optional): The signal-to-distortion ratio (SDR) of the message. If not provided, the
+                default SDR from the configuration is used.
+            calc_sdr (bool, optional): Flag indicating whether to calculate the SDR of the encoded waveform. Defaults
+                to True.
             disable_checks (bool, optional): Flag indicating whether to disable input audio checks. Defaults to False.
 
         Returns:
             tuple: A tuple containing the encoded multi-channel audio waveform and the SDR (if calculated).
 
         Raises:
-            AssertionError: If the number of messages does not match the number of channels in the input audio waveform.
+            AssertionError: If the number of messages does not match the number of channels in the input audio
+                waveform.
         """
 
         # Convert input to torch tensor if not already
@@ -437,7 +444,7 @@ class Model:
         sdrs = []
 
         assert len(message_list) == y_multi_channel.shape[1], (
-            f"{len(message_list)} | {y_multi_channel.shape[1]} Mismatch in the number of messages and channels in the input audio."
+            f"Mismatch: {len(message_list)} messages vs {y_multi_channel.shape[1]} channels"
         )
 
         for channel_i in range(y_multi_channel.shape[1]):
@@ -449,7 +456,8 @@ class Model:
                 if orig_sr != self.sr:
                     if orig_sr > self.sr:
                         logger.warning(
-                            f"Reducing the sampling rate of the original audio from {orig_sr} -> {self.sr}. High frequency components may be lost!"
+                            f"Reducing the sampling rate of the original audio from {orig_sr} -> {self.sr}. "
+                            f"High frequency components may be lost!"
                         )
                     y = torchaudio.functional.resample(y.view(1, -1), orig_freq=orig_sr, new_freq=self.sr).squeeze()
 
@@ -458,7 +466,8 @@ class Model:
                 if not disable_checks:
                     if original_power == 0:
                         logger.warning(
-                            "The input audio has a power of 0. This means the audio is likely just silence. Skipping encoding."
+                            "The input audio has a power of 0. This means the audio is likely just silence. "
+                            "Skipping encoding."
                         )
                         return orig_y, 0
 
@@ -546,8 +555,9 @@ class Model:
             phase_shift_decoding (str): Flag indicating whether to perform phase shift decoding.
 
         Returns:
-            dict or list: A list of dictionary containing the decoded messages, confidences, and status for each channel if the input is multi-channel.
-                          Otherwise, a dictionary containing the decoded messages, confidences, and status for a single channel.
+            dict or list: A list of dictionary containing the decoded messages, confidences, and status for each
+                channel if the input is multi-channel.
+                Otherwise, a dictionary containing the decoded messages, confidences, and status for a single channel.
 
         Raises:
             Exception: If the decoding process fails.
@@ -622,7 +632,8 @@ class Model:
                     msg_reconst_list = convert_to_8_bit_segments(msg_reconst_list)
 
                 results.append({"messages": msg_reconst_list, "confidences": confidence, "status": True})
-            except:
+            except Exception as e:
+                logger.error(f"Decoding failed for channel {channel_i}: {e}")
                 results.append({"messages": [], "confidences": [], "error": "Could not find message", "status": False})
 
         if single_channel:

@@ -321,7 +321,8 @@ class BaseLMWithDepth(BaseLM):
         Forward pass through the depth transformer for some models.
 
         Args:
-            hidden_states: Output hidden states from the previous iteration or backbone model. Shape: (batch_size, hidden_size)
+            hidden_states: Output hidden states from the previous iteration or backbone model.
+                Shape: (batch_size, hidden_size)
             position_ids: Position IDs for the tokens. Shape: (batch_size)
             attn_wrapper: FlashInfer attention wrapper
             kv_cache: KV cache tensor

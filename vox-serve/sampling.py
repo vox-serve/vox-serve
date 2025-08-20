@@ -121,7 +121,8 @@ class Sampler:
 
         Args:
             logits: Tensor of shape (n_codebooks, vocab_size) containing the logits.
-            repetition_cache: Tensor of shape (window_size, n_codebooks, vocab_size) indicating which tokens have appeared.
+            repetition_cache: Tensor of shape (window_size, n_codebooks, vocab_size)
+                indicating which tokens have appeared.
             penalty: Float value to apply as a penalty for repeated tokens.
 
         Returns:

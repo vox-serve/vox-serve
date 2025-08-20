@@ -98,7 +98,7 @@ class APIServer:
 
         except Exception as e:
             self.logger.error(f"Failed to start scheduler: {e}")
-            raise RuntimeError(f"Could not start scheduler process: {e}")
+            raise RuntimeError(f"Could not start scheduler process: {e}") from e
 
     def _process_messages(self):
         """Background thread to process incoming messages from scheduler"""
@@ -227,7 +227,7 @@ class APIServer:
                 self.pending_requests.pop(request_id, None)
             if isinstance(e, HTTPException):
                 raise
-            raise HTTPException(status_code=500, detail=f"Generation failed: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Generation failed: {str(e)}") from e
 
     def generate_audio(self, text: str = None, voice: str = "tara", audio_path: str = None) -> str:
         """
@@ -295,7 +295,7 @@ class APIServer:
                 self.pending_requests.pop(request_id, None)
             if isinstance(e, HTTPException):
                 raise
-            raise HTTPException(status_code=500, detail=f"Generation failed: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Generation failed: {str(e)}") from e
 
     def cleanup(self):
         """Clean up ZMQ resources and stop scheduler"""
@@ -362,7 +362,7 @@ async def generate(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
     finally:
         # Schedule cleanup of uploaded file after a delay to ensure processing is complete
         if audio_path and Path(audio_path).exists():
@@ -439,7 +439,7 @@ async def generate_stream(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
     finally:
         # Schedule cleanup of uploaded file after a delay to ensure processing is complete
         if audio_path and Path(audio_path).exists():
