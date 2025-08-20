@@ -35,7 +35,7 @@ class Encoder(nn.Module):
         self.message_band_size = message_band_size
         main = [Layer(dim_in=1, dim_out=32, kernel_size=3, stride=1, padding=1)]
 
-        for i in range(n_layers - 2):
+        for _ in range(n_layers - 2):
             main.append(Layer(dim_in=32, dim_out=32, kernel_size=3, stride=1, padding=1))
         main.append(Layer(dim_in=32, dim_out=out_dim, kernel_size=3, stride=1, padding=1))
 
@@ -61,7 +61,7 @@ class CarrierDecoder(nn.Module):
         self.message_band_size = message_band_size
         layers = [Layer(dim_in=conv_dim, dim_out=96, kernel_size=3, stride=1, padding=1)]
 
-        for i in range(n_layers - 2):
+        for _ in range(n_layers - 2):
             layers.append(Layer(dim_in=96, dim_out=96, kernel_size=3, stride=1, padding=1))
 
         layers.append(Layer(dim_in=96, dim_out=1, kernel_size=1, stride=1, padding=0))

@@ -339,7 +339,7 @@ class ResidualVectorQuantize(nn.Module):
         z_q = 0
         residual = z
         codes = []
-        for i, quantizer in enumerate(self.quantizers):
+        for _, quantizer in enumerate(self.quantizers):
             z_q_i, indices_i = quantizer(residual)
             z_q = z_q + z_q_i
             residual = residual - z_q_i

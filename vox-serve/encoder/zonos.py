@@ -1,5 +1,4 @@
 import math
-from functools import cache
 
 import torch
 import torch.nn.functional as F
@@ -253,7 +252,7 @@ class Bottle2neck(nn.Module):
         convs = []
         bns = []
         num_pad = math.floor(kernel_size / 2) * dilation
-        for i in range(self.nums):
+        for _ in range(self.nums):
             convs.append(nn.Conv1d(width, width, kernel_size=kernel_size, dilation=dilation, padding=num_pad))
             bns.append(nn.BatchNorm1d(width))
         self.convs = nn.ModuleList(convs)

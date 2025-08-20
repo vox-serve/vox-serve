@@ -1,6 +1,5 @@
 import json
 import re
-import unicodedata
 from dataclasses import dataclass, field
 from functools import cache
 from typing import Any, Iterable, List, Literal
