@@ -1,15 +1,15 @@
-from typing import List, Tuple, Dict, Any
+from typing import Any, List
 
 import flashinfer
 import torch
 from torch import nn
-from transformers.activations import ACT2FN
 from transformers import LlamaConfig, LlamaPreTrainedModel
+from transformers.activations import ACT2FN
 
-from ..tokenizer.snac import SNAC
 from ..flashinfer_utils import FlashInferWrapper
-from ..sampling import SamplingConfig, Sampler
 from ..requests import Request
+from ..sampling import Sampler, SamplingConfig
+from ..tokenizer.snac import SNAC
 from .base import BaseLM, PreprocessOutput
 
 
@@ -61,7 +61,7 @@ class OrpheusAttention(nn.Module):
         self.is_causal = True
 
         self.rope_scale = config.rope_scaling.get("factor", 32.0)
-        self.rope_theta = config.rope_theta 
+        self.rope_theta = config.rope_theta
         self.low_freq_factor = config.rope_scaling.get("low_freq_factor", 1.0)
         self.high_freq_factor = config.rope_scaling.get("high_freq_factor", 4.0)
         self.old_context_len = config.rope_scaling.get("original_max_position_embeddings", 8192)
@@ -83,21 +83,22 @@ class OrpheusAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
         position_ids: torch.LongTensor,
-        attn_wrapper: FlashInferWrapper, 
+        attn_wrapper: FlashInferWrapper,
         kv_cache: torch.Tensor,
     ):
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
 
-        query_states = self.q_proj(hidden_states).view(hidden_shape) #.transpose(0, 1)
-        key_states = self.k_proj(hidden_states).view(hidden_shape) #.transpose(0, 1)
-        value_states = self.v_proj(hidden_states).view(hidden_shape) #.transpose(0, 1)
+        query_states = self.q_proj(hidden_states).view(hidden_shape)  # .transpose(0, 1)
+        key_states = self.k_proj(hidden_states).view(hidden_shape)  # .transpose(0, 1)
+        value_states = self.v_proj(hidden_states).view(hidden_shape)  # .transpose(0, 1)
 
         query_states, key_states = flashinfer.rope.apply_llama31_rope_pos_ids(
-            query_states, key_states, 
-            pos_ids=position_ids, 
-            rope_scale=self.rope_scale, 
-            rope_theta=self.rope_theta, 
+            query_states,
+            key_states,
+            pos_ids=position_ids,
+            rope_scale=self.rope_scale,
+            rope_theta=self.rope_theta,
             low_freq_factor=self.low_freq_factor,
             high_freq_factor=self.high_freq_factor,
             old_context_len=self.old_context_len,
@@ -126,7 +127,7 @@ class OrpheusDecoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         position_ids: torch.LongTensor,
-        attn_wrapper: FlashInferWrapper, 
+        attn_wrapper: FlashInferWrapper,
         kv_cache: torch.Tensor,
     ):
         residual = hidden_states
@@ -150,6 +151,7 @@ class OrpheusDecoderLayer(nn.Module):
 
         return hidden_states
 
+
 class OrpheusBackboneModel(nn.Module):
     def __init__(self, config: LlamaConfig):
         super().__init__()
@@ -166,10 +168,9 @@ class OrpheusBackboneModel(nn.Module):
         self,
         inputs_embeds: torch.Tensor,
         position_ids: torch.LongTensor,
-        attn_wrapper: FlashInferWrapper, 
+        attn_wrapper: FlashInferWrapper,
         kv_cache: torch.Tensor,
     ):
-        
         hidden_states = inputs_embeds
 
         for i, decoder_layer in enumerate(self.layers):
@@ -198,7 +199,7 @@ class OrpheusForCausalLM(LlamaPreTrainedModel):
 
     def embed_tokens(self, input_ids):
         return self.model.embed_tokens(input_ids)
-    
+
     def get_input_embeddings(self):
         return self.model.embed_tokens
 
@@ -206,7 +207,7 @@ class OrpheusForCausalLM(LlamaPreTrainedModel):
         self,
         inputs_embeds: torch.Tensor,
         position_ids: torch.LongTensor,
-        attn_wrapper: FlashInferWrapper, 
+        attn_wrapper: FlashInferWrapper,
         kv_cache: torch.Tensor,
     ):
         outputs = self.model(
@@ -216,13 +217,15 @@ class OrpheusForCausalLM(LlamaPreTrainedModel):
             kv_cache=kv_cache,
         )
 
-        logits = self.lm_head(outputs) 
+        logits = self.lm_head(outputs)
 
         return logits
 
 
 class OrpheusModel(BaseLM):
-    def __init__(self, model_name, dtype=torch.bfloat16, device="cuda:0", tokenizer_path="canopylabs/orpheus-3b-0.1-ft"):
+    def __init__(
+        self, model_name, dtype=torch.bfloat16, device="cuda:0", tokenizer_path="canopylabs/orpheus-3b-0.1-ft"
+    ):
         if model_name == "orpheus":
             model_name = "canopylabs/orpheus-3b-0.1-ft"
         super().__init__(model_name, device, dtype)
@@ -236,7 +239,7 @@ class OrpheusModel(BaseLM):
         self.text_tokenizer = self._load_tokenizer(tokenizer_path)
         self.audio_tokenizer = SNAC.from_pretrained("hubertsiuzdak/snac_24khz").eval().to(device)
 
-        self._num_attention_heads = self.model.config.num_attention_heads 
+        self._num_attention_heads = self.model.config.num_attention_heads
         self._num_key_value_heads = self.model.config.num_key_value_heads
         self._num_hidden_layers = self.model.config.num_hidden_layers
         self._hidden_size = self.model.config.hidden_size
@@ -245,12 +248,12 @@ class OrpheusModel(BaseLM):
         self.stop_token_id = 128258
 
         self.default_sampling_config = SamplingConfig(
-            top_k=None, 
+            top_k=None,
             top_p=0.8,
             min_p=None,
             temperature=0.6,
             repetition_penalty=1.3,
-            repetition_window=-1, 
+            repetition_window=-1,
             cfg_scale=None,
         )
 
@@ -258,7 +261,7 @@ class OrpheusModel(BaseLM):
         self.idx_14 = torch.tensor([1, 4], dtype=torch.long, device="cuda")
         self.idx_2356 = torch.tensor([2, 3, 5, 6], dtype=torch.long, device="cuda")
 
-    @property 
+    @property
     def n_codebooks(self):
         """Number of codebooks in the model."""
         return 1
@@ -267,17 +270,17 @@ class OrpheusModel(BaseLM):
     def num_attention_heads(self) -> int:
         """Number of attention heads in the model."""
         return self._num_attention_heads
-    
+
     @property
     def num_key_value_heads(self) -> int:
         """Number of key-value heads in the model."""
         return self._num_key_value_heads
-    
+
     @property
     def num_hidden_layers(self) -> int:
         """Number of hidden layers in the model."""
         return self._num_hidden_layers
-    
+
     @property
     def hidden_size(self) -> int:
         """Hidden size of the model."""
@@ -287,24 +290,24 @@ class OrpheusModel(BaseLM):
     def detokenize_interval(self) -> int:
         """Interval at which to detokenize outputs."""
         return 28
-    
+
     @property
     def detokenize_overlap(self) -> int:
         """Overlap size for detokenization."""
         return 21
-    
+
     @property
     def max_tokens(self) -> int:
         """
         Maximum number of tokens the model generates in a single request.
         """
         return 1200
-    
+
     @property
     def n_channels(self) -> int:
         """Number of audio channels in the output."""
         return 1  # Mono audio
-    
+
     @property
     def output_audio_length(self) -> int:
         """Output audio length (in samples) at each postprocess call."""
@@ -321,13 +324,13 @@ class OrpheusModel(BaseLM):
     def _load_tokenizer(self, tokenizer_path):
         """Load tokenizer from local path or HuggingFace hub"""
         from transformers import AutoTokenizer
+
         return AutoTokenizer.from_pretrained(tokenizer_path)
-    
+
     def _validate_voice(self, voice):
         """Validate if the given voice is supported by the model."""
         if voice and voice not in self.available_voices:
             raise ValueError(f"Voice {voice} is not available for model {self.model_name}")
-
 
     def _orpheus_format_prompt(self, prompt, voice="tara", model_type="larger"):
         if model_type == "smaller":
@@ -335,54 +338,50 @@ class OrpheusModel(BaseLM):
                 return f"<custom_token_3>{prompt}[{voice}]<custom_token_4><custom_token_5>"
             else:
                 return f"<custom_token_3>{prompt}<custom_token_4><custom_token_5>"
+        elif voice:
+            adapted_prompt = f"{voice}: {prompt}"
+            prompt_tokens = self.text_tokenizer(adapted_prompt, return_tensors="pt")
+            start_token = torch.tensor([[128259]], dtype=torch.int64)
+            end_tokens = torch.tensor([[128009, 128260, 128261, 128257]], dtype=torch.int64)
+            all_input_ids = torch.cat([start_token, prompt_tokens.input_ids, end_tokens], dim=1)
+            prompt_string = self.text_tokenizer.decode(all_input_ids[0])
+            return all_input_ids, prompt_string
         else:
-            if voice:
-                adapted_prompt = f"{voice}: {prompt}"
-                prompt_tokens = self.text_tokenizer(adapted_prompt, return_tensors="pt")
-                start_token = torch.tensor([[128259]], dtype=torch.int64)
-                end_tokens = torch.tensor([[128009, 128260, 128261, 128257]], dtype=torch.int64)
-                all_input_ids = torch.cat([start_token, prompt_tokens.input_ids, end_tokens], dim=1)
-                prompt_string = self.text_tokenizer.decode(all_input_ids[0])
-                return all_input_ids, prompt_string
-            else:
-                prompt_tokens = self.text_tokenizer(prompt, return_tensors="pt")
-                start_token = torch.tensor([[128259]], dtype=torch.int64)
-                end_tokens = torch.tensor([[128009, 128260, 128261, 128257]], dtype=torch.int64)
-                all_input_ids = torch.cat([start_token, prompt_tokens.input_ids, end_tokens], dim=1)
-                prompt_string = self.text_tokenizer.decode(all_input_ids[0])
-                return all_input_ids, prompt_string
-    
+            prompt_tokens = self.text_tokenizer(prompt, return_tensors="pt")
+            start_token = torch.tensor([[128259]], dtype=torch.int64)
+            end_tokens = torch.tensor([[128009, 128260, 128261, 128257]], dtype=torch.int64)
+            all_input_ids = torch.cat([start_token, prompt_tokens.input_ids, end_tokens], dim=1)
+            prompt_string = self.text_tokenizer.decode(all_input_ids[0])
+            return all_input_ids, prompt_string
+
     def preprocess(
-        self, 
-        prompt: str = None, 
+        self,
+        prompt: str = None,
         audio_path: str = None,
-        voice="tara", 
+        voice="tara",
         model_type="larger",
     ) -> PreprocessOutput:
         """Prepare the prompt for the model, formatting it according to Orpheus specifications."""
-        assert audio_path is None 
+        assert audio_path is None
         self._validate_voice(voice)
         input_ids, _ = self._orpheus_format_prompt(prompt, voice, model_type)
-        input_ids = input_ids.view(-1, 1) # add codebook dimension
+        input_ids = input_ids.view(-1, 1)  # add codebook dimension
 
         repetition_cache = torch.zeros(
-            self.default_sampling_config.repetition_window if self.default_sampling_config.repetition_window > 0 else 1, 
-            self.n_codebooks, 
-            self.vocab_size, 
-            dtype=torch.bool, 
+            self.default_sampling_config.repetition_window if self.default_sampling_config.repetition_window > 0 else 1,
+            self.n_codebooks,
+            self.vocab_size,
+            dtype=torch.bool,
             device=self.device,
         )
-        
-        return PreprocessOutput(
-            input_tokens=input_ids.tolist(),
-            repetition_cache=repetition_cache
-        )
-    
+
+        return PreprocessOutput(input_tokens=input_ids.tolist(), repetition_cache=repetition_cache)
+
     def forward(
-        self, 
-        input_ids: torch.Tensor, 
-        position_ids: torch.Tensor, 
-        attn_wrapper: FlashInferWrapper, 
+        self,
+        input_ids: torch.Tensor,
+        position_ids: torch.Tensor,
+        attn_wrapper: FlashInferWrapper,
         kv_cache: torch.Tensor,
         **kwargs: Any,
     ) -> torch.Tensor:
@@ -396,15 +395,15 @@ class OrpheusModel(BaseLM):
             attn_wrapper=attn_wrapper,
             kv_cache=kv_cache,
         )
-        
+
         if getattr(attn_wrapper, "qo_indptr", None) is not None:
             logits = logits[attn_wrapper.qo_indptr[:-1] - 1]
-        
-        return logits[:, None, :] # add codebook dimension
+
+        return logits[:, None, :]  # add codebook dimension
 
     def sampling(
-        self, 
-        logits: torch.Tensor, 
+        self,
+        logits: torch.Tensor,
         requests: List[Request],
         sampling_params: SamplingConfig | None = None,
         cfg_scale: float | None = None,
@@ -419,9 +418,7 @@ class OrpheusModel(BaseLM):
                 continue
 
             logits[i] = Sampler.apply_repetition_penalty(
-                logits[i], 
-                req.repetition_cache, 
-                sampling_params.repetition_penalty
+                logits[i], req.repetition_cache, sampling_params.repetition_penalty
             )
 
         output_ids = torch.zeros(logits.shape[0], logits.shape[1], dtype=torch.long, device=self.device)
@@ -434,9 +431,9 @@ class OrpheusModel(BaseLM):
                 continue
 
             Sampler.update_repetition_penalty_cache(
-                req.repetition_cache, 
-                output_ids[i], 
-                sampling_params.repetition_window, 
+                req.repetition_cache,
+                output_ids[i],
+                sampling_params.repetition_window,
             )
 
             # no additional logic for Orpheus model for now
@@ -444,7 +441,7 @@ class OrpheusModel(BaseLM):
             req.lm_output_audio_tokens.append(output_ids[i].tolist())
 
         return output_ids
-    
+
     def _turn_token_into_id(self, output_ids):
         """Modoel's output ids to audio ids"""
         return (output_ids - 128256 - 10) % 4096
@@ -454,16 +451,16 @@ class OrpheusModel(BaseLM):
         mf = token_ids.view(-1, 4, 7)
         mf = self._turn_token_into_id(mf)
 
-        # codes_0 = mf[:, :, 0] 
+        # codes_0 = mf[:, :, 0]
         # codes_1 = mf[:, :, [1, 4]].view(-1, 8)
-        # codes_2 = mf[:, :, [2, 3, 5, 6]].view(-1, 16) 
+        # codes_2 = mf[:, :, [2, 3, 5, 6]].view(-1, 16)
 
-        codes_0 = mf[:, :, 0] 
+        codes_0 = mf[:, :, 0]
 
-        c1 = torch.index_select(mf, dim=2, index=self.idx_14) 
+        c1 = torch.index_select(mf, dim=2, index=self.idx_14)
         codes_1 = c1.reshape(-1, 8)
 
-        c2 = torch.index_select(mf, dim=2, index=self.idx_2356) 
+        c2 = torch.index_select(mf, dim=2, index=self.idx_2356)
         codes_2 = c2.reshape(-1, 16)
 
         codes = [codes_0, codes_1, codes_2]

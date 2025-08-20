@@ -1,16 +1,17 @@
 # https://github.com/hubertsiuzdak/snac/tree/main
 
-import os
 import json
 import math
+import os
 from typing import List, Tuple
 
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn.utils.parametrizations import weight_norm
 from einops import rearrange
+from torch import nn
+from torch.nn.utils.parametrizations import weight_norm
+
 from ..utils import get_logger
 
 logger = get_logger(__name__)
@@ -460,12 +461,13 @@ class SNAC(nn.Module):
 
 
 if __name__ == "__main__":
-    import time 
+    import time
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = SNAC.from_pretrained("hubertsiuzdak/snac_24khz").eval().to(device).to(torch.bfloat16)
     model.decode = torch.compile(model.decode, fullgraph=True, dynamic=False, mode="reduce-overhead")
     for bs in [1, 2, 4, 8, 16, 32, 64]:
-        codes= [
+        codes = [
             torch.zeros(bs, 4, device=device, dtype=torch.int32),  # Codebook 1
             torch.zeros(bs, 8, device=device, dtype=torch.int32),  # Codebook 2
             torch.zeros(bs, 16, device=device, dtype=torch.int32),  # Codebook 3
@@ -473,7 +475,7 @@ if __name__ == "__main__":
         for _ in range(5):
             torch.cuda.synchronize()
             tick = time.time()
-            audio_hat = model.decode(codes) # audio_hat: [bs, 1, 8192]
+            audio_hat = model.decode(codes)  # audio_hat: [bs, 1, 8192]
             torch.cuda.synchronize()
             logger.info(f"Batch size {bs} took {(time.time() - tick) * 1000:.3f} ms")
         logger.info("=====")

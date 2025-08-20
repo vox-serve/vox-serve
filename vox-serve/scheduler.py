@@ -1,22 +1,23 @@
-import torch 
-import time
-import zmq 
 import json
-from typing import List, Dict, Any, Optional, Tuple, Type
+import time
+from typing import List
 
-from .requests import Request 
-from .worker import CudaGraphWorker
-from .sampling import SamplingConfig
+import torch
+import zmq
+
+from .requests import Request
 from .utils import get_logger
+from .worker import CudaGraphWorker
+
 
 class Scheduler:
     def __init__(
-        self, 
+        self,
         model_name_or_path: str,
         device: torch.device = torch.device("cuda"),
         max_batch_size: int = 8,
         request_socket_path: str = "/tmp/vox_serve_request.ipc",
-        result_socket_path: str = "/tmp/vox_serve_result.ipc"
+        result_socket_path: str = "/tmp/vox_serve_result.ipc",
     ):
         self.device = device
         self.max_batch_size = max_batch_size
@@ -37,13 +38,13 @@ class Scheduler:
         Process the next batch of requests.
         """
 
-        # insert/remove requests to self.active_requests 
+        # insert/remove requests to self.active_requests
         self._prepare_requests()
 
         # TODO: advanced scheduling logic here for LM forward
         requests = self.active_requests
 
-        is_prefill = False 
+        is_prefill = False
         for req in requests:
             is_prefill = is_prefill or (not req.done_lm_prefill)
 
@@ -51,7 +52,7 @@ class Scheduler:
             time.sleep(0.1)
             return
 
-        # run either prefill or decode of LM 
+        # run either prefill or decode of LM
         if is_prefill:
             self.model_worker.run_lm_prefill(requests)
         else:
@@ -65,11 +66,11 @@ class Scheduler:
         # TODO: advanced scheduling logic here for detokenization (independent of LM forward),
         # including multiple chunks from a single request for some cases
         requests_to_detokenize = []
-        
+
         for req in requests:
             if req.done_all or self.model_worker.do_detokenize(req):
                 requests_to_detokenize.append(req)
-        
+
         # run detokenization if needed
         self.model_worker.run_detokenize(requests_to_detokenize)
 
@@ -77,23 +78,21 @@ class Scheduler:
         for req in requests:
             if not req.output_audio.empty():
                 # Send audio chunk message: request_id|AUDIO|audio_data
-                message = req.request_id.encode('utf-8') + b'|AUDIO|' + req.output_audio.get()
+                message = req.request_id.encode("utf-8") + b"|AUDIO|" + req.output_audio.get()
                 self.result_socket.send(message)
-            
+
             # send completion notification for finished requests
             if req.done_all:
                 self.model_worker.free_kv_cache(req)
-                completion_message = {
-                    'status': 'completed',
-                    'reason': 'position_limit_exceeded'
-                }
+                completion_message = {"status": "completed", "reason": "position_limit_exceeded"}
                 # Send completion message: request_id|COMPLETION|json_data
-                completion_payload = (req.request_id.encode('utf-8') + b'|COMPLETION|' + 
-                                    json.dumps(completion_message).encode('utf-8'))
+                completion_payload = (
+                    req.request_id.encode("utf-8") + b"|COMPLETION|" + json.dumps(completion_message).encode("utf-8")
+                )
                 self.result_socket.send(completion_payload)
-        
+
         return
-    
+
     def run_forever(self):
         """
         Run the scheduler indefinitely.
@@ -102,7 +101,7 @@ class Scheduler:
             self._step()
             # Optionally, sleep or yield to avoid busy-waiting
             torch.cuda.synchronize()
-    
+
     def _prepare_requests(self):
         """
         Prepare requests for processing.
@@ -114,24 +113,24 @@ class Scheduler:
         while True:
             try:
                 message_payload = self.request_socket.recv(flags=zmq.NOBLOCK)
-                delimiter_pos = message_payload.find(b'|') 
+                delimiter_pos = message_payload.find(b"|")
                 if delimiter_pos != -1:
                     # Parse JSON request data
-                    json_data = message_payload[:delimiter_pos].decode('utf-8')
+                    json_data = message_payload[:delimiter_pos].decode("utf-8")
                     request_dict = json.loads(json_data)
-                    
+
                     # Create Request object from deserialized data
                     new_request = Request(
-                        request_id=request_dict['request_id'],
-                        prompt=request_dict['prompt'],
-                        audio_path=request_dict.get('audio_path'),
+                        request_id=request_dict["request_id"],
+                        prompt=request_dict["prompt"],
+                        audio_path=request_dict.get("audio_path"),
                     )
 
                     self.logger.debug(f"{new_request=}")
-                    
+
                     # Store voice information as attribute (not part of Request dataclass)
                     # new_request.voice = request_dict.get('voice', 'tara')
-                    
+
                     self.active_requests.append(new_request)
                 else:
                     self.logger.warning(f"Received malformed audio message: {message_payload[:50]}...")
@@ -140,9 +139,9 @@ class Scheduler:
             except Exception as e:
                 self.logger.error(f"Error receiving requests: {str(e)}")
                 import traceback
+
                 self.logger.error(f"Traceback: {traceback.format_exc()}")
-        
+
         # Filter out completed requests
         self.active_requests = [req for req in self.active_requests if not req.done_all]
-        
-        return 
+

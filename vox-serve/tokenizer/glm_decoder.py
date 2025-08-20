@@ -1,28 +1,27 @@
-from abc import ABC
-from typing import List, Dict, Any, Optional, Union, Tuple
-import json
-from dataclasses import dataclass
-# from hyperpyyaml import load_hyperpyyaml
-import math 
 
-from einops import pack, rearrange, repeat
-import numpy as np 
+# from hyperpyyaml import load_hyperpyyaml
+import math
+from abc import ABC
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+import numpy as np
 import scipy
 import torch
+from einops import pack, rearrange, repeat
 from torch import nn
 from torch.nn import functional as F
-import torch.utils.checkpoint as ckpt
-from huggingface_hub import hf_hub_download
+
 from ..utils import get_logger
 
 logger = get_logger(__name__)
 
 
 def subsequent_chunk_mask(
-        size: int,
-        chunk_size: int,
-        num_left_chunks: int = -1,
-        device: torch.device = torch.device("cpu"),
+    size: int,
+    chunk_size: int,
+    num_left_chunks: int = -1,
+    device: torch.device = torch.device("cpu"),
 ) -> torch.Tensor:
     """Create mask for subsequent steps (size, size) with chunk size,
        this is for streaming encoder
@@ -159,7 +158,6 @@ def subsequent_chunk_mask(
 #     return mask
 
 
-
 class LinearNoSubsampling(nn.Module):
     """Linear transform the input without subsampling
 
@@ -170,8 +168,7 @@ class LinearNoSubsampling(nn.Module):
 
     """
 
-    def __init__(self, idim: int, odim: int, dropout_rate: float,
-                 pos_enc_class: torch.nn.Module):
+    def __init__(self, idim: int, odim: int, dropout_rate: float, pos_enc_class: torch.nn.Module):
         """Construct an linear object."""
         super().__init__()
         self.out = torch.nn.Sequential(
@@ -183,15 +180,14 @@ class LinearNoSubsampling(nn.Module):
         self.right_context = 0
         self.subsampling_rate = 1
 
-    def position_encoding(self, offset: Union[int, torch.Tensor],
-                          size: int) -> torch.Tensor:
+    def position_encoding(self, offset: Union[int, torch.Tensor], size: int) -> torch.Tensor:
         return self.pos_enc.position_encoding(offset, size)
-    
+
     def forward(
         self,
         x: torch.Tensor,
         # x_mask: torch.Tensor,
-        offset: Union[int, torch.Tensor] = 0
+        offset: Union[int, torch.Tensor] = 0,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Input x.
 
@@ -250,8 +246,7 @@ class EspnetRelPositionalEncoding(torch.nn.Module):
         pe_negative = torch.zeros(x.size(1), self.d_model)
         position = torch.arange(0, x.size(1), dtype=torch.float32).unsqueeze(1)
         div_term = torch.exp(
-            torch.arange(0, self.d_model, 2, dtype=torch.float32)
-            * -(math.log(10000.0) / self.d_model)
+            torch.arange(0, self.d_model, 2, dtype=torch.float32) * -(math.log(10000.0) / self.d_model)
         )
         pe_positive[:, 0::2] = torch.sin(position * div_term)
         pe_positive[:, 1::2] = torch.cos(position * div_term)
@@ -281,10 +276,8 @@ class EspnetRelPositionalEncoding(torch.nn.Module):
         pos_emb = self.position_encoding(size=x.size(1), offset=offset)
         return self.dropout(x), self.dropout(pos_emb)
 
-    def position_encoding(self,
-                          offset: Union[int, torch.Tensor],
-                          size: int) -> torch.Tensor:
-        """ For getting encoding in a streaming fashion
+    def position_encoding(self, offset: Union[int, torch.Tensor], size: int) -> torch.Tensor:
+        """For getting encoding in a streaming fashion
 
         Attention!!!!!
         we apply dropout only once at the whole utterance level in a none
@@ -320,11 +313,11 @@ class PositionwiseFeedForward(torch.nn.Module):
     """
 
     def __init__(
-            self,
-            idim: int,
-            hidden_units: int,
-            dropout_rate: float,
-            activation: torch.nn.Module = torch.nn.ReLU(),
+        self,
+        idim: int,
+        hidden_units: int,
+        dropout_rate: float,
+        activation: torch.nn.Module = torch.nn.ReLU(),
     ):
         """Construct a PositionwiseFeedForward object."""
         super().__init__()
@@ -354,11 +347,7 @@ class MultiHeadedAttention(nn.Module):
 
     """
 
-    def __init__(self,
-                 n_head: int,
-                 n_feat: int,
-                 dropout_rate: float,
-                 key_bias: bool = True):
+    def __init__(self, n_head: int, n_feat: int, dropout_rate: float, key_bias: bool = True):
         """Construct an MultiHeadedAttention object."""
         super().__init__()
         assert n_feat % n_head == 0
@@ -401,10 +390,7 @@ class MultiHeadedAttention(nn.Module):
         return q, k, v
 
     def forward_attention(
-        self,
-        value: torch.Tensor,
-        scores: torch.Tensor,
-        mask: torch.Tensor = torch.ones((0, 0, 0), dtype=torch.bool)
+        self, value: torch.Tensor, scores: torch.Tensor, mask: torch.Tensor = torch.ones((0, 0, 0), dtype=torch.bool)
     ) -> torch.Tensor:
         """Compute attention context vector.
 
@@ -429,10 +415,9 @@ class MultiHeadedAttention(nn.Module):
         if mask.size(2) > 0:  # time2 > 0
             mask = mask.unsqueeze(1).eq(0)  # (batch, 1, *, time2)
             # For last chunk, time2 might be larger than scores.size(-1)
-            mask = mask[:, :, :, :scores.size(-1)]  # (batch, 1, *, time2)
-            scores = scores.masked_fill(mask, -float('inf'))
-            attn = torch.softmax(scores, dim=-1).masked_fill(
-                mask, 0.0)  # (batch, head, time1, time2)
+            mask = mask[:, :, :, : scores.size(-1)]  # (batch, 1, *, time2)
+            scores = scores.masked_fill(mask, -float("inf"))
+            attn = torch.softmax(scores, dim=-1).masked_fill(mask, 0.0)  # (batch, head, time1, time2)
         # NOTE(xcsong): When will `if mask.size(2) > 0` be False?
         #   1. onnx(16/-1, -1/-1, 16/0)
         #   2. jit (16/-1, -1/-1, 16/0, 16/4)
@@ -441,9 +426,7 @@ class MultiHeadedAttention(nn.Module):
 
         p_attn = self.dropout(attn)
         x = torch.matmul(p_attn, value)  # (batch, head, time1, d_k)
-        x = (x.transpose(1, 2).contiguous().view(n_batch, -1,
-                                                 self.h * self.d_k)
-             )  # (batch, time1, d_model)
+        x = x.transpose(1, 2).contiguous().view(n_batch, -1, self.h * self.d_k)  # (batch, time1, d_model)
 
         return self.linear_out(x)  # (batch, time1, d_model)
 
@@ -457,11 +440,7 @@ class BlockRelPositionMultiHeadedAttention(MultiHeadedAttention):
         dropout_rate (float): Dropout rate.
     """
 
-    def __init__(self,
-                 n_head: int,
-                 n_feat: int,
-                 dropout_rate: float,
-                 key_bias: bool = True, block_size=25):
+    def __init__(self, n_head: int, n_feat: int, dropout_rate: float, key_bias: bool = True, block_size=25):
         """Construct an RelPositionMultiHeadedAttention object."""
         super().__init__(n_head, n_feat, dropout_rate, key_bias)
         # linear transformation for positional encoding
@@ -473,7 +452,7 @@ class BlockRelPositionMultiHeadedAttention(MultiHeadedAttention):
         torch.nn.init.xavier_uniform_(self.pos_bias_u)
         torch.nn.init.xavier_uniform_(self.pos_bias_v)
         self.block_size = block_size
-    
+
     def _create_grid_mask(self, seq_length, trunck_length, fill_triangle):
         assert seq_length > 0
 
@@ -503,27 +482,21 @@ class BlockRelPositionMultiHeadedAttention(MultiHeadedAttention):
             torch.Tensor: Output tensor.
 
         """
-        zero_pad = torch.zeros((x.size()[0], x.size()[1], x.size()[2], 1),
-                               device=x.device,
-                               dtype=x.dtype)
+        zero_pad = torch.zeros((x.size()[0], x.size()[1], x.size()[2], 1), device=x.device, dtype=x.dtype)
         x_padded = torch.cat([zero_pad, x], dim=-1)
 
-        x_padded = x_padded.view(x.size()[0],
-                                 x.size()[1],
-                                 x.size(3) + 1, x.size(2))
-        x = x_padded[:, :, 1:].view_as(x)[
-            :, :, :, : x.size(-1) // 2 + 1
-            ]  # only keep the positions from 0 to time2
+        x_padded = x_padded.view(x.size()[0], x.size()[1], x.size(3) + 1, x.size(2))
+        x = x_padded[:, :, 1:].view_as(x)[:, :, :, : x.size(-1) // 2 + 1]  # only keep the positions from 0 to time2
         return x
 
     def forward(
-            self,
-            query: torch.Tensor,
-            key: torch.Tensor,
-            value: torch.Tensor,
-            # mask: torch.Tensor = torch.ones((0, 0, 0), dtype=torch.bool),
-            pos_emb: torch.Tensor = torch.empty(0),
-            cache: torch.Tensor = torch.zeros((0, 0, 0, 0))
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        # mask: torch.Tensor = torch.ones((0, 0, 0), dtype=torch.bool),
+        pos_emb: torch.Tensor = torch.empty(0),
+        cache: torch.Tensor = torch.zeros((0, 0, 0, 0)),
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Compute 'Scaled Dot Product Attention' with rel. positional encoding.
         Args:
@@ -551,7 +524,7 @@ class BlockRelPositionMultiHeadedAttention(MultiHeadedAttention):
         # mask = torch.tril(torch.ones(time_len, time_len).to(mask), diagonal=0).int()
         # block_size = self.block_size
         # mask[:, 0:block_size] = 1
-        block_mask = self._create_grid_mask(time_len,self.block_size,fill_triangle=True).to(query).int()
+        block_mask = self._create_grid_mask(time_len, self.block_size, fill_triangle=True).to(query).int()
         block_mask = block_mask[None].repeat(bs, 1, 1)
         mask = block_mask
 
@@ -572,9 +545,7 @@ class BlockRelPositionMultiHeadedAttention(MultiHeadedAttention):
         # >>> d = torch.split(a, 2, dim=-1)
         # >>> torch.equal(d[0], d[1])  # True
         if cache.size(0) > 0:
-            key_cache, value_cache = torch.split(cache,
-                                                 cache.size(-1) // 2,
-                                                 dim=-1)
+            key_cache, value_cache = torch.split(cache, cache.size(-1) // 2, dim=-1)
             k = torch.cat([key_cache, k], dim=2)
             v = torch.cat([value_cache, v], dim=2)
         # NOTE(xcsong): We do cache slicing in encoder.forward_chunk, since it's
@@ -603,11 +574,9 @@ class BlockRelPositionMultiHeadedAttention(MultiHeadedAttention):
         if matrix_ac.shape != matrix_bd.shape:
             matrix_bd = self.rel_shift(matrix_bd)
 
-        scores = (matrix_ac + matrix_bd) / math.sqrt(
-            self.d_k)  # (batch, head, time1, time2)
+        scores = (matrix_ac + matrix_bd) / math.sqrt(self.d_k)  # (batch, head, time1, time2)
 
         return self.forward_attention(v, scores, mask), new_cache
-
 
 
 class ConformerEncoderLayer(nn.Module):
@@ -655,8 +624,7 @@ class ConformerEncoderLayer(nn.Module):
             self.ff_scale = 1.0
         if self.conv_module is not None:
             self.norm_conv = nn.LayerNorm(size, eps=1e-5)  # for the CNN module
-            self.norm_final = nn.LayerNorm(
-                size, eps=1e-5)  # for the final output of the block
+            self.norm_final = nn.LayerNorm(size, eps=1e-5)  # for the final output of the block
         self.dropout = nn.Dropout(dropout_rate)
         self.size = size
         self.normalize_before = normalize_before
@@ -697,8 +665,7 @@ class ConformerEncoderLayer(nn.Module):
             residual = x
             if self.normalize_before:
                 x = self.norm_ff_macaron(x)
-            x = residual + self.ff_scale * self.dropout(
-                self.feed_forward_macaron(x))
+            x = residual + self.ff_scale * self.dropout(self.feed_forward_macaron(x))
             if not self.normalize_before:
                 x = self.norm_ff_macaron(x)
 
@@ -740,7 +707,6 @@ class ConformerEncoderLayer(nn.Module):
 
 
 class BaseEncoder(nn.Module):
-
     def __init__(
         self,
         input_size: int,
@@ -858,7 +824,7 @@ class BaseEncoder(nn.Module):
         #                                       decoding_chunk_size,
         #                                       self.static_chunk_size,
         #                                       num_decoding_left_chunks)
-        
+
         xs = self.forward_layers(xs, pos_emb)
         if self.normalize_before:
             xs = self.after_norm(xs)
@@ -913,10 +879,7 @@ class BaseEncoder(nn.Module):
         """
         assert xs.size(0) == 1
         # tmp_masks is just for interface compatibility
-        tmp_masks = torch.ones(1,
-                               xs.size(1),
-                               device=xs.device,
-                               dtype=torch.bool)
+        tmp_masks = torch.ones(1, xs.size(1), device=xs.device, dtype=torch.bool)
         tmp_masks = tmp_masks.unsqueeze(1)
         if self.global_cmvn is not None:
             xs = self.global_cmvn(xs)
@@ -926,8 +889,7 @@ class BaseEncoder(nn.Module):
         elayers, cache_t1 = att_cache.size(0), att_cache.size(2)
         chunk_size = xs.size(1)
         attention_key_size = cache_t1 + chunk_size
-        pos_emb = self.embed.position_encoding(offset=offset - cache_t1,
-                                               size=attention_key_size)
+        pos_emb = self.embed.position_encoding(offset=offset - cache_t1, size=attention_key_size)
         if required_cache_size < 0:
             next_cache_start = 0
         elif required_cache_size == 0:
@@ -944,8 +906,9 @@ class BaseEncoder(nn.Module):
                 xs,
                 att_mask,
                 pos_emb,
-                att_cache=att_cache[i:i + 1] if elayers > 0 else att_cache,
-                cnn_cache=cnn_cache[i] if cnn_cache.size(0) > 0 else cnn_cache)
+                att_cache=att_cache[i : i + 1] if elayers > 0 else att_cache,
+                cnn_cache=cnn_cache[i] if cnn_cache.size(0) > 0 else cnn_cache,
+            )
             # NOTE(xcsong): After layer.forward
             #   shape(new_att_cache) is (1, head, attention_key_size, d_k * 2),
             #   shape(new_cnn_cache) is (b=1, hidden-dim, cache_t2)
@@ -968,7 +931,7 @@ class BaseEncoder(nn.Module):
         decoding_chunk_size: int,
         num_decoding_left_chunks: int = -1,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """ Forward input chunk by chunk with chunk_size like a streaming
+        """Forward input chunk by chunk with chunk_size like a streaming
             fashion
 
         Here we should pay special attention to computation cache in the
@@ -1012,16 +975,11 @@ class BaseEncoder(nn.Module):
         for cur in range(0, num_frames - context + 1, stride):
             end = min(cur + decoding_window, num_frames)
             chunk_xs = xs[:, cur:end, :]
-            (y, att_cache,
-             cnn_cache) = self.forward_chunk(chunk_xs, offset,
-                                             required_cache_size, att_cache,
-                                             cnn_cache)
+            (y, att_cache, cnn_cache) = self.forward_chunk(chunk_xs, offset, required_cache_size, att_cache, cnn_cache)
             outputs.append(y)
             offset += y.size(1)
         ys = torch.cat(outputs, 1)
-        masks = torch.ones((1, 1, ys.size(1)),
-                           device=ys.device,
-                           dtype=torch.bool)
+        masks = torch.ones((1, 1, ys.size(1)), device=ys.device, dtype=torch.bool)
         return ys, masks
 
 
@@ -1074,12 +1032,24 @@ class BlockConformerEncoder(BaseEncoder):
             causal (bool): whether to use causal convolution or not.
             key_bias: whether use bias in attention.linear_k, False for whisper models.
         """
-        super().__init__(input_size, output_size, attention_heads,
-                         linear_units, num_blocks, dropout_rate,
-                         positional_dropout_rate, attention_dropout_rate,
-                         input_layer, pos_enc_layer_type, normalize_before,
-                         static_chunk_size, use_dynamic_chunk, global_cmvn,
-                         use_dynamic_left_chunk, gradient_checkpointing)
+        super().__init__(
+            input_size,
+            output_size,
+            attention_heads,
+            linear_units,
+            num_blocks,
+            dropout_rate,
+            positional_dropout_rate,
+            attention_dropout_rate,
+            input_layer,
+            pos_enc_layer_type,
+            normalize_before,
+            static_chunk_size,
+            use_dynamic_chunk,
+            global_cmvn,
+            use_dynamic_left_chunk,
+            gradient_checkpointing,
+        )
 
         assert activation_type == "swish"
         activation = torch.nn.SiLU()
@@ -1105,18 +1075,21 @@ class BlockConformerEncoder(BaseEncoder):
 
         assert selfattention_layer_type == "block_rel_selfattn"
 
-        self.encoders = torch.nn.ModuleList([
-            ConformerEncoderLayer(
-                output_size,
-                BlockRelPositionMultiHeadedAttention(*encoder_selfattn_layer_args),
-                PositionwiseFeedForward(*positionwise_layer_args),
-                None, # PositionwiseFeedForward(*positionwise_layer_args) if macaron_style else None,
-                None, # ConvolutionModule(*convolution_layer_args) if use_cnn_module else None,
-                dropout_rate,
-                normalize_before,
-            ) for _ in range(num_blocks)
-        ])
-        self.block_size=block_size
+        self.encoders = torch.nn.ModuleList(
+            [
+                ConformerEncoderLayer(
+                    output_size,
+                    BlockRelPositionMultiHeadedAttention(*encoder_selfattn_layer_args),
+                    PositionwiseFeedForward(*positionwise_layer_args),
+                    None,  # PositionwiseFeedForward(*positionwise_layer_args) if macaron_style else None,
+                    None,  # ConvolutionModule(*convolution_layer_args) if use_cnn_module else None,
+                    dropout_rate,
+                    normalize_before,
+                )
+                for _ in range(num_blocks)
+            ]
+        )
+        self.block_size = block_size
 
 
 class InterpolateRegulator(nn.Module):
@@ -1137,9 +1110,7 @@ class InterpolateRegulator(nn.Module):
                 norm = nn.GroupNorm(groups, channels)
                 act = nn.Mish()
                 model.extend([module, norm, act])
-        model.append(
-            nn.Conv1d(channels, out_channels, 1, 1)
-        )
+        model.append(nn.Conv1d(channels, out_channels, 1, 1))
         self.model = nn.Sequential(*model)
 
         # NOTE (keisuke): to be compatible with cuda graph; assuming shape doesn't change
@@ -1151,7 +1122,7 @@ class InterpolateRegulator(nn.Module):
         # mask = (~make_pad_mask(ylens)).to(x).unsqueeze(-1)
         if self.ylens is None:
             self.ylens = ylens.max().item()
-        x = F.interpolate(x.transpose(1, 2).contiguous(), size=self.ylens, mode='nearest')
+        x = F.interpolate(x.transpose(1, 2).contiguous(), size=self.ylens, mode="nearest")
         out = self.model(x).transpose(1, 2).contiguous()
         olens = ylens
         return out, olens
@@ -1160,11 +1131,11 @@ class InterpolateRegulator(nn.Module):
 @dataclass
 class CFMParams:
     sigma_min: float = 1e-06
-    solver: str = 'euler'
-    t_scheduler: str = 'cosine'
+    solver: str = "euler"
+    t_scheduler: str = "cosine"
     training_cfg_rate: float = 0.2
     inference_cfg_rate: float = 0.7
-    reg_loss_type: str = 'l1'
+    reg_loss_type: str = "l1"
 
 
 class BASECFM(torch.nn.Module, ABC):
@@ -1571,6 +1542,7 @@ class BasicTransformerBlock(nn.Module):
         # else:
         #     self.norm1 = nn.LayerNorm(dim, elementwise_affine=norm_elementwise_affine)
         from diffusers.models.attention_processor import Attention as DiffusersAttention
+
         self.attn1 = DiffusersAttention(
             query_dim=dim,
             heads=num_attention_heads,
@@ -1609,7 +1581,9 @@ class BasicTransformerBlock(nn.Module):
 
         # 3. Feed-forward
         self.norm3 = nn.LayerNorm(dim, elementwise_affine=norm_elementwise_affine)
-        self.ff = BasicTransformeFeedForward(dim, dropout=dropout, activation_fn=activation_fn, final_dropout=final_dropout)
+        self.ff = BasicTransformeFeedForward(
+            dim, dropout=dropout, activation_fn=activation_fn, final_dropout=final_dropout
+        )
 
         # let chunk size default to None
         self._chunk_size = None
@@ -1694,7 +1668,6 @@ class BasicTransformerBlock(nn.Module):
         hidden_states = ff_output + hidden_states
 
         return hidden_states
-
 
 
 class ConditionalDecoder(nn.Module):
@@ -1805,7 +1778,6 @@ class ConditionalDecoder(nn.Module):
         self.final_proj = nn.Conv1d(channels[-1], self.out_channels, 1)
         self.initialize_weights()
 
-
     def initialize_weights(self):
         for m in self.modules():
             if isinstance(m, nn.Conv1d):
@@ -1849,7 +1821,7 @@ class ConditionalDecoder(nn.Module):
         if cond is not None:
             x = pack([x, cond], "b * t")[0]
 
-        # NOTE (keisuke): remove all the masks since they are always true 
+        # NOTE (keisuke): remove all the masks since they are always true
         hiddens = []
         # masks = [mask]
         for resnet, transformer_blocks, downsample in self.down_blocks:
@@ -1885,7 +1857,7 @@ class ConditionalDecoder(nn.Module):
         for resnet, transformer_blocks, upsample in self.up_blocks:
             # mask_up = masks.pop()
             skip = hiddens.pop()
-            x = pack([x[:, :, :skip.shape[-1]], skip], "b * t")[0]
+            x = pack([x[:, :, : skip.shape[-1]], skip], "b * t")[0]
             x = resnet(x, t)
             x = rearrange(x, "b c t -> b t c").contiguous()
             # attn_mask = torch.matmul(mask_up.transpose(1, 2).contiguous(), mask_up)
@@ -1904,11 +1876,11 @@ class ConditionalDecoder(nn.Module):
 
 class ConditionalCFM(BASECFM):
     def __init__(
-        self, 
-        in_channels=240, 
-        cfm_params: CFMParams = CFMParams(), 
-        n_spks=1, 
-        spk_emb_dim=64, 
+        self,
+        in_channels=240,
+        cfm_params: CFMParams = CFMParams(),
+        n_spks=1,
+        spk_emb_dim=64,
         estimator: ConditionalDecoder = None,
     ):
         super().__init__(
@@ -1923,7 +1895,7 @@ class ConditionalCFM(BASECFM):
         in_channels = in_channels + (spk_emb_dim if n_spks > 0 else 0)
         # Just change the architecture of the estimator here
         self.estimator = estimator
-        
+
         torch.manual_seed(42)
 
     @torch.inference_mode()
@@ -1946,9 +1918,9 @@ class ConditionalCFM(BASECFM):
                 shape: (batch_size, n_feats, mel_timesteps)
         """
         z = torch.randn_like(mu) * temperature
-        
+
         t_span = torch.linspace(0, 1, n_timesteps + 1, device=mu.device)
-        if self.t_scheduler == 'cosine':
+        if self.t_scheduler == "cosine":
             t_span = 1 - torch.cos(t_span * 0.5 * torch.pi)
         return self.solve_euler(z, t_span=t_span, mu=mu, spks=spks, cond=cond)
 
@@ -1979,19 +1951,19 @@ class ConditionalCFM(BASECFM):
             if self.inference_cfg_rate > 0:
                 cfg_dphi_dt = self.estimator(
                     x,
-                    torch.zeros_like(mu), t,
+                    torch.zeros_like(mu),
+                    t,
                     torch.zeros_like(spks) if spks is not None else None,
-                    torch.zeros_like(cond)
+                    torch.zeros_like(cond),
                 )
-                dphi_dt = ((1.0 + self.inference_cfg_rate) * dphi_dt -
-                           self.inference_cfg_rate * cfg_dphi_dt)
+                dphi_dt = (1.0 + self.inference_cfg_rate) * dphi_dt - self.inference_cfg_rate * cfg_dphi_dt
             x = x + dt * dphi_dt
             t = t + dt
-            
+
             sol.append(x)
             if step < len(t_span) - 1:
                 dt = t_span[step + 1] - t
-        
+
         return sol[-1]
 
     def compute_loss(self, x1, mask, mu, spks=None, cond=None):
@@ -2016,7 +1988,7 @@ class ConditionalCFM(BASECFM):
 
         # random timestep
         t = torch.rand([b, 1, 1], device=mu.device, dtype=mu.dtype)
-        if self.t_scheduler == 'cosine':
+        if self.t_scheduler == "cosine":
             t = 1 - torch.cos(t * 0.5 * torch.pi)
         # sample noise p(x_0)
         z = torch.randn_like(x1)
@@ -2076,9 +2048,8 @@ class GLMFlowModel(nn.Module):
         # prompt_token_len,
         # prompt_feat,
         # prompt_feat_len,
-        embedding
+        embedding,
     ):
-        
         # assert token.shape[0] == 1
         # xvec projection
         embedding = F.normalize(embedding, dim=1)
@@ -2087,8 +2058,8 @@ class GLMFlowModel(nn.Module):
         # concat text and prompt_text
         # token, token_len = torch.concat([prompt_token, token], dim=1), prompt_token_len + token_len
         # mask = (~make_pad_mask(token_len)).float().unsqueeze(-1).to(embedding)
-        
-        token = self.input_embedding(torch.clamp(token, min=0)) #* mask
+
+        token = self.input_embedding(torch.clamp(token, min=0))  # * mask
 
         # text encode
         h = self.encoder(token, token_len)
@@ -2096,7 +2067,7 @@ class GLMFlowModel(nn.Module):
         feat_len = (token_len / self.input_frame_rate * 22050 / 256).int()
         h, h_lengths = self.length_regulator(h, feat_len)
 
-        if self.feat_len is None: 
+        if self.feat_len is None:
             self.feat_len = feat_len.max().item()
 
         # get conditions
@@ -2112,42 +2083,28 @@ class GLMFlowModel(nn.Module):
             # mask=mask.unsqueeze(1),
             spks=embedding,
             cond=conds,
-            n_timesteps=10
+            n_timesteps=10,
         )
         # if prompt_feat.shape[1] != 0:
         #     feat = feat[:, :, prompt_feat.shape[1]:]
-        return feat # output is mel
+        return feat  # output is mel
 
 
 class ConvRNNF0Predictor(nn.Module):
-    def __init__(self,
-                 num_class: int = 1,
-                 in_channels: int = 80,
-                 cond_channels: int = 512
-                 ):
+    def __init__(self, num_class: int = 1, in_channels: int = 80, cond_channels: int = 512):
         super().__init__()
 
         self.num_class = num_class
         self.condnet = nn.Sequential(
-            nn.utils.weight_norm(
-                nn.Conv1d(in_channels, cond_channels, kernel_size=3, padding=1)
-            ),
+            nn.utils.weight_norm(nn.Conv1d(in_channels, cond_channels, kernel_size=3, padding=1)),
             nn.ELU(),
-            nn.utils.weight_norm(
-                nn.Conv1d(cond_channels, cond_channels, kernel_size=3, padding=1)
-            ),
+            nn.utils.weight_norm(nn.Conv1d(cond_channels, cond_channels, kernel_size=3, padding=1)),
             nn.ELU(),
-            nn.utils.weight_norm(
-                nn.Conv1d(cond_channels, cond_channels, kernel_size=3, padding=1)
-            ),
+            nn.utils.weight_norm(nn.Conv1d(cond_channels, cond_channels, kernel_size=3, padding=1)),
             nn.ELU(),
-            nn.utils.weight_norm(
-                nn.Conv1d(cond_channels, cond_channels, kernel_size=3, padding=1)
-            ),
+            nn.utils.weight_norm(nn.Conv1d(cond_channels, cond_channels, kernel_size=3, padding=1)),
             nn.ELU(),
-            nn.utils.weight_norm(
-                nn.Conv1d(cond_channels, cond_channels, kernel_size=3, padding=1)
-            ),
+            nn.utils.weight_norm(nn.Conv1d(cond_channels, cond_channels, kernel_size=3, padding=1)),
             nn.ELU(),
         )
         self.classifier = nn.Linear(in_features=cond_channels, out_features=self.num_class)
@@ -2169,7 +2126,7 @@ def init_weights(m, mean=0.0, std=0.01):
 
 
 class Snake(nn.Module):
-    '''
+    """
     Implementation of a sine-based periodic activation function
     Shape:
         - Input: (B, C, T)
@@ -2183,16 +2140,17 @@ class Snake(nn.Module):
         >>> a1 = snake(256)
         >>> x = torch.randn(256)
         >>> x = a1(x)
-    '''
+    """
+
     def __init__(self, in_features, alpha=1.0, alpha_trainable=True, alpha_logscale=False):
-        '''
+        """
         Initialization.
         INPUT:
             - in_features: shape of the input
             - alpha: trainable parameter
             alpha is initialized to 1 by default, higher values = higher-frequency.
             alpha will be trained along with the rest of your model.
-        '''
+        """
         super(Snake, self).__init__()
         self.in_features = in_features
 
@@ -2208,11 +2166,11 @@ class Snake(nn.Module):
         self.no_div_by_zero = 0.000000001
 
     def forward(self, x):
-        '''
+        """
         Forward pass of the function.
         Applies the function to the input elementwise.
         Snake ∶= x + 1/a * sin^2 (xa)
-        '''
+        """
         alpha = self.alpha.unsqueeze(0).unsqueeze(-1)  # line up with x to [B, C, T]
         if self.alpha_logscale:
             alpha = torch.exp(alpha)
@@ -2223,6 +2181,7 @@ class Snake(nn.Module):
 
 class ResBlock(torch.nn.Module):
     """Residual block module in HiFiGAN/BigVGAN."""
+
     def __init__(
         self,
         channels: int = 512,
@@ -2242,32 +2201,19 @@ class ResBlock(torch.nn.Module):
                         kernel_size,
                         1,
                         dilation=dilation,
-                        padding=get_padding(kernel_size, dilation)
+                        padding=get_padding(kernel_size, dilation),
                     )
                 )
             )
             self.convs2.append(
                 nn.utils.weight_norm(
-                    nn.Conv1d(
-                        channels,
-                        channels,
-                        kernel_size,
-                        1,
-                        dilation=1,
-                        padding=get_padding(kernel_size, 1)
-                    )
+                    nn.Conv1d(channels, channels, kernel_size, 1, dilation=1, padding=get_padding(kernel_size, 1))
                 )
             )
         self.convs1.apply(init_weights)
         self.convs2.apply(init_weights)
-        self.activations1 = nn.ModuleList([
-            Snake(channels, alpha_logscale=False)
-            for _ in range(len(self.convs1))
-        ])
-        self.activations2 = nn.ModuleList([
-            Snake(channels, alpha_logscale=False)
-            for _ in range(len(self.convs2))
-        ])
+        self.activations1 = nn.ModuleList([Snake(channels, alpha_logscale=False) for _ in range(len(self.convs1))])
+        self.activations2 = nn.ModuleList([Snake(channels, alpha_logscale=False) for _ in range(len(self.convs2))])
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         for idx in range(len(self.convs1)):
@@ -2285,7 +2231,7 @@ class ResBlock(torch.nn.Module):
 
 
 class SineGen(torch.nn.Module):
-    """ Definition of sine generator
+    """Definition of sine generator
     SineGen(samp_rate, harmonic_num = 0,
             sine_amp = 0.1, noise_std = 0.003,
             voiced_threshold = 0,
@@ -2300,9 +2246,7 @@ class SineGen(torch.nn.Module):
         segment is always sin(np.pi) or cos(0)
     """
 
-    def __init__(self, samp_rate, harmonic_num=0,
-                 sine_amp=0.1, noise_std=0.003,
-                 voiced_threshold=0):
+    def __init__(self, samp_rate, harmonic_num=0, sine_amp=0.1, noise_std=0.003, voiced_threshold=0):
         super(SineGen, self).__init__()
         self.sine_amp = sine_amp
         self.noise_std = noise_std
@@ -2332,11 +2276,11 @@ class SineGen(torch.nn.Module):
         #     self.f0_shapes = [f0.size(0), f0.size(1), f0.size(2)]
         F_mat = torch.zeros((f0.shape[0], self.harmonic_num + 1, f0.shape[-1]), device=f0.device)
         for i in range(self.harmonic_num + 1):
-            F_mat[:, i: i + 1, :] = f0 * (i + 1) / self.sampling_rate
+            F_mat[:, i : i + 1, :] = f0 * (i + 1) / self.sampling_rate
 
         theta_mat = 2 * np.pi * (torch.cumsum(F_mat, dim=-1) % 1)
         # u_dist = torch.distributions.uniform.Uniform(low=-np.pi, high=np.pi)
-        phase_vec = self.u_dist.sample(sample_shape=(f0.shape[0], self.harmonic_num + 1, 1)) #.to(F_mat.device)
+        phase_vec = self.u_dist.sample(sample_shape=(f0.shape[0], self.harmonic_num + 1, 1))  # .to(F_mat.device)
         phase_vec[:, 0, :] = 0
 
         # generate sine waveforms
@@ -2358,7 +2302,7 @@ class SineGen(torch.nn.Module):
 
 
 class SourceModuleHnNSF(torch.nn.Module):
-    """ SourceModule for hn-nsf
+    """SourceModule for hn-nsf
     SourceModule(sampling_rate, harmonic_num=0, sine_amp=0.1,
                  add_noise_std=0.003, voiced_threshod=0)
     sampling_rate: sampling_rate in Hz
@@ -2375,16 +2319,16 @@ class SourceModuleHnNSF(torch.nn.Module):
     uv (batchsize, length, 1)
     """
 
-    def __init__(self, sampling_rate, upsample_scale, harmonic_num=0, sine_amp=0.1,
-                 add_noise_std=0.003, voiced_threshod=0):
+    def __init__(
+        self, sampling_rate, upsample_scale, harmonic_num=0, sine_amp=0.1, add_noise_std=0.003, voiced_threshod=0
+    ):
         super(SourceModuleHnNSF, self).__init__()
 
         self.sine_amp = sine_amp
         self.noise_std = add_noise_std
 
         # to produce sine waveforms
-        self.l_sin_gen = SineGen(sampling_rate, harmonic_num,
-                                 sine_amp, add_noise_std, voiced_threshod)
+        self.l_sin_gen = SineGen(sampling_rate, harmonic_num, sine_amp, add_noise_std, voiced_threshod)
 
         # to merge source harmonics into a single excitation
         self.l_linear = torch.nn.Linear(harmonic_num + 1, 1)
@@ -2414,6 +2358,7 @@ class GLMHiFTModel(nn.Module):
     HiFTNet Generator: Neural Source Filter + ISTFTNet
     https://arxiv.org/abs/2309.09493
     """
+
     def __init__(
         self,
         in_channels: int = 80,
@@ -2451,21 +2396,20 @@ class GLMHiFTModel(nn.Module):
             harmonic_num=nb_harmonics,
             sine_amp=nsf_alpha,
             add_noise_std=nsf_sigma,
-            voiced_threshod=nsf_voiced_threshold)
+            voiced_threshod=nsf_voiced_threshold,
+        )
         self.f0_upsamp = torch.nn.Upsample(scale_factor=np.prod(upsample_rates) * istft_params["hop_len"])
 
-        self.conv_pre = nn.utils.weight_norm(
-            nn.Conv1d(in_channels, base_channels, 7, 1, padding=3)
-        )
+        self.conv_pre = nn.utils.weight_norm(nn.Conv1d(in_channels, base_channels, 7, 1, padding=3))
 
         # Up
         self.ups = nn.ModuleList()
-        for i, (u, k) in enumerate(zip(upsample_rates, upsample_kernel_sizes)):
+        for i, (u, k) in enumerate(zip(upsample_rates, upsample_kernel_sizes, strict=False)):
             self.ups.append(
                 nn.utils.weight_norm(
                     nn.ConvTranspose1d(
                         base_channels // (2**i),
-                        base_channels // (2**(i + 1)),
+                        base_channels // (2 ** (i + 1)),
                         k,
                         u,
                         padding=(k - u) // 2,
@@ -2478,31 +2422,31 @@ class GLMHiFTModel(nn.Module):
         self.source_resblocks = nn.ModuleList()
         downsample_rates = [1] + upsample_rates[::-1][:-1]
         downsample_cum_rates = np.cumprod(downsample_rates)
-        for i, (u, k, d) in enumerate(zip(downsample_cum_rates[::-1], source_resblock_kernel_sizes, source_resblock_dilation_sizes)):
+        for i, (u, k, d) in enumerate(
+            zip(downsample_cum_rates[::-1], source_resblock_kernel_sizes, source_resblock_dilation_sizes, strict=False)
+        ):
             if u == 1:
-                self.source_downs.append(
-                    nn.Conv1d(istft_params["n_fft"] + 2, base_channels // (2 ** (i + 1)), 1, 1)
-                )
+                self.source_downs.append(nn.Conv1d(istft_params["n_fft"] + 2, base_channels // (2 ** (i + 1)), 1, 1))
             else:
                 self.source_downs.append(
                     nn.Conv1d(istft_params["n_fft"] + 2, base_channels // (2 ** (i + 1)), u * 2, u, padding=(u // 2))
                 )
 
-            self.source_resblocks.append(
-                ResBlock(base_channels // (2 ** (i + 1)), k, d)
-            )
+            self.source_resblocks.append(ResBlock(base_channels // (2 ** (i + 1)), k, d))
 
         self.resblocks = nn.ModuleList()
         for i in range(len(self.ups)):
-            ch = base_channels // (2**(i + 1))
-            for _, (k, d) in enumerate(zip(resblock_kernel_sizes, resblock_dilation_sizes)):
+            ch = base_channels // (2 ** (i + 1))
+            for _, (k, d) in enumerate(zip(resblock_kernel_sizes, resblock_dilation_sizes, strict=False)):
                 self.resblocks.append(ResBlock(ch, k, d))
 
         self.conv_post = nn.utils.weight_norm(nn.Conv1d(ch, istft_params["n_fft"] + 2, 7, 1, padding=3))
         self.ups.apply(init_weights)
         self.conv_post.apply(init_weights)
         self.reflection_pad = nn.ReflectionPad1d((1, 0))
-        self.stft_window = torch.from_numpy(scipy.signal.get_window("hann", istft_params["n_fft"], fftbins=True).astype(np.float32)).to("cuda")
+        self.stft_window = torch.from_numpy(
+            scipy.signal.get_window("hann", istft_params["n_fft"], fftbins=True).astype(np.float32)
+        ).to("cuda")
         self.f0_predictor = f0_predictor
 
     def _f02source(self, f0: torch.Tensor) -> torch.Tensor:
@@ -2514,8 +2458,12 @@ class GLMHiFTModel(nn.Module):
     def _stft(self, x):
         spec = torch.stft(
             x,
-            self.istft_params["n_fft"], self.istft_params["hop_len"], self.istft_params["n_fft"], window=self.stft_window,
-            return_complex=True)
+            self.istft_params["n_fft"],
+            self.istft_params["hop_len"],
+            self.istft_params["n_fft"],
+            window=self.stft_window,
+            return_complex=True,
+        )
         spec = torch.view_as_real(spec)  # [B, F, TT, 2]
         return spec[..., 0], spec[..., 1]
 
@@ -2526,7 +2474,9 @@ class GLMHiFTModel(nn.Module):
         comp = torch.complex(real, img)
         # inverse_transform = torch.istft(comp, self.istft_params["n_fft"], self.istft_params["hop_len"],
         #                                 self.istft_params["n_fft"], window=self.stft_window)
-        inverse_transform = self._istft_graph_safe(comp, self.istft_params["n_fft"], self.istft_params["hop_len"], self.stft_window)
+        inverse_transform = self._istft_graph_safe(
+            comp, self.istft_params["n_fft"], self.istft_params["hop_len"], self.stft_window
+        )
         return inverse_transform
 
     def _istft_graph_safe(self, comp_tensor, n_fft, hop_len, window):
@@ -2549,22 +2499,14 @@ class GLMHiFTModel(nn.Module):
         # 4. Overlap-Add using F.fold
         frames_for_fold = windowed_frames.permute(0, 2, 1)
         reconstructed_full = F.fold(
-            frames_for_fold,
-            output_size=(1, expected_signal_len),
-            kernel_size=(1, n_fft),
-            stride=(1, hop_len)
+            frames_for_fold, output_size=(1, expected_signal_len), kernel_size=(1, n_fft), stride=(1, hop_len)
         )
 
         # 5. Build the normalization denominator using the squared window
         win_sq = window.pow(2)
         ones = torch.ones_like(frames_for_fold)
         win_sq_padded = ones * win_sq.view(1, -1, 1)
-        denom = F.fold(
-            win_sq_padded,
-            output_size=(1, expected_signal_len),
-            kernel_size=(1, n_fft),
-            stride=(1, hop_len)
-        )
+        denom = F.fold(win_sq_padded, output_size=(1, expected_signal_len), kernel_size=(1, n_fft), stride=(1, hop_len))
 
         # Apply normalization, avoiding division by zero
         denom = torch.where(denom > 1e-8, denom, torch.ones_like(denom))
@@ -2583,7 +2525,7 @@ class GLMHiFTModel(nn.Module):
 
         # use cache_source to avoid glitch
         if cache_source.shape[2] != 0:
-            s[:, :, :cache_source.shape[2]] = cache_source
+            s[:, :, : cache_source.shape[2]] = cache_source
 
         s_stft_real, s_stft_imag = self._stft(s.squeeze(1))
         s_stft = torch.cat([s_stft_real, s_stft_imag], dim=1)
@@ -2611,15 +2553,15 @@ class GLMHiFTModel(nn.Module):
 
         x = F.leaky_relu(x)
         x = self.conv_post(x)
-        magnitude = torch.exp(x[:, :self.istft_params["n_fft"] // 2 + 1, :])
-        phase = torch.sin(x[:, self.istft_params["n_fft"] // 2 + 1:, :])  # actually, sin is redundancy
+        magnitude = torch.exp(x[:, : self.istft_params["n_fft"] // 2 + 1, :])
+        phase = torch.sin(x[:, self.istft_params["n_fft"] // 2 + 1 :, :])  # actually, sin is redundancy
 
         x = self._istft(magnitude, phase)
         x = torch.clamp(x, -self.audio_limit, self.audio_limit)
         return x, s
 
     def remove_weight_norm(self):
-        logger.info('Removing weight norm...')
+        logger.info("Removing weight norm...")
         for l in self.ups:
             nn.utils.remove_weight_norm(l)
         for l in self.resblocks:
@@ -2650,15 +2592,11 @@ class GLMAudioDecoder(nn.Module):
         self.flow = GLMFlowModel(
             encoder=BlockConformerEncoder(),
             length_regulator=InterpolateRegulator(),
-            decoder=ConditionalCFM(
-                estimator=ConditionalDecoder()
-            ),
+            decoder=ConditionalCFM(estimator=ConditionalDecoder()),
         )
         self.flow.load_state_dict(torch.load(flow_path, map_location=self.device))
         # self.hift = GLMHiFTModel(self.scratch_configs['hift'])
-        self.hift = GLMHiFTModel(
-            f0_predictor=ConvRNNF0Predictor()
-        )
+        self.hift = GLMHiFTModel(f0_predictor=ConvRNNF0Predictor())
         self.hift.load_state_dict(torch.load(hift_path, map_location=self.device))
 
     def forward(
@@ -2667,7 +2605,7 @@ class GLMAudioDecoder(nn.Module):
         token_len: torch.Tensor,
     ):
         mel = self.flow.inference(
-            token=audio_ids, 
+            token=audio_ids,
             token_len=token_len,
             embedding=torch.zeros(audio_ids.shape[0], 192, device=self.device),
         )

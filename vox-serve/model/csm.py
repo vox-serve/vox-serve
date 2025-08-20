@@ -1,20 +1,18 @@
-from typing import Any, List, Optional, Tuple, Dict
-import torch
+from typing import Any, List, Tuple
 
 import flashinfer
 import torch
-from torch import nn
-import torchaudio 
-from transformers.activations import ACT2FN
-from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
-from transformers import AutoTokenizer, LlamaConfig, CsmConfig, CsmDepthDecoderConfig, CsmPreTrainedModel
+import torchaudio
 from tokenizers.processors import TemplateProcessing
+from torch import nn
+from transformers import AutoTokenizer, CsmConfig, CsmDepthDecoderConfig, CsmPreTrainedModel, LlamaConfig
+from transformers.activations import ACT2FN
 
 from ..flashinfer_utils import FlashInferWrapper
-from ..sampling import SamplingConfig, Sampler
 from ..requests import Request
-from .base import BaseLMWithDepth, PreprocessOutput
+from ..sampling import Sampler, SamplingConfig
 from ..utils import get_logger
+from .base import BaseLMWithDepth, PreprocessOutput
 
 
 class CsmRMSNorm(nn.Module):
@@ -65,7 +63,7 @@ class CsmAttention(nn.Module):
         self.is_causal = True
 
         self.rope_scale = config.rope_scaling.get("factor", 32.0)
-        self.rope_theta = config.rope_theta 
+        self.rope_theta = config.rope_theta
         self.low_freq_factor = config.rope_scaling.get("low_freq_factor", 1.0)
         self.high_freq_factor = config.rope_scaling.get("high_freq_factor", 4.0)
         self.old_context_len = config.rope_scaling.get("original_max_position_embeddings", 8192)
@@ -87,21 +85,22 @@ class CsmAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
         position_ids: torch.LongTensor,
-        attn_wrapper: FlashInferWrapper, 
+        attn_wrapper: FlashInferWrapper,
         kv_cache: torch.Tensor,
     ):
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
 
-        query_states = self.q_proj(hidden_states).view(hidden_shape) #.transpose(0, 1)
-        key_states = self.k_proj(hidden_states).view(hidden_shape) #.transpose(0, 1)
-        value_states = self.v_proj(hidden_states).view(hidden_shape) #.transpose(0, 1)
+        query_states = self.q_proj(hidden_states).view(hidden_shape)  # .transpose(0, 1)
+        key_states = self.k_proj(hidden_states).view(hidden_shape)  # .transpose(0, 1)
+        value_states = self.v_proj(hidden_states).view(hidden_shape)  # .transpose(0, 1)
 
         query_states, key_states = flashinfer.rope.apply_llama31_rope_pos_ids(
-            query_states, key_states, 
-            pos_ids=position_ids, 
-            rope_scale=self.rope_scale, 
-            rope_theta=self.rope_theta, 
+            query_states,
+            key_states,
+            pos_ids=position_ids,
+            rope_scale=self.rope_scale,
+            rope_theta=self.rope_theta,
             low_freq_factor=self.low_freq_factor,
             high_freq_factor=self.high_freq_factor,
             old_context_len=self.old_context_len,
@@ -130,7 +129,7 @@ class CsmDecoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         position_ids: torch.LongTensor,
-        attn_wrapper: FlashInferWrapper, 
+        attn_wrapper: FlashInferWrapper,
         kv_cache: torch.Tensor,
     ):
         residual = hidden_states
@@ -166,7 +165,7 @@ class CsmBackboneModelEmbeddings(nn.Module):
     def forward(self, input_ids):
         input_embeds = self.embed_audio_tokens(input_ids + self.audio_tokens_offsets)
         return input_embeds
-    
+
 
 class CsmBackboneModel(nn.Module):
     def __init__(self, config: LlamaConfig):
@@ -176,15 +175,14 @@ class CsmBackboneModel(nn.Module):
             [CsmDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
         )
         self.norm = CsmRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-    
+
     def forward(
         self,
         inputs_embeds: torch.Tensor,
         position_ids: torch.LongTensor,
-        attn_wrapper: FlashInferWrapper, 
+        attn_wrapper: FlashInferWrapper,
         kv_cache: torch.Tensor,
     ):
-        
         hidden_states = inputs_embeds
 
         for i, decoder_layer in enumerate(self.layers):
@@ -210,12 +208,12 @@ class CsmDepthDecoderModel(nn.Module):
         )
         self.norm = CsmRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.inputs_embeds_projector = nn.Linear(config.backbone_hidden_size, config.hidden_size, bias=False)
-        
+
     def forward(
         self,
         inputs_embeds: torch.Tensor,
         position_ids: torch.LongTensor,
-        attn_wrapper: FlashInferWrapper, 
+        attn_wrapper: FlashInferWrapper,
         kv_cache: torch.Tensor,
     ):
         hidden_states = self.inputs_embeds_projector(inputs_embeds)
@@ -262,12 +260,12 @@ class CsmDepthDecoderForCausalLM(nn.Module):
         self.model = CsmDepthDecoderModel(config)
         self.vocab_size = config.vocab_size
         self.codebooks_head = CsmCodebooksHead(config.hidden_size, config.num_codebooks, config.vocab_size)
-    
+
     def forward(
         self,
         inputs_embeds: torch.Tensor,
         position_ids: torch.LongTensor,
-        attn_wrapper: FlashInferWrapper, 
+        attn_wrapper: FlashInferWrapper,
         kv_cache: torch.Tensor,
     ):
         return self.model(inputs_embeds, position_ids, attn_wrapper, kv_cache)
@@ -283,15 +281,16 @@ class CsmForConditionalGeneration(CsmPreTrainedModel):
         self.embed_text_tokens = nn.Embedding(config.text_vocab_size, config.hidden_size)
         self.backbone_model = CsmBackboneModel(config=config)
         self.depth_decoder = CsmDepthDecoderForCausalLM(config=config.depth_decoder_config)
-        
+
         from transformers import AutoModel
+
         self.codec_model = AutoModel.from_config(config.codec_config)
-    
+
     def forward_backbone(
         self,
         inputs_embeds: torch.Tensor,
         position_ids: torch.LongTensor,
-        attn_wrapper: FlashInferWrapper, 
+        attn_wrapper: FlashInferWrapper,
         kv_cache: torch.Tensor,
     ):
         outputs = self.backbone_model(inputs_embeds, position_ids, attn_wrapper, kv_cache)
@@ -303,14 +302,14 @@ class CsmForConditionalGeneration(CsmPreTrainedModel):
         self,
         inputs_embeds: torch.Tensor,
         position_ids: torch.LongTensor,
-        attn_wrapper: FlashInferWrapper, 
+        attn_wrapper: FlashInferWrapper,
         kv_cache: torch.Tensor,
     ):
         outputs = self.depth_decoder(inputs_embeds, position_ids, attn_wrapper, kv_cache)
 
         logits = self.depth_decoder.codebooks_head(outputs, cache_position=position_ids)
         return logits
-        
+
 
 class CSMModel(BaseLMWithDepth):
     def __init__(self, model_name, dtype=torch.bfloat16, device="cuda:0", tokenizer_path="meta-llama/Llama-3.2-1B"):
@@ -320,18 +319,19 @@ class CSMModel(BaseLMWithDepth):
         self.logger = get_logger(__name__)
         self.model = CsmForConditionalGeneration.from_pretrained(model_name)
         self.model.to(dtype).to(device)
-        
+
         # Use provided tokenizer path or default to model_name
         self.text_tokenizer = self._load_tokenizer(tokenizer_path)
 
+        import moshi
         from huggingface_hub import hf_hub_download
-        import moshi 
+
         # TODO: drop moshi dependency
-        mimi_weight = hf_hub_download('kyutai/moshiko-pytorch-bf16', 'tokenizer-e351c8d8-checkpoint125.safetensors')
+        mimi_weight = hf_hub_download("kyutai/moshiko-pytorch-bf16", "tokenizer-e351c8d8-checkpoint125.safetensors")
         self.audio_tokenizer = moshi.models.loaders.get_mimi(mimi_weight, device=device)
         self.audio_tokenizer.set_num_codebooks(32)
 
-        self._num_attention_heads = self.model.config.num_attention_heads 
+        self._num_attention_heads = self.model.config.num_attention_heads
         self._num_key_value_heads = self.model.config.num_key_value_heads
         self._num_hidden_layers = self.model.config.num_hidden_layers
         self._hidden_size = self.model.config.hidden_size
@@ -344,12 +344,12 @@ class CSMModel(BaseLMWithDepth):
         self.stop_token_id = 0
 
         self.default_sampling_config = SamplingConfig(
-            top_k=50, 
+            top_k=50,
             top_p=None,
             min_p=None,
             temperature=0.9,
             repetition_penalty=None,
-            repetition_window=None, 
+            repetition_window=None,
             cfg_scale=None,
         )
 
@@ -359,27 +359,27 @@ class CSMModel(BaseLMWithDepth):
     def n_codebooks(self) -> int:
         """Number of codebooks in the model."""
         return self.model.config.depth_decoder_config.num_codebooks + 1
-    
+
     @property
     def depth_n_codebooks(self) -> int:
         """Number of codebooks in the depth transformer."""
         return self.model.config.depth_decoder_config.num_codebooks
-    
+
     @property
     def num_attention_heads(self) -> int:
         """Number of attention heads in the model."""
         return self._num_attention_heads
-    
+
     @property
     def num_key_value_heads(self) -> int:
         """Number of key-value heads in the model."""
         return self._num_key_value_heads
-    
+
     @property
     def num_hidden_layers(self) -> int:
         """Number of hidden layers in the model."""
         return self._num_hidden_layers
-    
+
     @property
     def hidden_size(self) -> int:
         """Hidden size of the model."""
@@ -389,12 +389,12 @@ class CSMModel(BaseLMWithDepth):
     def depth_num_attention_heads(self) -> int:
         """Number of attention heads in the model."""
         return self._depth_num_attention_heads
-    
+
     @property
     def depth_num_key_value_heads(self) -> int:
         """Number of key-value heads in the model."""
         return self._depth_num_key_value_heads
-    
+
     @property
     def depth_num_hidden_layers(self) -> int:
         """Number of hidden layers in the model."""
@@ -404,17 +404,17 @@ class CSMModel(BaseLMWithDepth):
     def depth_hidden_size(self) -> int:
         """Hidden size of the model."""
         return self._depth_hidden_size
-    
+
     @property
     def needs_watermarking(self) -> bool:
         """Indicates if the model requires watermarking."""
         return True
-    
+
     @property
     def embed_text_tokens(self):
         """Embedding layer for text tokens."""
         return self.model.embed_text_tokens
-    
+
     @property
     def embed_audio_tokens_all(self):
         """Embedding layer for audio tokens, all codebooks at a time."""
@@ -436,7 +436,7 @@ class CSMModel(BaseLMWithDepth):
         )
 
         return tokenizer
-    
+
     def _tokenize_text_segment(self, text: str, speaker: int) -> Tuple[torch.Tensor, torch.Tensor]:
         frame_tokens = []
         frame_masks = []
@@ -474,20 +474,17 @@ class CSMModel(BaseLMWithDepth):
         frame_masks.append(audio_frame_mask)
 
         return torch.cat(frame_tokens, dim=0), torch.cat(frame_masks, dim=0)
-    
+
     def _set_default_context(self):
         # Example from https://github.com/SesameAILabs/csm/blob/main/run_csm.py
         # Default prompts are available at https://hf.co/sesame/csm-1b
         from huggingface_hub import hf_hub_download
-        import torchaudio
 
         prompt_filepath_conversational_a = hf_hub_download(
-            repo_id="sesame/csm-1b",
-            filename="prompts/conversational_a.wav"
+            repo_id="sesame/csm-1b", filename="prompts/conversational_a.wav"
         )
         prompt_filepath_conversational_b = hf_hub_download(
-            repo_id="sesame/csm-1b",
-            filename="prompts/conversational_b.wav"
+            repo_id="sesame/csm-1b", filename="prompts/conversational_b.wav"
         )
 
         def load_prompt_audio(audio_path: str, target_sample_rate: int) -> torch.Tensor:
@@ -509,7 +506,7 @@ class CSMModel(BaseLMWithDepth):
                     "but like yeah I'm trying to like yeah I noticed this yesterday that like Mondays I "
                     "sort of start the day with this not like a panic but like a"
                 ),
-                "audio": load_prompt_audio(prompt_filepath_conversational_a, self.audio_tokenizer.sample_rate)
+                "audio": load_prompt_audio(prompt_filepath_conversational_a, self.audio_tokenizer.sample_rate),
             },
             "conversational_b": {
                 "text": (
@@ -520,13 +517,15 @@ class CSMModel(BaseLMWithDepth):
                     "come out. So like everyone, when they come into the park, they get like this little "
                     "bracelet and then you can go punching question blocks around."
                 ),
-                "audio": load_prompt_audio(prompt_filepath_conversational_b, self.audio_tokenizer.sample_rate)
-            }
+                "audio": load_prompt_audio(prompt_filepath_conversational_b, self.audio_tokenizer.sample_rate),
+            },
         }
 
         tokens, tokens_mask = [], []
         for speaker, prompt in SPEAKER_PROMPTS.items():
-            text_tokens, text_mask = self._tokenize_text_segment(prompt["text"], speaker=0 if speaker == "conversational_a" else 1)
+            text_tokens, text_mask = self._tokenize_text_segment(
+                prompt["text"], speaker=0 if speaker == "conversational_a" else 1
+            )
             audio_tokens, audio_mask = self._tokenize_audio(prompt["audio"])
             tokens.append(torch.cat([text_tokens, audio_tokens], dim=0))
             tokens_mask.append(torch.cat([text_mask, audio_mask], dim=0))
@@ -535,7 +534,7 @@ class CSMModel(BaseLMWithDepth):
             "tokens": tokens,
             "tokens_mask": tokens_mask,
         }
-    
+
     @property
     def detokenize_interval(self) -> int:
         """Interval at which to detokenize outputs."""
@@ -545,17 +544,17 @@ class CSMModel(BaseLMWithDepth):
     def detokenize_overlap(self) -> int:
         """Overlap size for detokenization."""
         return 0
-    
+
     @property
     def n_channels(self) -> int:
         """Number of audio channels in the output."""
         return 1  # Mono audio
-    
+
     @property
     def output_audio_length(self) -> int:
         """Output audio length (in samples) at each postprocess call."""
         return 1920  # 24000 / 12.5
-    
+
     @property
     def max_tokens(self) -> int:
         """
@@ -567,38 +566,35 @@ class CSMModel(BaseLMWithDepth):
     def vocab_size(self) -> int:
         """Vocabulary size of the model."""
         return self.model.config.vocab_size
-    
+
     def is_stop_id(self, token_ids: List[int]) -> int:
         # index -2 since we want to check the final audio codebook before text stream
         return token_ids[-2] == self.stop_token_id
-    
+
     def preprocess(self, prompt: str = None, audio_path: str = None, speaker=0, context=None) -> PreprocessOutput:
         """Prepare the prompt for the model, formatting it according to CSM specifications."""
         # TODO: add reference context to API argument
-        assert audio_path is None 
+        assert audio_path is None
         prompt_tokens, prompt_tokens_mask = self._tokenize_text_segment(prompt, speaker)
         if context is None:
             prompt_tokens = torch.cat(self.default_context["tokens"] + [prompt_tokens], dim=0)
             prompt_tokens_mask = torch.cat(self.default_context["tokens_mask"] + [prompt_tokens_mask], dim=0)
-        
-        return PreprocessOutput(
-            input_tokens=prompt_tokens.tolist(),
-            input_masks=prompt_tokens_mask
-        )
-    
+
+        return PreprocessOutput(input_tokens=prompt_tokens.tolist(), input_masks=prompt_tokens_mask)
+
     def forward(
-        self, 
-        input_ids: torch.Tensor, 
-        position_ids: torch.Tensor, 
-        attn_wrapper: FlashInferWrapper, 
-        kv_cache: torch.Tensor, 
+        self,
+        input_ids: torch.Tensor,
+        position_ids: torch.Tensor,
+        attn_wrapper: FlashInferWrapper,
+        kv_cache: torch.Tensor,
         input_masks: torch.Tensor,
         **kwargs: Any,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Forward pass through the backbone model."""
         text_embeds = self.embed_text_tokens(input_ids[:, -1:])
         audio_embeds = self.embed_audio_tokens_all(input_ids[:, :-1])
-        inputs_embeds = torch.cat([audio_embeds, text_embeds], dim=1) # [bs, 33, 2048]
+        inputs_embeds = torch.cat([audio_embeds, text_embeds], dim=1)  # [bs, 33, 2048]
 
         # input_masks = torch.cat(input_masks, dim=0)  # [bs, 33]
         inputs_embeds = inputs_embeds * input_masks[:, :, None]
@@ -610,18 +606,18 @@ class CSMModel(BaseLMWithDepth):
             attn_wrapper=attn_wrapper,
             kv_cache=kv_cache,
         )
-        
-        # select last token for each request for prefill 
+
+        # select last token for each request for prefill
         if getattr(attn_wrapper, "qo_indptr", None) is not None:
             backbone_logits = backbone_logits[attn_wrapper.qo_indptr[:-1] - 1]
             backbone_last_hidden = backbone_last_hidden[attn_wrapper.qo_indptr[:-1] - 1]
-        
+
         # add codebook dimension
         return backbone_logits[:, None, :], backbone_last_hidden
-    
+
     def sampling(
-        self, 
-        logits: torch.Tensor, 
+        self,
+        logits: torch.Tensor,
         hidden_states: torch.Tensor,
         requests: List[Request],
         sampling_params: SamplingConfig | None = None,
@@ -629,8 +625,8 @@ class CSMModel(BaseLMWithDepth):
         **kwargs: Any,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Sample the first audio codebook from the backbone transoformer logits. 
-        The initial input for the depth transformer is concatenation of last hidden state and embedding for codebook 0, 
+        Sample the first audio codebook from the backbone transoformer logits.
+        The initial input for the depth transformer is concatenation of last hidden state and embedding for codebook 0,
         which essentially is the prefill with sequence length of 2.
         """
         if sampling_params is None:
@@ -643,11 +639,13 @@ class CSMModel(BaseLMWithDepth):
         output_ids = torch.zeros(logits.shape[0], self.n_codebooks, dtype=torch.long, device=self.device)
         for i in range(logits.shape[1]):
             output_ids[:, i] = Sampler.run_sampling(logits[:, i], config=sampling_params)
-        
+
         c0_embed = self.embed_audio_tokens_single(output_ids[:, 0], 0)
         # backbone_ids.shape=torch.Size([1])
         # print(f"{backbone_last_hidden.shape=}, {c0_embed.shape=}") # [bs, 2048], [bs, 2048]
-        hidden_for_depth = torch.cat([hidden_states[:, None, :], c0_embed[:, None, :]], dim=1).view(-1, c0_embed.shape[-1]) 
+        hidden_for_depth = torch.cat([hidden_states[:, None, :], c0_embed[:, None, :]], dim=1).view(
+            -1, c0_embed.shape[-1]
+        )
 
         for i, req in enumerate(requests):
             req.input_masks = torch.ones(self.n_codebooks, dtype=torch.bool, device=self.device)[None, :]
@@ -658,16 +656,15 @@ class CSMModel(BaseLMWithDepth):
             req.lm_output_audio_tokens.append(output_ids[i].tolist())
 
         return output_ids, hidden_for_depth
-    
+
     def depth_forward(
-        self, 
+        self,
         hidden_states: torch.Tensor,
-        position_ids: torch.Tensor, 
-        attn_wrapper: FlashInferWrapper, 
+        position_ids: torch.Tensor,
+        attn_wrapper: FlashInferWrapper,
         kv_cache: torch.Tensor,
         **kwargs,
     ) -> torch.Tensor:
-
         depth_logits = self.model.forward_depth(
             inputs_embeds=hidden_states,
             position_ids=position_ids,
@@ -676,15 +673,15 @@ class CSMModel(BaseLMWithDepth):
         )
 
         # We don't do this here since prefill is also captured in cuda graph
-        # for depth transformer 
+        # for depth transformer
         # if getattr(attn_wrapper, "qo_indptr", None) is not None:
         #     depth_logits = depth_logits[attn_wrapper.qo_indptr[:-1] - 1]
 
         return depth_logits
-    
+
     def depth_sampling(
-        self, 
-        logits: torch.Tensor, 
+        self,
+        logits: torch.Tensor,
         i_iteration: int,
         requests: List[Request],
         sampling_params: SamplingConfig | None = None,
@@ -693,7 +690,7 @@ class CSMModel(BaseLMWithDepth):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         if sampling_params is None:
             sampling_params = self.default_sampling_config
-        
+
         output_ids = Sampler.run_sampling(logits, config=sampling_params)
         ci_embed = self.embed_audio_tokens_single(output_ids, i_iteration)
 
@@ -704,15 +701,15 @@ class CSMModel(BaseLMWithDepth):
         return output_ids, ci_embed
 
     def postprocess(self, token_ids: torch.Tensor) -> torch.Tensor:
-        # token_ids: (batch_size, interval, 33) 
+        # token_ids: (batch_size, interval, 33)
         # there are 33 codebooks including text
-        tokens_to_process = token_ids[:, :, :-1].transpose(1, 2) # (batch_size, 32, interval)
-        
+        tokens_to_process = token_ids[:, :, :-1].transpose(1, 2)  # (batch_size, 32, interval)
+
         # mimi decoder
         # TODO: caching for mimi
         audio_tensor = self.audio_tokenizer.decode(tokens_to_process)
         # audio_tensor: (batch_size, 1, N)
-        
+
         return audio_tensor
 
 

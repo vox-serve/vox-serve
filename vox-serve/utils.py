@@ -1,12 +1,12 @@
 import json
 import logging
 import os
-import requests
 import sys
-from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 from typing import Dict, List, Optional
 
+import requests
 import torch
 from huggingface_hub import snapshot_download
 from safetensors.torch import load_file as safe_load
@@ -67,7 +67,7 @@ def load_hf_safetensor_state_dict(
         state_dict: Dict[str, torch.Tensor] = {}
 
         if len(shard_to_params) == 1:
-            (shard_file, param_names), = shard_to_params.items()
+            ((shard_file, param_names),) = shard_to_params.items()
             return _load_one(shard_file, param_names)
 
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
@@ -81,8 +81,7 @@ def load_hf_safetensor_state_dict(
                 dup = set(part).intersection(state_dict)
                 if dup:
                     raise RuntimeError(
-                        f"Duplicate parameters across shards (e.g., {sorted(list(dup))[:5]}) "
-                        f"while merging {shard_file}"
+                        f"Duplicate parameters across shards (e.g., {sorted(list(dup))[:5]}) while merging {shard_file}"
                     )
                 state_dict.update(part)
 
@@ -92,25 +91,14 @@ def load_hf_safetensor_state_dict(
         # ---- Single-file case ----
         safetensor_files = sorted(repo.glob("*.safetensors"))
         if not safetensor_files:
-            raise FileNotFoundError(
-                "No .safetensors or .safetensors.index.json files found in repo."
-            )
+            raise FileNotFoundError("No .safetensors or .safetensors.index.json files found in repo.")
         if len(safetensor_files) > 1:
-            raise RuntimeError(
-                "Multiple .safetensors files found but no index.json — can't determine mapping."
-            )
+            raise RuntimeError("Multiple .safetensors files found but no index.json — can't determine mapping.")
         # Load the single safetensors file
         return safe_load(str(safetensor_files[0]))
 
 
-
-def download_github_file(
-    owner: str,
-    repo: str,
-    path: str,
-    branch: str = "main",
-    cache_dir: str = None
-) -> Path:
+def download_github_file(owner: str, repo: str, path: str, branch: str = "main", cache_dir: str = None) -> Path:
     """
     Download a file from a GitHub repo, caching it locally.
 
@@ -140,31 +128,28 @@ def download_github_file(
 def setup_logger(name: str, level: str = "INFO") -> logging.Logger:
     """
     Set up a centralized logger with consistent formatting.
-    
+
     Args:
         name: Logger name (usually __name__)
         level: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
-    
+
     Returns:
         Configured logger instance
     """
     logger = logging.getLogger(name)
-    
+
     if logger.handlers:
         return logger
-    
+
     logger.setLevel(getattr(logging, level.upper()))
-    
+
     handler = logging.StreamHandler(sys.stdout)
-    formatter = logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
+    formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
     handler.setFormatter(formatter)
-    
+
     logger.addHandler(handler)
     logger.propagate = False
-    
+
     return logger
 
 

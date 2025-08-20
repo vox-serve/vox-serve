@@ -22,3 +22,18 @@ dependencies = [
     "uvicorn==0.35.0",
     "zmq==0.0.0",
 ]
+
+[tool.ruff]
+exclude = [".git", ".ruff_cache", ".venv"] 
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+fixable = ["ALL"]
+unfixable = []
+select = ["F", "E", "W", "I", "B", "PL", "N"] 
+
+[tool.ruff.format]
+quote-style = "double"
+line-ending = "auto"
+docstring-code-format = true

@@ -2,10 +2,11 @@ import math
 from functools import cache
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 import torchaudio
 from huggingface_hub import hf_hub_download
+from torch import nn
+
 from ..utils import get_logger
 
 logger = get_logger(__name__)
