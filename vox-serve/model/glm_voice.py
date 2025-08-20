@@ -1,22 +1,23 @@
-from typing import List, Dict, Any
 import json
 from dataclasses import dataclass, field
-# from hyperpyyaml import load_hyperpyyaml
+from typing import Any, Dict, List
 
+# from hyperpyyaml import load_hyperpyyaml
 import flashinfer
 import torch
+import torchaudio
+from huggingface_hub import hf_hub_download
 from torch import nn
 from torch.nn import functional as F
-import torchaudio 
-from huggingface_hub import hf_hub_download
 
 from ..flashinfer_utils import FlashInferWrapper
-from ..sampling import SamplingConfig, Sampler
 from ..requests import Request
-from ..utils import load_hf_safetensor_state_dict
-from ..tokenizer.glm_encoder import GLMVoiceEncoder
+from ..sampling import Sampler, SamplingConfig
 from ..tokenizer.glm_decoder import GLMAudioDecoder
+from ..tokenizer.glm_encoder import GLMVoiceEncoder
+from ..utils import get_logger, load_hf_safetensor_state_dict
 from .base import BaseLM, PreprocessOutput
+
 
 @dataclass
 class GLMVoiceConfig:
@@ -54,7 +55,7 @@ class GLMVoiceConfig:
     vocab_size: int = 168960
 
     @classmethod
-    def from_dict(cls, config_dict: Dict[str, Any]) -> 'GLMVoiceConfig':
+    def from_dict(cls, config_dict: Dict[str, Any]) -> "GLMVoiceConfig":
         # Get field names from the dataclass
         field_names = {field.name for field in cls.__dataclass_fields__.values()}
         # Filter config_dict to only include known fields
@@ -95,7 +96,7 @@ class GLMVoiceMLP(nn.Module):
     def swiglu(self, x):
         x = torch.chunk(x, 2, dim=-1)
         return F.silu(x[0]) * x[1]
-    
+
     def forward(self, x):
         output = self.dense_4h_to_h(self.act_fn(self.dense_h_to_4h(x)))
         return output
@@ -114,15 +115,17 @@ class GLMVoiceAttention(nn.Module):
         self.num_q_heads = config.num_attention_heads
         self.num_kv_heads = config.multi_query_group_num
         self.qkv_hidden_size = config.hidden_size + 2 * self.head_dim * config.multi_query_group_num
-        
-        self.query_key_value = nn.Linear(config.hidden_size, self.qkv_hidden_size, bias=config.add_bias_linear or config.add_qkv_bias)
+
+        self.query_key_value = nn.Linear(
+            config.hidden_size, self.qkv_hidden_size, bias=config.add_bias_linear or config.add_qkv_bias
+        )
         self.dense = nn.Linear(config.hidden_size, config.hidden_size, bias=config.add_bias_linear)
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         position_ids: torch.LongTensor,
-        attn_wrapper: FlashInferWrapper, 
+        attn_wrapper: FlashInferWrapper,
         kv_cache: torch.Tensor,
     ):
         input_shape = hidden_states.shape[:-1]
@@ -139,17 +142,18 @@ class GLMVoiceAttention(nn.Module):
             dim=-1,
         )
 
-        query_states = query_layer.view(hidden_shape) #.transpose(0, 1)
-        key_states = key_layer.view(hidden_shape) #.transpose(0, 1)
-        value_states = value_layer.view(hidden_shape) #.transpose(0, 1)
+        query_states = query_layer.view(hidden_shape)  # .transpose(0, 1)
+        key_states = key_layer.view(hidden_shape)  # .transpose(0, 1)
+        value_states = value_layer.view(hidden_shape)  # .transpose(0, 1)
 
         query_states, key_states = flashinfer.rope.apply_rope_pos_ids(
-            query_states, key_states, 
-            pos_ids=position_ids, 
+            query_states,
+            key_states,
+            pos_ids=position_ids,
             rotary_dim=self.head_dim // 2,
             interleave=True,
-            rope_scale=self.rope_scale, 
-            rope_theta=self.rope_theta, 
+            rope_scale=self.rope_scale,
+            rope_theta=self.rope_theta,
         )
 
         attn_wrapper.set_kv_cache(kv_cache, key_states, value_states)
@@ -175,7 +179,7 @@ class GLMVoiceDecoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         position_ids: torch.LongTensor,
-        attn_wrapper: FlashInferWrapper, 
+        attn_wrapper: FlashInferWrapper,
         kv_cache: torch.Tensor,
     ):
         residual = hidden_states
@@ -199,6 +203,7 @@ class GLMVoiceDecoderLayer(nn.Module):
 
         return hidden_states
 
+
 class GLMVoiceTransformer(nn.Module):
     def __init__(self, config: GLMVoiceConfig):
         super().__init__()
@@ -206,19 +211,16 @@ class GLMVoiceTransformer(nn.Module):
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
-        self.layers = nn.ModuleList(
-            [GLMVoiceDecoderLayer(config, layer_idx) for layer_idx in range(config.num_layers)]
-        )
+        self.layers = nn.ModuleList([GLMVoiceDecoderLayer(config, layer_idx) for layer_idx in range(config.num_layers)])
         self.final_layernorm = GLMVoiceRMSNorm(config.hidden_size, eps=config.layernorm_epsilon)
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         position_ids: torch.LongTensor,
-        attn_wrapper: FlashInferWrapper, 
+        attn_wrapper: FlashInferWrapper,
         kv_cache: torch.Tensor,
     ):
-
         for i, decoder_layer in enumerate(self.layers):
             hidden_states = decoder_layer(
                 hidden_states=hidden_states,
@@ -260,10 +262,9 @@ class GLMVoiceBackboneModel(nn.Module):
         self,
         inputs_embeds: torch.Tensor,
         position_ids: torch.LongTensor,
-        attn_wrapper: FlashInferWrapper, 
+        attn_wrapper: FlashInferWrapper,
         kv_cache: torch.Tensor,
     ):
-        
         hidden_states = inputs_embeds
 
         hidden_states = self.encoder(
@@ -291,7 +292,7 @@ class GLMVoiceForCausalLM(nn.Module):
         self,
         inputs_embeds: torch.Tensor,
         position_ids: torch.LongTensor,
-        attn_wrapper: FlashInferWrapper, 
+        attn_wrapper: FlashInferWrapper,
         kv_cache: torch.Tensor,
     ):
         logits = self.transformer(
@@ -309,6 +310,7 @@ class GLMVoiceModel(BaseLM):
         if model_name == "glm":
             model_name = "zai-org/glm-4-voice-9b"
         super().__init__(model_name, device, dtype)
+        self.logger = get_logger(__name__)
         config_path = hf_hub_download(repo_id=model_name, filename="config.json", revision=None)
         self.config = GLMVoiceConfig.from_dict(json.load(open(config_path)))
 
@@ -341,7 +343,7 @@ class GLMVoiceModel(BaseLM):
         )
         self.audio_decoder.to(device)
 
-        self._num_attention_heads = self.config.num_attention_heads 
+        self._num_attention_heads = self.config.num_attention_heads
         self._num_key_value_heads = self.config.multi_query_group_num
         self._num_hidden_layers = self.config.num_layers
         self._hidden_size = self.config.hidden_size
@@ -351,19 +353,19 @@ class GLMVoiceModel(BaseLM):
         self.audio_offset = self.text_tokenizer.convert_tokens_to_ids("<|audio_0|>")
 
         self.default_sampling_config = SamplingConfig(
-            top_k=None, 
+            top_k=None,
             top_p=0.8,
             min_p=None,
             temperature=0.8,
             repetition_penalty=None,
-            repetition_window=None, 
+            repetition_window=None,
             cfg_scale=None,
         )
 
         # for cuda graph compatibility
         self.detokenize_token_len = torch.tensor([self.detokenize_interval], dtype=torch.int32, device=self.device)
 
-    @property 
+    @property
     def n_codebooks(self):
         """Number of codebooks in the model."""
         return 1
@@ -372,22 +374,22 @@ class GLMVoiceModel(BaseLM):
     def num_attention_heads(self) -> int:
         """Number of attention heads in the model."""
         return self._num_attention_heads
-    
+
     @property
     def num_key_value_heads(self) -> int:
         """Number of key-value heads in the model."""
         return self._num_key_value_heads
-    
+
     @property
     def num_hidden_layers(self) -> int:
         """Number of hidden layers in the model."""
         return self._num_hidden_layers
-    
+
     @property
     def hidden_size(self) -> int:
         """Hidden size of the model."""
         return self._hidden_size
-    
+
     @property
     def supports_audio_input(self) -> bool:
         """Indicates if the model accepts audio input."""
@@ -397,22 +399,22 @@ class GLMVoiceModel(BaseLM):
     def detokenize_interval(self) -> int:
         """Interval at which to detokenize outputs."""
         return 25
-    
+
     @property
     def detokenize_overlap(self) -> int:
         """Overlap size for detokenization."""
         return 0
-    
+
     @property
     def n_channels(self) -> int:
         """Number of audio channels in the output."""
         return 1  # Mono audio
-    
+
     @property
     def output_audio_length(self) -> int:
         """Output audio length (in samples) at each postprocess call."""
         return 44032
-    
+
     @property
     def max_tokens(self) -> int:
         """
@@ -431,19 +433,20 @@ class GLMVoiceModel(BaseLM):
     def _load_tokenizer(self, tokenizer_path):
         """Load tokenizer from local path or HuggingFace hub"""
         from transformers import AutoTokenizer
+
         return AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
-    
+
     def _extract_speech_token(self, audio_path: str) -> List[List[int]]:
         """Extract speech tokens from audio file."""
         audio, sr = torchaudio.load(audio_path)
         if sr != 16000:
             # audio = torchaudio.transforms.Resample(orig_freq=sr, new_freq=16000)[0]
             audio = torchaudio.functional.resample(audio, orig_freq=sr, new_freq=16000)
-        
-        output_tokens = [] 
-        time_step = 0 
+
+        output_tokens = []
+        time_step = 0
         while time_step * 16000 < audio.shape[0]:
-            audio_segment = audio[0, time_step * 16000: (time_step + 30) * 16000]
+            audio_segment = audio[0, time_step * 16000 : (time_step + 30) * 16000]
             tokens = self.audio_encoder.encode(audio_segment)
 
             output_tokens.extend(tokens.tolist())
@@ -451,26 +454,32 @@ class GLMVoiceModel(BaseLM):
             time_step += 30
 
         return output_tokens
-    
+
     def _format_prompt(self, input_mode: str, prompt: str | None, audio_path: str | None) -> str:
         if input_mode == "audio":
             audio_tokens = self._extract_speech_token(audio_path)[0]
             audio_tokens = "".join([f"<|audio_{x}|>" for x in audio_tokens])
             audio_tokens = "<|begin_of_audio|>" + audio_tokens + "<|end_of_audio|>"
             user_input = audio_tokens
-            system_prompt = "User will provide you with a speech instruction. Do it step by step. First, think about the instruction and respond in a interleaved manner, with 13 text token followed by 26 audio tokens. "
+            system_prompt = (
+                "User will provide you with a speech instruction. Do it step by step. First, think about the "
+                "instruction and respond in a interleaved manner, with 13 text token followed by 26 audio tokens. "
+            )
         else:
             user_input = prompt
-            system_prompt = "User will provide you with a text instruction. Do it step by step. First, think about the instruction and respond in a interleaved manner, with 13 text token followed by 26 audio tokens."
-        
+            system_prompt = (
+                "User will provide you with a text instruction. Do it step by step. First, think about the "
+                "instruction and respond in a interleaved manner, with 13 text token followed by 26 audio tokens."
+            )
+
         text_input = f"<|system|>\n{system_prompt}"
         text_input += f"<|user|>\n{user_input}<|assistant|>streaming_transcription\n"
 
         return text_input
-    
+
     def preprocess(
-        self, 
-        prompt: str | None = None, 
+        self,
+        prompt: str | None = None,
         audio_path: str | None = None,
     ) -> PreprocessOutput:
         """Prepare the prompt for the model, formatting it according to GLMVoice specifications."""
@@ -480,15 +489,15 @@ class GLMVoiceModel(BaseLM):
             audio_path=audio_path,
         )
         input_ids = self.text_tokenizer(text_input, return_tensors="pt").input_ids
-        input_ids = input_ids.view(-1, 1) # add codebook dimension
-        
+        input_ids = input_ids.view(-1, 1)  # add codebook dimension
+
         return PreprocessOutput(input_tokens=input_ids.tolist())
-    
+
     def forward(
-        self, 
-        input_ids: torch.Tensor, 
-        position_ids: torch.Tensor, 
-        attn_wrapper: FlashInferWrapper, 
+        self,
+        input_ids: torch.Tensor,
+        position_ids: torch.Tensor,
+        attn_wrapper: FlashInferWrapper,
         kv_cache: torch.Tensor,
         **kwargs: Any,
     ) -> torch.Tensor:
@@ -502,15 +511,15 @@ class GLMVoiceModel(BaseLM):
             attn_wrapper=attn_wrapper,
             kv_cache=kv_cache,
         )
-        
+
         if getattr(attn_wrapper, "qo_indptr", None) is not None:
             logits = logits[attn_wrapper.qo_indptr[:-1] - 1]
-        
-        return logits[:, None, :] # add codebook dimension
+
+        return logits[:, None, :]  # add codebook dimension
 
     def sampling(
-        self, 
-        logits: torch.Tensor, 
+        self,
+        logits: torch.Tensor,
         requests: List[Request],
         sampling_params: SamplingConfig | None = None,
         cfg_scale: float | None = None,
@@ -522,7 +531,7 @@ class GLMVoiceModel(BaseLM):
         output_ids = torch.zeros(logits.shape[0], logits.shape[1], dtype=torch.long, device=self.device)
         for i in range(self.n_codebooks):
             output_ids[:, i] = Sampler.run_sampling(logits[:, i], config=sampling_params)
-        
+
         for i, req in enumerate(requests):
             # filter out the non-audio tokens
             req.lm_output_tokens.append(output_ids[i].tolist())
@@ -530,9 +539,9 @@ class GLMVoiceModel(BaseLM):
                 # if the first token is an audio token, append it to the audio tokens
                 req.lm_output_audio_tokens.append(output_ids[i].tolist())
 
-        print(f"Sampling output: {output_ids.tolist()}")
+        self.logger.debug(f"Sampling output: {output_ids.tolist()}")
         return output_ids
 
     def postprocess(self, token_ids: torch.Tensor):
         audio_tensor = self.audio_decoder(token_ids[:, :, 0] - self.audio_offset, self.detokenize_token_len)
-        return audio_tensor[:, None, :] # add channel dimension
+        return audio_tensor[:, None, :]  # add channel dimension

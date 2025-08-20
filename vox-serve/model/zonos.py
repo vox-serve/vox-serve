@@ -1,31 +1,26 @@
-from functools import cache
-from typing import Any, List, Iterable
+import json
 import re
-import unicodedata
-import json 
+from dataclasses import dataclass, field
+from functools import cache
+from typing import Any, Iterable, List, Literal
 
 import flashinfer
 import inflect
-from phonemizer.backend import EspeakBackend
+import safetensors
 import torch
-from torch import nn
-from torch.nn import functional as F
 import torchaudio
 from huggingface_hub import hf_hub_download
-import safetensors
+from phonemizer.backend import EspeakBackend
+from torch import nn
+from torch.nn import functional as F
 
-from ..tokenizer.dac import DAC
 from ..encoder.zonos import ZonosSpeakerEmbeddingLDA
 from ..flashinfer_utils import FlashInferWrapper
-from ..sampling import SamplingConfig, Sampler
 from ..requests import Request
+from ..sampling import Sampler, SamplingConfig
+from ..tokenizer.dac import DAC
+from ..utils import get_logger
 from .base import BaseLM, PreprocessOutput
-
-
-from dataclasses import dataclass, field
-from typing import Literal
-
-import torch
 
 
 @dataclass
@@ -100,7 +95,7 @@ class ZonosAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
         position_ids: torch.LongTensor,
-        attn_wrapper: FlashInferWrapper, 
+        attn_wrapper: FlashInferWrapper,
         kv_cache: torch.Tensor,
     ):
         input_shape = hidden_states.shape[:-1]
@@ -110,12 +105,16 @@ class ZonosAttention(nn.Module):
         kv_size = self.num_heads_kv * self.head_dim
         query_states, key_states, value_states = self.in_proj(hidden_states).split([q_size, kv_size, kv_size], dim=-1)
 
-        query_states = query_states.view(-1, self.num_heads, self.head_dim) #.transpose(0, 1)
-        key_states = key_states.view(-1, self.num_heads_kv, self.head_dim) #.transpose(0, 1)
-        value_states = value_states.view(-1, self.num_heads_kv, self.head_dim) #.transpose(0, 1)
+        query_states = query_states.view(-1, self.num_heads, self.head_dim)  # .transpose(0, 1)
+        key_states = key_states.view(-1, self.num_heads_kv, self.head_dim)  # .transpose(0, 1)
+        value_states = value_states.view(-1, self.num_heads_kv, self.head_dim)  # .transpose(0, 1)
 
         query_states, key_states = flashinfer.rope.apply_rope_pos_ids(
-            query_states, key_states, pos_ids=position_ids, rope_theta=10000, interleave=True,
+            query_states,
+            key_states,
+            pos_ids=position_ids,
+            rope_theta=10000,
+            interleave=True,
         )
 
         attn_wrapper.set_kv_cache(kv_cache, key_states, value_states)
@@ -129,7 +128,7 @@ class ZonosAttention(nn.Module):
 class ZonosDecoderLayer(nn.Module):
     def __init__(self, config: BackboneConfig, layer_idx: int):
         super().__init__()
-        self.config = config 
+        self.config = config
 
         self.norm = nn.LayerNorm(config.d_model, eps=config.norm_epsilon)
         self.mixer = ZonosAttention(config=config, layer_idx=layer_idx)
@@ -140,7 +139,7 @@ class ZonosDecoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         position_ids: torch.LongTensor,
-        attn_wrapper: FlashInferWrapper, 
+        attn_wrapper: FlashInferWrapper,
         kv_cache: torch.Tensor,
     ):
         residual = hidden_states
@@ -164,24 +163,22 @@ class ZonosDecoderLayer(nn.Module):
 
         return hidden_states
 
+
 class ZonosBackboneModel(nn.Module):
     def __init__(self, config: BackboneConfig):
         super().__init__()
         self.config = config
 
-        self.layers = nn.ModuleList(
-            [ZonosDecoderLayer(config, layer_idx) for layer_idx in range(config.n_layer)]
-        )
+        self.layers = nn.ModuleList([ZonosDecoderLayer(config, layer_idx) for layer_idx in range(config.n_layer)])
         self.norm_f = nn.LayerNorm(config.d_model, eps=config.norm_epsilon)
 
     def forward(
         self,
         inputs_embeds: torch.Tensor,
         position_ids: torch.LongTensor,
-        attn_wrapper: FlashInferWrapper, 
+        attn_wrapper: FlashInferWrapper,
         kv_cache: torch.Tensor,
     ):
-        
         hidden_states = inputs_embeds
 
         for i, decoder_layer in enumerate(self.layers):
@@ -335,21 +332,26 @@ class ZonosUtils:
         phoneme_ids = [[cls.PAD_ID] * (longest - len(ids)) + ids for ids in phoneme_ids]
         return torch.tensor(phoneme_ids), lengths
 
-    @classmethod
-    def normalize_jp_text(cls, text: str, tokenizer) -> str:
-        from kanjize import number2kanji
-        text = unicodedata.normalize("NFKC", text)
-        text = re.sub(r"\d+", lambda m: number2kanji(int(m[0])), text)
-        final_text = " ".join([x.reading_form() for x in tokenizer.tokenize(text, SplitMode.A)])
-        return final_text
+    # @classmethod
+    # def normalize_jp_text(cls, text: str, tokenizer) -> str:
+    #     from kanjize import number2kanji
+
+    #     text = unicodedata.normalize("NFKC", text)
+    #     text = re.sub(r"\d+", lambda m: number2kanji(int(m[0])), text)
+    #     final_text = " ".join([x.reading_form() for x in tokenizer.tokenize(text, SplitMode.A)])
+    #     return final_text
 
     @classmethod
     def clean(cls, texts: list[str], languages: list[str]) -> list[str]:
         texts_out = []
-        for text, language in zip(texts, languages):
+        for text, language in zip(texts, languages, strict=False):
             if "ja" in language:
-                from sudachipy import Dictionary, SplitMode
-                text = cls.normalize_jp_text(text, tokenizer=Dictionary(dict="full").create())
+                raise NotImplementedError(
+                    "Japanese text normalization is not implemented"
+                )
+
+                # from sudachipy import Dictionary
+                # text = cls.normalize_jp_text(text, tokenizer=Dictionary(dict="full").create())
             else:
                 text = cls.normalize_numbers(text)
             texts_out.append(text)
@@ -359,6 +361,7 @@ class ZonosUtils:
     @cache
     def get_backend(cls, language: str) -> "EspeakBackend":
         import logging
+
         from phonemizer.backend import EspeakBackend
 
         logger = logging.getLogger("phonemizer")
@@ -377,7 +380,7 @@ class ZonosUtils:
         texts = cls.clean(texts, languages)
 
         batch_phonemes = []
-        for text, language in zip(texts, languages):
+        for text, language in zip(texts, languages, strict=False):
             backend = cls.get_backend(language)
             phonemes = backend.phonemize([text], strip=True)
             batch_phonemes.append(phonemes[0])
@@ -454,7 +457,7 @@ class ZonosPrefixConditioner(Conditioner):
         self.conditioners = nn.ModuleList(self.build_conditioners(config.conditioners, output_dim))
         self.norm = nn.LayerNorm(output_dim)
         self.required_keys = {c.name for c in self.conditioners if c.uncond_vector is None}
-    
+
     def build_conditioners(self, conditioners: list[dict], output_dim: int) -> list[Conditioner]:
         _cond_cls_map = {
             "PassthroughConditioner": PassthroughConditioner,
@@ -491,7 +494,6 @@ supported_language_codes = [
 
 
 class ZonosForCausalLM(nn.Module):
-
     def __init__(self, config: ZonosConfig):
         super().__init__()
         self.config = config
@@ -506,7 +508,7 @@ class ZonosForCausalLM(nn.Module):
 
     def embed_tokens(self, input_ids):
         return sum(emb(input_ids[:, i]) for i, emb in enumerate(self.embeddings))
-    
+
     # def get_input_embeddings(self):
     #     return self.model.embed_tokens
 
@@ -514,7 +516,7 @@ class ZonosForCausalLM(nn.Module):
         self,
         inputs_embeds: torch.Tensor,
         position_ids: torch.LongTensor,
-        attn_wrapper: FlashInferWrapper, 
+        attn_wrapper: FlashInferWrapper,
         kv_cache: torch.Tensor,
     ):
         outputs = self.backbone(
@@ -524,10 +526,9 @@ class ZonosForCausalLM(nn.Module):
             kv_cache=kv_cache,
         )
 
-        logits = torch.stack([head(outputs) for head in self.heads], dim=1) 
+        logits = torch.stack([head(outputs) for head in self.heads], dim=1)
 
         return logits
-
 
 
 class ZonosModel(BaseLM):
@@ -536,6 +537,7 @@ class ZonosModel(BaseLM):
         if model_name == "zonos":
             model_name = "Zyphra/Zonos-v0.1-transformer"
         super().__init__(model_name, device, dtype)
+        self.logger = get_logger(__name__)
         config_path = hf_hub_download(repo_id=model_name, filename="config.json", revision=None)
         model_path = hf_hub_download(repo_id=model_name, filename="model.safetensors", revision=None)
 
@@ -550,14 +552,19 @@ class ZonosModel(BaseLM):
             for k in f.keys():
                 if k in self.model.state_dict():
                     if self.model.state_dict()[k].shape != f.get_tensor(k).shape:
-                        raise ValueError(f"Shape mismatch for weight '{k}': expected {self.model.state_dict()[k].shape}, got {f.get_tensor(k).shape}")
+                        raise ValueError(
+                            f"Shape mismatch for weight '{k}': "
+                            f"expected {self.model.state_dict()[k].shape}, got {f.get_tensor(k).shape}"
+                        )
                     self.model.state_dict()[k].copy_(f.get_tensor(k))
                 else:
                     raise KeyError(f"Missing weight '{k}' in the model state_dict")
             # Check for missing weights in the checkpoint that are not in the model
             missing_in_model = set(f.keys()) - set(self.model.state_dict().keys())
             if missing_in_model:
-                raise KeyError(f"The following weights are present in the checkpoint but missing in the model: {missing_in_model}")
+                raise KeyError(
+                    f"The following weights are present in the checkpoint but missing in the model: {missing_in_model}"
+                )
 
         dim = self.config.backbone.d_model
         self.eos_token_id = self.config.eos_token_id
@@ -573,17 +580,17 @@ class ZonosModel(BaseLM):
 
         self._n_codebooks = self.model.autoencoder.num_codebooks
         self.logit_bias = torch.zeros(self.n_codebooks, 1025, dtype=dtype, device=device)
-        self.logit_bias[1:, self.eos_token_id] = -torch.inf # only allow codebook 0 to predict EOS
+        self.logit_bias[1:, self.eos_token_id] = -torch.inf  # only allow codebook 0 to predict EOS
 
         self.resample_44k_to_24k = torchaudio.transforms.Resample(orig_freq=44100, new_freq=24000).to(self.device)
 
         self.default_sampling_config = SamplingConfig(
-            top_k=None, 
+            top_k=None,
             top_p=None,
             min_p=0.1,
             temperature=1.0,
             repetition_penalty=3.0,
-            repetition_window=2, 
+            repetition_window=2,
             cfg_scale=None,
         )
 
@@ -598,17 +605,17 @@ class ZonosModel(BaseLM):
     def num_attention_heads(self) -> int:
         """Number of attention heads in the model."""
         return self._num_attention_heads
-    
+
     @property
     def num_key_value_heads(self) -> int:
         """Number of key-value heads in the model."""
         return self._num_key_value_heads
-    
+
     @property
     def num_hidden_layers(self) -> int:
         """Number of hidden layers in the model."""
         return self._num_hidden_layers
-    
+
     @property
     def hidden_size(self) -> int:
         """Hidden size of the model."""
@@ -618,22 +625,22 @@ class ZonosModel(BaseLM):
     def detokenize_interval(self) -> int:
         """Interval at which to detokenize outputs."""
         return 50
-    
+
     @property
     def detokenize_overlap(self) -> int:
         """Overlap size for detokenization."""
         return self._n_codebooks
-    
+
     @property
     def n_channels(self) -> int:
         """Number of audio channels in the output."""
         return 1  # Mono audio
-    
+
     @property
     def output_audio_length(self) -> int:
         """Output audio length (in samples) at each postprocess call."""
         return 11425
-    
+
     @property
     def max_tokens(self) -> int:
         """
@@ -651,14 +658,14 @@ class ZonosModel(BaseLM):
 
     def _get_default_speaker_embedding(self) -> torch.Tensor:
         from ..utils import download_github_file
+
         try:
-            wav, sr = torchaudio.load(
-                download_github_file("Zyphra", "Zonos", "assets/exampleaudio.mp3")
-            )
+            wav, sr = torchaudio.load(download_github_file("Zyphra", "Zonos", "assets/exampleaudio.mp3"))
             _, spk_embedding = self.speaker_encoder(wav.to(self.device), sr)
             self.default_speaker_embedding = spk_embedding.unsqueeze(0).bfloat16()
-        except:
-            print("Failed to load default speaker embedding, using random embedding instead.")
+        except Exception as e:
+            self.logger.error(f"Failed to load default speaker embedding: {e}")
+            self.logger.error("Using random embedding instead.")
             self.default_speaker_embedding = None
 
     def _make_cond_dict(
@@ -666,33 +673,27 @@ class ZonosModel(BaseLM):
         text: str = "It would be nice to have time for testing, indeed.",
         language: str = "en-us",
         speaker: torch.Tensor | None = None,
-        
         # Emotion vector from 0.0 to 1.0
         #   Is entangled with pitch_std because more emotion => more pitch variation
         #                     VQScore and DNSMOS because they favor neutral speech
         #
         #                       Happiness, Sadness, Disgust, Fear, Surprise, Anger, Other, Neutral
         emotion: list[float] = [0.3077, 0.0256, 0.0256, 0.0256, 0.0256, 0.0256, 0.2564, 0.3077],
-
         # Maximum frequency (0 to 24000), should be 22050 or 24000 for 44.1 or 48 kHz audio
         # For voice cloning use 22050
         fmax: float = 22050.0,
-        
-        # Standard deviation for pitch (0 to 400), should be 
-        #   20-45 for normal speech, 
-        #   60-150 for expressive speech, 
+        # Standard deviation for pitch (0 to 400), should be
+        #   20-45 for normal speech,
+        #   60-150 for expressive speech,
         #   higher values => crazier samples
         pitch_std: float = 20.0,
-
         # Speaking rate in phonemes per minute (0 to 40). 30 is very fast, 10 is slow.
         speaking_rate: float = 15.0,
-
         # Target VoiceQualityScore for the generated speech (0.5 to 0.8).
         #   A list of values must be provided which represent each 1/8th of the audio.
         #   You should unset for expressive speech.
         # According to discord Chat this is only used for the hybrid model
         vqscore_8: list[float] = [0.78] * 8,
-
         # CTC target loss
         # Only used for the hybrid model
         ctc_loss: float = 0.0,
@@ -741,7 +742,7 @@ class ZonosModel(BaseLM):
                 cond_dict[k] /= cond_dict[k].sum(dim=-1)
 
         return cond_dict
-    
+
     def _prepare_conditioning(self, cond_dict: dict, uncond_dict: dict | None = None) -> torch.Tensor:
         return self.model.prefix_conditioner(cond_dict)[0]
 
@@ -755,37 +756,39 @@ class ZonosModel(BaseLM):
         #         self.model.prefix_conditioner(uncond_dict),
         #     ]
         # )
-    
+
     def preprocess(self, prompt: str = None, audio_path: str = None) -> PreprocessOutput:
         """Prepare the prompt for the model, formatting it according to Orpheus specifications."""
         # TODO: add API support for custom voice
-        assert audio_path is None 
+        assert audio_path is None
         cond_dict = self._make_cond_dict(text=prompt)
         input_features = self._prepare_conditioning(cond_dict)
 
-        prefix_tokens = torch.cat([
-            torch.zeros(input_features.shape[0], self.n_codebooks, dtype=torch.long),
-            torch.full((1, self.n_codebooks), self.masked_token_id, dtype=torch.long), 
-        ], dim=0)
+        prefix_tokens = torch.cat(
+            [
+                torch.zeros(input_features.shape[0], self.n_codebooks, dtype=torch.long),
+                torch.full((1, self.n_codebooks), self.masked_token_id, dtype=torch.long),
+            ],
+            dim=0,
+        )
 
         repetition_cache = torch.zeros(
-            self.default_sampling_config.repetition_window if self.default_sampling_config.repetition_window > 0 else 1, 
-            self.n_codebooks, 
-            self.vocab_size, 
-            dtype=torch.bool, device=self.device
+            self.default_sampling_config.repetition_window if self.default_sampling_config.repetition_window > 0 else 1,
+            self.n_codebooks,
+            self.vocab_size,
+            dtype=torch.bool,
+            device=self.device,
         )
 
         return PreprocessOutput(
-            input_tokens=prefix_tokens.tolist(),
-            input_features=input_features,
-            repetition_cache=repetition_cache
+            input_tokens=prefix_tokens.tolist(), input_features=input_features, repetition_cache=repetition_cache
         )
 
     def forward(
-        self, 
-        input_ids: torch.Tensor, 
-        position_ids: torch.Tensor, 
-        attn_wrapper: FlashInferWrapper, 
+        self,
+        input_ids: torch.Tensor,
+        position_ids: torch.Tensor,
+        attn_wrapper: FlashInferWrapper,
         kv_cache: torch.Tensor,
         input_features: torch.Tensor | None = None,
         **kwargs: Any,
@@ -797,11 +800,11 @@ class ZonosModel(BaseLM):
             # includes prefill request
             for i, feature in enumerate(input_features):
                 if feature is None:
-                    continue 
-                
+                    continue
+
                 # In Zonos, the prompt tokens except for the last one are filled with feature embeddings
                 inputs_embeds[attn_wrapper.qo_indptr[i] : attn_wrapper.qo_indptr[i + 1] - 1] = feature
-        
+
         logits = self.model(
             inputs_embeds=inputs_embeds,
             position_ids=position_ids,
@@ -814,10 +817,10 @@ class ZonosModel(BaseLM):
             logits = logits[attn_wrapper.qo_indptr[:-1] - 1]
 
         return logits
-    
+
     def sampling(
-        self, 
-        logits: torch.Tensor, 
+        self,
+        logits: torch.Tensor,
         requests: List[Request],
         sampling_params: SamplingConfig | None = None,
         cfg_scale: float | None = None,
@@ -829,35 +832,33 @@ class ZonosModel(BaseLM):
         for i, req in enumerate(requests):
             if req.repetition_cache is None:
                 continue
-            
+
             logits[i] = Sampler.apply_repetition_penalty(
-                logits[i], 
-                req.repetition_cache, 
-                sampling_params.repetition_penalty
+                logits[i], req.repetition_cache, sampling_params.repetition_penalty
             )
 
         output_ids = torch.zeros(logits.shape[0], logits.shape[1], dtype=torch.long, device=self.device)
         for i in range(self.n_codebooks):
             output_ids[:, i] = Sampler.run_sampling(logits[:, i], config=sampling_params)
-        
+
         # update repetition cache
         for i, req in enumerate(requests):
             if req.repetition_cache is None:
                 continue
-            
+
             Sampler.update_repetition_penalty_cache(
-                req.repetition_cache, 
-                output_ids[i], 
-                sampling_params.repetition_window, 
+                req.repetition_cache,
+                output_ids[i],
+                sampling_params.repetition_window,
             )
 
             # mask part of the output tokens for the first n_codebooks - 1 tokens
-            # use len(req.lm_output_tokens) + 1 since the output is not yet appended 
+            # use len(req.lm_output_tokens) + 1 since the output is not yet appended
             if len(req.lm_output_tokens) + 1 < self.n_codebooks:
                 for j in range(len(req.lm_output_tokens) + 1, self.n_codebooks):
                     output_ids[i, j] = self.masked_token_id
-            
-            req.input_features = None # not used in decode phase
+
+            req.input_features = None  # not used in decode phase
 
             # no additional logic for CSM model for now. TODO: revert delay patterns here?
             req.lm_output_tokens.append(output_ids[i].tolist())

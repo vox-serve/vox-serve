@@ -1,0 +1,57 @@
+[project]
+name = "vox-serve"
+version = "0.0.1"
+description = "A serving system for speech language models."
+requires-python = ">=3.12"
+
+# Your project's direct dependencies go here
+dependencies = [
+    "diffusers==0.34.0",
+    "fastapi==0.116.1",
+    "flashinfer-python==0.2.11.post1",
+    "huggingface-hub==0.34.0",
+    "librosa==0.10.2.post1",
+    "moshi==0.2.11",
+    "numpy==1.26.4",
+    "safetensors==0.5.3",
+    "scipy==1.11.4",
+    "soundfile==0.12.1",
+    "torch==2.8.0",
+    "torchaudio==2.8.0",
+    "transformers==4.55.0",
+    "uvicorn==0.35.0",
+    "zmq==0.0.0",
+]
+
+[tool.ruff]
+exclude = [".git", ".ruff_cache", ".venv"] 
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+fixable = ["ALL"]
+unfixable = []
+select = ["F", "E", "W", "I", "B", "PL", "N"] 
+ignore = [
+    "B006",    # Do not use mutable data structures for argument defaults
+    "B008",    # Do not perform function call in argument defaults
+    "E741",    # Ambiguous variable name
+    "F841",    # Local variable is assigned to but never used
+    "N801",    # Class name should be in CamelCase
+    "N802",    # Function name should be lowercase
+    "N803",    # Argument name should be lowercase
+    "N806",    # Variable in function should be lowercase
+    "N812",    # Lowercase imported as non-lowercase
+    "PLC0415", # `import` should be at the top-level of a file
+    "PLR0911", # Too many return statements
+    "PLR0912", # Too many branches
+    "PLR0913", # Too many arguments in function definition
+    "PLR0915", # Too many statements
+    "PLR2004", # Magic value used in comparison
+    "PLW2901", # Loop variable overwritten by assignment target
+]
+
+[tool.ruff.format]
+quote-style = "double"
+line-ending = "auto"
+docstring-code-format = true
