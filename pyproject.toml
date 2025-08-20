@@ -1,0 +1,24 @@
+[project]
+name = "vox-serve"
+version = "0.0.1"
+description = "A serving system for speech language models."
+requires-python = ">=3.12"
+
+# Your project's direct dependencies go here
+dependencies = [
+    "diffusers==0.34.0",
+    "fastapi==0.116.1",
+    "flashinfer-python==0.2.11.post1",
+    "huggingface-hub==0.34.0",
+    "librosa==0.10.2.post1",
+    "moshi==0.2.11",
+    "numpy==1.26.4",
+    "safetensors==0.5.3",
+    "scipy==1.11.4",
+    "soundfile==0.12.1",
+    "torch==2.8.0",
+    "torchaudio==2.8.0",
+    "transformers==4.55.0",
+    "uvicorn==0.35.0",
+    "zmq==0.0.0",
+]
