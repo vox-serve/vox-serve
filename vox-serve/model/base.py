@@ -76,6 +76,11 @@ class BaseLM(ABC):
         return False
 
     @property
+    def needs_watermarking(self) -> bool:
+        """Indicates if the model requires watermarking."""
+        return False
+
+    @property
     @abstractmethod
     def detokenize_interval(self) -> int:
         """Interval at which to detokenize outputs."""
@@ -93,6 +98,12 @@ class BaseLM(ABC):
         """
         Maximum number of tokens the model generates in a single request.
         """
+        pass
+
+    @property
+    @abstractmethod
+    def vocab_size(self) -> int:
+        """Vocabulary size of the model."""
         pass
 
     @abstractmethod
@@ -172,6 +183,18 @@ class BaseLM(ABC):
         """
         pass
     
+    @property
+    @abstractmethod
+    def n_channels(self) -> int:
+        """Number of audio channels in the output."""
+        pass
+    
+    @property
+    @abstractmethod 
+    def output_audio_length(self) -> int:
+        """Output audio length (in samples) at each postprocess call."""
+        pass
+
     @abstractmethod
     def postprocess(self, token_ids: torch.Tensor) -> torch.Tensor:
         """
@@ -286,18 +309,16 @@ class BaseLMWithDepth(BaseLM):
     @abstractmethod
     def depth_forward(
         self, 
-        input_ids: torch.Tensor, 
+        hidden_states: torch.Tensor,
         position_ids: torch.Tensor, 
         attn_wrapper: FlashInferWrapper, 
         kv_cache: torch.Tensor,
-        hidden_states: torch.Tensor,
         **kwargs,
     ) -> torch.Tensor:
         """
         Forward pass through the depth transformer for some models.
         
         Args:
-            input_ids: Input token IDs. Shape: (batch_size, n_codebooks)
             hidden_states: Output hidden states from the previous iteration or backbone model. Shape: (batch_size, hidden_size)
             position_ids: Position IDs for the tokens. Shape: (batch_size)
             attn_wrapper: FlashInfer attention wrapper

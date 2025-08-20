@@ -533,6 +533,8 @@ class ZonosForCausalLM(nn.Module):
 class ZonosModel(BaseLM):
     def __init__(self, model_name, dtype=torch.bfloat16, device="cuda:0"):
         # TODO: Zonos hybrid model is not yet supported
+        if model_name == "zonos":
+            model_name = "Zyphra/Zonos-v0.1-transformer"
         super().__init__(model_name, device, dtype)
         config_path = hf_hub_download(repo_id=model_name, filename="config.json", revision=None)
         model_path = hf_hub_download(repo_id=model_name, filename="model.safetensors", revision=None)
@@ -567,11 +569,13 @@ class ZonosModel(BaseLM):
         self._num_key_value_heads = self.model.config.backbone.attn_cfg["num_heads_kv"]
         self._num_hidden_layers = self.model.config.backbone.n_layer
         self._hidden_size = self.model.config.backbone.d_model
-        self.vocab_size = 1025 # mask token is not included here since it's not predicted by LM heads
+        # self.vocab_size = 1025 # mask token is not included here since it's not predicted by LM heads
 
         self._n_codebooks = self.model.autoencoder.num_codebooks
         self.logit_bias = torch.zeros(self.n_codebooks, 1025, dtype=dtype, device=device)
         self.logit_bias[1:, self.eos_token_id] = -torch.inf # only allow codebook 0 to predict EOS
+
+        self.resample_44k_to_24k = torchaudio.transforms.Resample(orig_freq=44100, new_freq=24000).to(self.device)
 
         self.default_sampling_config = SamplingConfig(
             top_k=None, 
@@ -621,11 +625,26 @@ class ZonosModel(BaseLM):
         return self._n_codebooks
     
     @property
+    def n_channels(self) -> int:
+        """Number of audio channels in the output."""
+        return 1  # Mono audio
+    
+    @property
+    def output_audio_length(self) -> int:
+        """Output audio length (in samples) at each postprocess call."""
+        return 11425
+    
+    @property
     def max_tokens(self) -> int:
         """
         Maximum number of tokens the model generates in a single request.
         """
         return 2048
+
+    @property
+    def vocab_size(self) -> int:
+        """Vocabulary size of the model."""
+        return 1025
 
     def is_stop_id(self, token_ids: List[int]) -> bool:
         return token_ids[0] == self.eos_token_id
@@ -751,7 +770,6 @@ class ZonosModel(BaseLM):
 
         repetition_cache = torch.zeros(
             self.default_sampling_config.repetition_window if self.default_sampling_config.repetition_window > 0 else 1, 
-            self.default_sampling_config.repetition_window, 
             self.n_codebooks, 
             self.vocab_size, 
             dtype=torch.bool, device=self.device
@@ -855,6 +873,7 @@ class ZonosModel(BaseLM):
         codes = torch.stack([token_ids[:, k : interval - n_q + k, k] for k in range(n_q)], dim=1)
 
         wavs = self.model.autoencoder.decode(codes)
-        audio_tensor = torchaudio.functional.resample(wavs, orig_freq=44100, new_freq=24000)
+        # audio_tensor = torchaudio.functional.resample(wavs, orig_freq=44100, new_freq=24000)
+        audio_tensor = self.resample_44k_to_24k(wavs)
 
         return audio_tensor

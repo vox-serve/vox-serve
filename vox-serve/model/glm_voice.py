@@ -306,6 +306,8 @@ class GLMVoiceForCausalLM(nn.Module):
 
 class GLMVoiceModel(BaseLM):
     def __init__(self, model_name, dtype=torch.bfloat16, device="cuda:0"):
+        if model_name == "glm":
+            model_name = "zai-org/glm-4-voice-9b"
         super().__init__(model_name, device, dtype)
         config_path = hf_hub_download(repo_id=model_name, filename="config.json", revision=None)
         self.config = GLMVoiceConfig.from_dict(json.load(open(config_path)))
@@ -343,7 +345,7 @@ class GLMVoiceModel(BaseLM):
         self._num_key_value_heads = self.config.multi_query_group_num
         self._num_hidden_layers = self.config.num_layers
         self._hidden_size = self.config.hidden_size
-        self.vocab_size = self.config.vocab_size
+        # self.vocab_size = self.config.vocab_size
 
         self.stop_token_ids = [151329, 151336, 151338]
         self.audio_offset = self.text_tokenizer.convert_tokens_to_ids("<|audio_0|>")
@@ -357,6 +359,9 @@ class GLMVoiceModel(BaseLM):
             repetition_window=None, 
             cfg_scale=None,
         )
+
+        # for cuda graph compatibility
+        self.detokenize_token_len = torch.tensor([self.detokenize_interval], dtype=torch.int32, device=self.device)
 
     @property 
     def n_codebooks(self):
@@ -399,11 +404,26 @@ class GLMVoiceModel(BaseLM):
         return 0
     
     @property
+    def n_channels(self) -> int:
+        """Number of audio channels in the output."""
+        return 1  # Mono audio
+    
+    @property
+    def output_audio_length(self) -> int:
+        """Output audio length (in samples) at each postprocess call."""
+        return 44032
+    
+    @property
     def max_tokens(self) -> int:
         """
         Maximum number of tokens the model generates in a single request.
         """
         return 512
+
+    @property
+    def vocab_size(self) -> int:
+        """Vocabulary size of the model."""
+        return self.config.vocab_size
 
     def is_stop_id(self, token_ids: List[int]) -> bool:
         return token_ids[0] in self.stop_token_ids
@@ -514,4 +534,5 @@ class GLMVoiceModel(BaseLM):
         return output_ids
 
     def postprocess(self, token_ids: torch.Tensor):
-        return self.audio_decoder(token_ids[:, :, 0] - self.audio_offset)
+        audio_tensor = self.audio_decoder(token_ids[:, :, 0] - self.audio_offset, self.detokenize_token_len)
+        return audio_tensor[:, None, :] # add channel dimension

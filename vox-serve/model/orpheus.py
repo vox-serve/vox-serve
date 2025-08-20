@@ -223,6 +223,8 @@ class OrpheusForCausalLM(LlamaPreTrainedModel):
 
 class OrpheusModel(BaseLM):
     def __init__(self, model_name, dtype=torch.bfloat16, device="cuda:0", tokenizer_path="canopylabs/orpheus-3b-0.1-ft"):
+        if model_name == "orpheus":
+            model_name = "canopylabs/orpheus-3b-0.1-ft"
         super().__init__(model_name, device, dtype)
         self.model_name = model_name
         self.model = OrpheusForCausalLM.from_pretrained(model_name)
@@ -238,7 +240,7 @@ class OrpheusModel(BaseLM):
         self._num_key_value_heads = self.model.config.num_key_value_heads
         self._num_hidden_layers = self.model.config.num_hidden_layers
         self._hidden_size = self.model.config.hidden_size
-        self.vocab_size = self.model.config.vocab_size
+        # self.vocab_size = self.model.config.vocab_size
 
         self.stop_token_id = 128258
 
@@ -251,6 +253,10 @@ class OrpheusModel(BaseLM):
             repetition_window=-1, 
             cfg_scale=None,
         )
+
+        # for cuda graph-ing of postprocess
+        self.idx_14 = torch.tensor([1, 4], dtype=torch.long, device="cuda")
+        self.idx_2356 = torch.tensor([2, 3, 5, 6], dtype=torch.long, device="cuda")
 
     @property 
     def n_codebooks(self):
@@ -293,6 +299,21 @@ class OrpheusModel(BaseLM):
         Maximum number of tokens the model generates in a single request.
         """
         return 1200
+    
+    @property
+    def n_channels(self) -> int:
+        """Number of audio channels in the output."""
+        return 1  # Mono audio
+    
+    @property
+    def output_audio_length(self) -> int:
+        """Output audio length (in samples) at each postprocess call."""
+        return 2048  # Based on slice [2048:4096] in postprocess
+
+    @property
+    def vocab_size(self) -> int:
+        """Vocabulary size of the model."""
+        return self.model.config.vocab_size
 
     def is_stop_id(self, token_ids: List[int]) -> bool:
         return token_ids[0] == self.stop_token_id
@@ -433,9 +454,17 @@ class OrpheusModel(BaseLM):
         mf = token_ids.view(-1, 4, 7)
         mf = self._turn_token_into_id(mf)
 
+        # codes_0 = mf[:, :, 0] 
+        # codes_1 = mf[:, :, [1, 4]].view(-1, 8)
+        # codes_2 = mf[:, :, [2, 3, 5, 6]].view(-1, 16) 
+
         codes_0 = mf[:, :, 0] 
-        codes_1 = mf[:, :, [1, 4]].view(-1, 8)
-        codes_2 = mf[:, :, [2, 3, 5, 6]].view(-1, 16) 
+
+        c1 = torch.index_select(mf, dim=2, index=self.idx_14) 
+        codes_1 = c1.reshape(-1, 8)
+
+        c2 = torch.index_select(mf, dim=2, index=self.idx_2356) 
+        codes_2 = c2.reshape(-1, 16)
 
         codes = [codes_0, codes_1, codes_2]
 
