@@ -7,7 +7,7 @@ import zmq
 
 from .requests import Request
 from .utils import get_logger
-from .worker import CudaGraphWorker
+from .worker import CudaGraphWorker, ModelWorker
 
 
 class Scheduler:
@@ -25,22 +25,39 @@ class Scheduler:
         repetition_penalty: float = None,
         repetition_window: int = None,
         cfg_scale: float = None,
+        enable_cuda_graph: bool = True,
     ):
         self.device = device
         self.max_batch_size = max_batch_size
         self.logger = get_logger(__name__)
-        # TODO: switch between CudaGraphWorker and ModelWorker based on user input
-        self.model_worker = CudaGraphWorker(
-            model_name_or_path,
-            max_batch_size=max_batch_size,
-            top_p=top_p,
-            top_k=top_k,
-            min_p=min_p,
-            temperature=temperature,
-            repetition_penalty=repetition_penalty,
-            repetition_window=repetition_window,
-            cfg_scale=cfg_scale,
-        )
+
+        # Switch between CudaGraphWorker and ModelWorker based on user input
+        if enable_cuda_graph:
+            self.logger.info("Using CudaGraphWorker with CUDA graph optimization")
+            self.model_worker = CudaGraphWorker(
+                model_name_or_path,
+                max_batch_size=max_batch_size,
+                top_p=top_p,
+                top_k=top_k,
+                min_p=min_p,
+                temperature=temperature,
+                repetition_penalty=repetition_penalty,
+                repetition_window=repetition_window,
+                cfg_scale=cfg_scale,
+            )
+        else:
+            self.logger.info("Using ModelWorker without CUDA graph optimization")
+            self.model_worker = ModelWorker(
+                model_name_or_path,
+                max_batch_size=max_batch_size,
+                top_p=top_p,
+                top_k=top_k,
+                min_p=min_p,
+                temperature=temperature,
+                repetition_penalty=repetition_penalty,
+                repetition_window=repetition_window,
+                cfg_scale=cfg_scale,
+            )
 
         self.active_requests: List[Request] = []
 

@@ -32,6 +32,7 @@ def run_scheduler_daemon(
     repetition_penalty: Optional[float],
     repetition_window: Optional[int],
     cfg_scale: Optional[float],
+    enable_cuda_graph: bool,
 ) -> None:
     """Function to run scheduler in daemon subprocess"""
     logger = get_logger(__name__)
@@ -47,6 +48,7 @@ def run_scheduler_daemon(
         repetition_penalty=repetition_penalty,
         repetition_window=repetition_window,
         cfg_scale=cfg_scale,
+        enable_cuda_graph=enable_cuda_graph,
     )
     logger.info(f"Scheduler started successfully with model: {model_name}")
     scheduler.run_forever()
@@ -68,6 +70,7 @@ class APIServer:
         repetition_penalty: float = None,
         repetition_window: int = None,
         cfg_scale: float = None,
+        enable_cuda_graph: bool = True,
     ):
         self.model_name = model_name
         self.request_socket_path = request_socket_path
@@ -85,6 +88,7 @@ class APIServer:
         self.repetition_penalty = repetition_penalty
         self.repetition_window = repetition_window
         self.cfg_scale = cfg_scale
+        self.enable_cuda_graph = enable_cuda_graph
         self.scheduler_process = None
         self.logger = get_logger(__name__)
 
@@ -139,6 +143,7 @@ class APIServer:
                     self.repetition_penalty,
                     self.repetition_window,
                     self.cfg_scale,
+                    self.enable_cuda_graph,
                 ),
                 daemon=True,
             )
@@ -552,6 +557,17 @@ if __name__ == "__main__":
     parser.add_argument("--repetition-penalty", type=float, default=None, help="Repetition penalty (default: None)")
     parser.add_argument("--repetition-window", type=int, default=None, help="Repetition window size (default: None)")
     parser.add_argument("--cfg-scale", type=float, default=None, help="CFG scale for guidance (default: None)")
+    parser.add_argument(
+        "--enable-cuda-graph",
+        action="store_true",
+        default=True,
+        help="Enable CUDA graph optimization for decode phase (default: True)"
+    )
+    parser.add_argument(
+        "--disable-cuda-graph",
+        action="store_true",
+        help="Disable CUDA graph optimization for decode phase"
+    )
     args = parser.parse_args()
 
     # Set multiprocessing start method for CUDA compatibility
@@ -560,6 +576,9 @@ if __name__ == "__main__":
     except RuntimeError:
         # Already set, ignore
         pass
+
+    # Determine final CUDA graph setting
+    enable_cuda_graph = args.enable_cuda_graph and not args.disable_cuda_graph
 
     # Initialize API server instance with specified model
     api_server = APIServer(
@@ -572,6 +591,7 @@ if __name__ == "__main__":
         repetition_penalty=args.repetition_penalty,
         repetition_window=args.repetition_window,
         cfg_scale=args.cfg_scale,
+        enable_cuda_graph=enable_cuda_graph,
     )
 
     # Register signal handlers for graceful shutdown
