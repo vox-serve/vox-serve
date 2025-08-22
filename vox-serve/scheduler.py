@@ -18,12 +18,29 @@ class Scheduler:
         max_batch_size: int = 8,
         request_socket_path: str = "/tmp/vox_serve_request.ipc",
         result_socket_path: str = "/tmp/vox_serve_result.ipc",
+        top_p: float = None,
+        top_k: int = None,
+        min_p: float = None,
+        temperature: float = None,
+        repetition_penalty: float = None,
+        repetition_window: int = None,
+        cfg_scale: float = None,
     ):
         self.device = device
         self.max_batch_size = max_batch_size
         self.logger = get_logger(__name__)
         # TODO: switch between CudaGraphWorker and ModelWorker based on user input
-        self.model_worker = CudaGraphWorker(model_name_or_path, max_batch_size=max_batch_size)
+        self.model_worker = CudaGraphWorker(
+            model_name_or_path,
+            max_batch_size=max_batch_size,
+            top_p=top_p,
+            top_k=top_k,
+            min_p=min_p,
+            temperature=temperature,
+            repetition_penalty=repetition_penalty,
+            repetition_window=repetition_window,
+            cfg_scale=cfg_scale,
+        )
 
         self.active_requests: List[Request] = []
 

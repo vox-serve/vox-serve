@@ -2,6 +2,7 @@ from typing import Any, Dict, Type
 
 import torch
 
+from ..sampling import SamplingConfig
 from .base import BaseLM, BaseLMWithDepth
 from .csm import CSMModel
 from .glm_voice import GLMVoiceModel
@@ -51,7 +52,17 @@ def get_model_class(model_name: str) -> Type[BaseLM]:
 
 
 def load_model(
-    model_name: str, device: str = "cuda", dtype: torch.dtype = torch.bfloat16, **kwargs: Any
+    model_name: str,
+    device: str = "cuda",
+    dtype: torch.dtype = torch.bfloat16,
+    top_p: float = None,
+    top_k: int = None,
+    min_p: float = None,
+    temperature: float = None,
+    repetition_penalty: float = None,
+    repetition_window: int = None,
+    cfg_scale: float = None,
+    **kwargs: Any
 ) -> BaseLM | BaseLMWithDepth:
     """
     Load a model instance based on the model name.
@@ -60,6 +71,13 @@ def load_model(
         model_name: Name or path of the model to load
         device: Device to load the model on
         dtype: Data type for the model
+        top_p: Top-p sampling parameter (overrides model default if provided)
+        top_k: Top-k sampling parameter (overrides model default if provided)
+        min_p: Min-p sampling parameter (overrides model default if provided)
+        temperature: Temperature for sampling (overrides model default if provided)
+        repetition_penalty: Repetition penalty (overrides model default if provided)
+        repetition_window: Repetition window size (overrides model default if provided)
+        cfg_scale: CFG scale for guidance (overrides model default if provided)
         **kwargs: Additional arguments to pass to the model constructor
 
     Returns:
@@ -69,7 +87,33 @@ def load_model(
         ValueError: If no suitable model class is found
     """
     model_class = get_model_class(model_name)
-    return model_class(model_name=model_name, device=device, dtype=dtype, **kwargs)
+    model = model_class(model_name=model_name, device=device, dtype=dtype, **kwargs)
+
+    # Override default sampling config if CLI parameters are provided
+    if any(param is not None for param in [
+        top_p, top_k, min_p, temperature, repetition_penalty, repetition_window, cfg_scale
+    ]):
+        # Get current default config
+        current_config = model.default_sampling_config
+
+        # Create new config with overrides
+        model.default_sampling_config = SamplingConfig(
+            top_p=top_p if top_p is not None else current_config.top_p,
+            top_k=top_k if top_k is not None else current_config.top_k,
+            min_p=min_p if min_p is not None else current_config.min_p,
+            temperature=temperature if temperature is not None else current_config.temperature,
+            repetition_penalty=(
+                repetition_penalty if repetition_penalty is not None
+                else current_config.repetition_penalty
+            ),
+            repetition_window=(
+                repetition_window if repetition_window is not None
+                else current_config.repetition_window
+            ),
+            cfg_scale=cfg_scale if cfg_scale is not None else current_config.cfg_scale,
+        )
+
+    return model
 
 
 def register_model(pattern: str, model_class: Type[BaseLM]) -> None:

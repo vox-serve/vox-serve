@@ -20,11 +20,33 @@ from .utils import get_logger
 logger = get_logger(__name__)
 
 
-def run_scheduler_daemon(model_name, request_socket_path, result_socket_path):
+def run_scheduler_daemon(
+    model_name: str,
+    request_socket_path: str,
+    result_socket_path: str,
+    max_batch_size: int,
+    top_p: Optional[float],
+    top_k: Optional[int],
+    min_p: Optional[float],
+    temperature: Optional[float],
+    repetition_penalty: Optional[float],
+    repetition_window: Optional[int],
+    cfg_scale: Optional[float],
+) -> None:
     """Function to run scheduler in daemon subprocess"""
     logger = get_logger(__name__)
     scheduler = Scheduler(
-        model_name_or_path=model_name, request_socket_path=request_socket_path, result_socket_path=result_socket_path
+        model_name_or_path=model_name,
+        request_socket_path=request_socket_path,
+        result_socket_path=result_socket_path,
+        max_batch_size=max_batch_size,
+        top_p=top_p,
+        top_k=top_k,
+        min_p=min_p,
+        temperature=temperature,
+        repetition_penalty=repetition_penalty,
+        repetition_window=repetition_window,
+        cfg_scale=cfg_scale,
     )
     logger.info(f"Scheduler started successfully with model: {model_name}")
     scheduler.run_forever()
@@ -38,6 +60,14 @@ class APIServer:
         result_socket_path: str = "/tmp/vox_serve_reqult.ipc",
         output_dir: str = "/tmp/vox_serve_audio",
         timeout_seconds: float = 30.0,
+        max_batch_size: int = 8,
+        top_p: float = None,
+        top_k: int = None,
+        min_p: float = None,
+        temperature: float = None,
+        repetition_penalty: float = None,
+        repetition_window: int = None,
+        cfg_scale: float = None,
     ):
         self.model_name = model_name
         self.request_socket_path = request_socket_path
@@ -47,6 +77,14 @@ class APIServer:
         self.upload_dir = Path(output_dir) / "uploads"
         self.upload_dir.mkdir(exist_ok=True)
         self.timeout_seconds = timeout_seconds
+        self.max_batch_size = max_batch_size
+        self.top_p = top_p
+        self.top_k = top_k
+        self.min_p = min_p
+        self.temperature = temperature
+        self.repetition_penalty = repetition_penalty
+        self.repetition_window = repetition_window
+        self.cfg_scale = cfg_scale
         self.scheduler_process = None
         self.logger = get_logger(__name__)
 
@@ -89,7 +127,19 @@ class APIServer:
             # Create and start scheduler process
             self.scheduler_process = mp.Process(
                 target=run_scheduler_daemon,
-                args=(self.model_name, self.request_socket_path, self.result_socket_path),
+                args=(
+                    self.model_name,
+                    self.request_socket_path,
+                    self.result_socket_path,
+                    self.max_batch_size,
+                    self.top_p,
+                    self.top_k,
+                    self.min_p,
+                    self.temperature,
+                    self.repetition_penalty,
+                    self.repetition_window,
+                    self.cfg_scale,
+                ),
                 daemon=True,
             )
             self.scheduler_process.start()
@@ -494,6 +544,14 @@ if __name__ == "__main__":
     )
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind the server to (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=8000, help="Port to bind the server to (default: 8000)")
+    parser.add_argument("--max-batch-size", type=int, default=8, help="Maximum batch size for inference (default: 8)")
+    parser.add_argument("--top-p", type=float, default=None, help="Top-p sampling parameter (default: None)")
+    parser.add_argument("--top-k", type=int, default=None, help="Top-k sampling parameter (default: None)")
+    parser.add_argument("--min-p", type=float, default=None, help="Min-p sampling parameter (default: None)")
+    parser.add_argument("--temperature", type=float, default=None, help="Temperature for sampling (default: None)")
+    parser.add_argument("--repetition-penalty", type=float, default=None, help="Repetition penalty (default: None)")
+    parser.add_argument("--repetition-window", type=int, default=None, help="Repetition window size (default: None)")
+    parser.add_argument("--cfg-scale", type=float, default=None, help="CFG scale for guidance (default: None)")
     args = parser.parse_args()
 
     # Set multiprocessing start method for CUDA compatibility
@@ -504,7 +562,17 @@ if __name__ == "__main__":
         pass
 
     # Initialize API server instance with specified model
-    api_server = APIServer(model_name=args.model)
+    api_server = APIServer(
+        model_name=args.model,
+        max_batch_size=args.max_batch_size,
+        top_p=args.top_p,
+        top_k=args.top_k,
+        min_p=args.min_p,
+        temperature=args.temperature,
+        repetition_penalty=args.repetition_penalty,
+        repetition_window=args.repetition_window,
+        cfg_scale=args.cfg_scale,
+    )
 
     # Register signal handlers for graceful shutdown
     signal.signal(signal.SIGINT, signal_handler)

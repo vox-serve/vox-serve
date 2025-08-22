@@ -17,13 +17,26 @@ class ModelWorker:
         self,
         model_name: str,
         max_batch_size: int = 8,
-        top_p: float = 0.8,
-        top_k: int = 2,
-        temperature: float = 0.6,
-        repetition_penalty: float = 1.3,
+        top_p: float = None,
+        top_k: int = None,
+        min_p: float = None,
+        temperature: float = None,
+        repetition_penalty: float = None,
+        repetition_window: int = None,
+        cfg_scale: float = None,
     ):
-        # Load model
-        self.model = load_model(model_name, device="cuda")
+        # Load model with sampling parameters
+        self.model = load_model(
+            model_name,
+            device="cuda",
+            top_p=top_p,
+            top_k=top_k,
+            min_p=min_p,
+            temperature=temperature,
+            repetition_penalty=repetition_penalty,
+            repetition_window=repetition_window,
+            cfg_scale=cfg_scale,
+        )
         self.device = "cuda:0"
         self.max_batch_size = max_batch_size
         self.logger = get_logger(__name__)
@@ -31,8 +44,11 @@ class ModelWorker:
         # Store sampling and repetition parameters
         self.top_p = top_p
         self.top_k = top_k
+        self.min_p = min_p
         self.temperature = temperature
         self.repetition_penalty = repetition_penalty
+        self.repetition_window = repetition_window
+        self.cfg_scale = cfg_scale
 
         # Tensor to store offset values for each client
         self.offsets = torch.zeros(self.max_batch_size, dtype=torch.int32, device=self.device)
