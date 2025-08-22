@@ -570,18 +570,78 @@ if __name__ == "__main__":
         default="canopylabs/orpheus-3b-0.1-ft",
         help="Model name or path to use for text-to-speech synthesis (default: canopylabs/orpheus-3b-0.1-ft)",
     )
-    parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind the server to (default: 0.0.0.0)")
-    parser.add_argument("--port", type=int, default=8000, help="Port to bind the server to (default: 8000)")
-    parser.add_argument("--max-batch-size", type=int, default=8, help="Maximum batch size for inference (default: 8)")
-    parser.add_argument("--max-num-pages", type=int, default=1024, help="Maximum number of KV cache pages (default: 1024)")
-    parser.add_argument("--page-size", type=int, default=128, help="Size of each KV cache page (default: 128)")
-    parser.add_argument("--top-p", type=float, default=None, help="Top-p sampling parameter (default: None)")
-    parser.add_argument("--top-k", type=int, default=None, help="Top-k sampling parameter (default: None)")
-    parser.add_argument("--min-p", type=float, default=None, help="Min-p sampling parameter (default: None)")
-    parser.add_argument("--temperature", type=float, default=None, help="Temperature for sampling (default: None)")
-    parser.add_argument("--repetition-penalty", type=float, default=None, help="Repetition penalty (default: None)")
-    parser.add_argument("--repetition-window", type=int, default=None, help="Repetition window size (default: None)")
-    parser.add_argument("--cfg-scale", type=float, default=None, help="CFG scale for guidance (default: None)")
+    parser.add_argument(
+        "--host",
+        type=str,
+        default="0.0.0.0",
+        help="Host to bind the server to (default: 0.0.0.0)"
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8000,
+        help="Port to bind the server to (default: 8000)"
+    )
+    parser.add_argument(
+        "--max-batch-size",
+        type=int,
+        default=8,
+        help="Maximum batch size for inference (default: 8)"
+    )
+    parser.add_argument(
+        "--max-num-pages",
+        type=int,
+        default=1024,
+        help="Maximum number of KV cache pages (default: 1024)"
+    )
+    parser.add_argument(
+        "--page-size",
+        type=int,
+        default=128,
+        help="Size of each KV cache page (default: 128)"
+    )
+    parser.add_argument(
+        "--top-p",
+        type=float,
+        default=None,
+        help="Top-p sampling parameter (default: None)"
+    )
+    parser.add_argument(
+        "--top-k",
+        type=int,
+        default=None,
+        help="Top-k sampling parameter (default: None)"
+    )
+    parser.add_argument(
+        "--min-p",
+        type=float,
+        default=None,
+        help="Min-p sampling parameter (default: None)"
+    )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=None,
+        help="Temperature for sampling (default: None)"
+    )
+    parser.add_argument(
+        "--repetition-penalty",
+        type=float,
+        default=None,
+        help="Repetition penalty (default: None)"
+    )
+    parser.add_argument(
+        "--repetition-window",
+        type=int,
+        default=None,
+        help="Repetition window size (default: None)"
+    )
+    parser.add_argument(
+        "--cfg-scale",
+        type=float,
+        default=None,
+        help="CFG scale for guidance (default: None)"
+    )
     parser.add_argument(
         "--enable-cuda-graph",
         action="store_true",
