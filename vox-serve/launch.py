@@ -14,9 +14,9 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 
 from .scheduler import Scheduler
-from .utils import get_logger
+from .utils import get_logger, set_global_log_level
 
-# Module-level logger
+# Module-level logger - will be updated with proper log level in main()
 logger = get_logger(__name__)
 
 
@@ -568,7 +568,17 @@ if __name__ == "__main__":
         action="store_true",
         help="Disable CUDA graph optimization for decode phase"
     )
+    parser.add_argument(
+        "--log-level",
+        type=str,
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="Set the logging level (default: INFO)"
+    )
     args = parser.parse_args()
+
+    # Set global log level for the entire application
+    set_global_log_level(args.log_level)
 
     # Set multiprocessing start method for CUDA compatibility
     try:
