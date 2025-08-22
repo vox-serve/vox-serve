@@ -14,7 +14,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 
 from .scheduler import Scheduler
-from .utils import get_logger, set_global_log_level
+from .utils import get_global_log_level, get_logger, set_global_log_level
 
 # Module-level logger - will be updated with proper log level in main()
 logger = get_logger(__name__)
@@ -33,8 +33,11 @@ def run_scheduler_daemon(
     repetition_window: Optional[int],
     cfg_scale: Optional[float],
     enable_cuda_graph: bool,
+    log_level: str,
 ) -> None:
     """Function to run scheduler in daemon subprocess"""
+    # Set global log level in this subprocess
+    set_global_log_level(log_level)
     logger = get_logger(__name__)
     scheduler = Scheduler(
         model_name_or_path=model_name,
@@ -144,6 +147,7 @@ class APIServer:
                     self.repetition_window,
                     self.cfg_scale,
                     self.enable_cuda_graph,
+                    get_global_log_level(),
                 ),
                 daemon=True,
             )
