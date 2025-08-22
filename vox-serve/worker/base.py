@@ -16,7 +16,9 @@ class ModelWorker:
     def __init__(
         self,
         model_name: str,
-        max_batch_size: int = 8,
+        max_batch_size: int,
+        max_num_pages: int,
+        page_size: int,
         top_p: float = None,
         top_k: int = None,
         min_p: float = None,
@@ -53,9 +55,9 @@ class ModelWorker:
         # Tensor to store offset values for each client
         self.offsets = torch.zeros(self.max_batch_size, dtype=torch.int32, device=self.device)
 
-        # TODO: decide based on memory capacity
-        self.max_num_pages = max_batch_size
-        self.page_size = 2048
+        # Use CLI-provided values or defaults
+        self.max_num_pages = max_num_pages
+        self.page_size = page_size
 
         # Initialize empty pages
         self.empty_pages = queue.Queue()

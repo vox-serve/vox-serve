@@ -16,6 +16,8 @@ class Scheduler:
         model_name_or_path: str,
         device: torch.device = torch.device("cuda"),
         max_batch_size: int = 8,
+        max_num_pages: int = 1024,
+        page_size: int = 128,
         request_socket_path: str = "/tmp/vox_serve_request.ipc",
         result_socket_path: str = "/tmp/vox_serve_result.ipc",
         top_p: float = None,
@@ -44,6 +46,8 @@ class Scheduler:
                 repetition_penalty=repetition_penalty,
                 repetition_window=repetition_window,
                 cfg_scale=cfg_scale,
+                max_num_pages=max_num_pages,
+                page_size=page_size,
             )
         else:
             self.logger.info("Using ModelWorker without CUDA graph optimization")
@@ -57,6 +61,8 @@ class Scheduler:
                 repetition_penalty=repetition_penalty,
                 repetition_window=repetition_window,
                 cfg_scale=cfg_scale,
+                max_num_pages=max_num_pages,
+                page_size=page_size,
             )
 
         self.active_requests: List[Request] = []
@@ -110,7 +116,7 @@ class Scheduler:
 
         # return results to clients
         for req in requests:
-            if not req.output_audio.empty():
+            while not req.output_audio.empty():
                 # Send audio chunk message: request_id|AUDIO|audio_data
                 message = req.request_id.encode("utf-8") + b"|AUDIO|" + req.output_audio.get()
                 self.result_socket.send(message)

@@ -33,6 +33,8 @@ def run_scheduler_daemon(
     repetition_window: Optional[int],
     cfg_scale: Optional[float],
     enable_cuda_graph: bool,
+    max_num_pages: Optional[int],
+    page_size: int,
     log_level: str,
 ) -> None:
     """Function to run scheduler in daemon subprocess"""
@@ -52,6 +54,8 @@ def run_scheduler_daemon(
         repetition_window=repetition_window,
         cfg_scale=cfg_scale,
         enable_cuda_graph=enable_cuda_graph,
+        max_num_pages=max_num_pages,
+        page_size=page_size,
     )
     logger.info(f"Scheduler started successfully with model: {model_name}")
     scheduler.run_forever()
@@ -62,7 +66,7 @@ class APIServer:
         self,
         model_name: str = "canopylabs/orpheus-3b-0.1-ft",
         request_socket_path: str = "/tmp/vox_serve_request.ipc",
-        result_socket_path: str = "/tmp/vox_serve_reqult.ipc",
+        result_socket_path: str = "/tmp/vox_serve_result.ipc",
         output_dir: str = "/tmp/vox_serve_audio",
         timeout_seconds: float = 30.0,
         max_batch_size: int = 8,
@@ -74,6 +78,8 @@ class APIServer:
         repetition_window: int = None,
         cfg_scale: float = None,
         enable_cuda_graph: bool = True,
+        max_num_pages: int = None,
+        page_size: int = 2048,
     ):
         self.model_name = model_name
         self.request_socket_path = request_socket_path
@@ -92,6 +98,8 @@ class APIServer:
         self.repetition_window = repetition_window
         self.cfg_scale = cfg_scale
         self.enable_cuda_graph = enable_cuda_graph
+        self.max_num_pages = max_num_pages
+        self.page_size = page_size
         self.scheduler_process = None
         self.logger = get_logger(__name__)
 
@@ -116,7 +124,6 @@ class APIServer:
         self.result_socket.connect(f"ipc://{result_socket_path}")
 
         # Set socket timeouts for faster shutdown
-        self.result_socket.setsockopt(zmq.RCVTIMEO, 1000)  # 1 second timeout for message processing
         self.request_socket.setsockopt(zmq.SNDTIMEO, 1000)  # 1 second send timeout
 
         # Start background message processing thread
@@ -147,6 +154,8 @@ class APIServer:
                     self.repetition_window,
                     self.cfg_scale,
                     self.enable_cuda_graph,
+                    self.max_num_pages,
+                    self.page_size,
                     get_global_log_level(),
                 ),
                 daemon=True,
@@ -163,15 +172,19 @@ class APIServer:
         """Background thread to process incoming messages from scheduler"""
         while self.running:
             try:
-                # Receive message from scheduler (request_id|TYPE|data)
-                message = self.result_socket.recv()
+                while True:
+                    # Use NOBLOCK to prevent message loss and add small sleep for efficiency
+                    message = self.result_socket.recv(flags=zmq.NOBLOCK)
 
-                # Parse message format: request_id|TYPE|data
-                parts = message.split(b"|", 2)
-                if len(parts) >= 3:
-                    request_id = parts[0].decode("utf-8")
-                    message_type = parts[1].decode("utf-8")
-                    data = parts[2]
+                    # Parse message format: request_id|TYPE|data
+                    parts = message.split(b"|", 2)
+                    if len(parts) >= 3:
+                        request_id = parts[0].decode("utf-8")
+                        message_type = parts[1].decode("utf-8")
+                        data = parts[2]
+                    else:
+                        self.logger.warning(f"Malformed message received: {message[:100]}...")
+                        continue
 
                     # Route message to the appropriate request
                     with self.request_lock:
@@ -184,9 +197,13 @@ class APIServer:
                                 completion_info = json.loads(data.decode("utf-8"))
                                 self.logger.info(f"Request {request_id} completed: {completion_info}")
                                 self.pending_requests[request_id]["event"].set()
+                        else:
+                            # Log when we receive messages for unknown requests
+                            self.logger.warning(f"Received {message_type} message for unknown request {request_id}")
 
             except zmq.Again:
-                # Timeout, continue loop
+                # No message available, sleep briefly to avoid busy waiting
+                time.sleep(0.01)
                 continue
             except Exception as e:
                 if self.running:  # Only log if we're still supposed to be running
@@ -223,6 +240,7 @@ class APIServer:
             HTTPException: If generation fails or times out
         """
         request_id = str(uuid.uuid4())
+        self.logger.info(f"Request {request_id} joined for streaming")
 
         # Register this request for concurrent processing
         completion_event = threading.Event()
@@ -304,6 +322,7 @@ class APIServer:
             HTTPException: If generation fails or times out
         """
         request_id = str(uuid.uuid4())
+        self.logger.info(f"Request {request_id} joined for generation")
 
         # Register this request for concurrent processing
         completion_event = threading.Event()
@@ -554,6 +573,8 @@ if __name__ == "__main__":
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind the server to (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=8000, help="Port to bind the server to (default: 8000)")
     parser.add_argument("--max-batch-size", type=int, default=8, help="Maximum batch size for inference (default: 8)")
+    parser.add_argument("--max-num-pages", type=int, default=1024, help="Maximum number of KV cache pages (default: 1024)")
+    parser.add_argument("--page-size", type=int, default=128, help="Size of each KV cache page (default: 128)")
     parser.add_argument("--top-p", type=float, default=None, help="Top-p sampling parameter (default: None)")
     parser.add_argument("--top-k", type=int, default=None, help="Top-k sampling parameter (default: None)")
     parser.add_argument("--min-p", type=float, default=None, help="Min-p sampling parameter (default: None)")
@@ -598,6 +619,8 @@ if __name__ == "__main__":
     api_server = APIServer(
         model_name=args.model,
         max_batch_size=args.max_batch_size,
+        max_num_pages=args.max_num_pages,
+        page_size=args.page_size,
         top_p=args.top_p,
         top_k=args.top_k,
         min_p=args.min_p,
