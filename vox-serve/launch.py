@@ -22,9 +22,12 @@ logger = get_logger(__name__)
 
 def run_scheduler_daemon(
     model_name: str,
+    scheduler_type: str,
+    max_batch_size: int,
+    max_num_pages: Optional[int],
+    page_size: int,
     request_socket_path: str,
     result_socket_path: str,
-    max_batch_size: int,
     top_p: Optional[float],
     top_k: Optional[int],
     min_p: Optional[float],
@@ -33,10 +36,7 @@ def run_scheduler_daemon(
     repetition_window: Optional[int],
     cfg_scale: Optional[float],
     enable_cuda_graph: bool,
-    max_num_pages: Optional[int],
-    page_size: int,
     log_level: str,
-    scheduler_type: str,
 ) -> None:
     """Function to run scheduler in daemon subprocess"""
     # Set global log level in this subprocess
@@ -45,9 +45,11 @@ def run_scheduler_daemon(
     scheduler = load_scheduler(
         scheduler_type=scheduler_type,
         model_name_or_path=model_name,
+        max_batch_size=max_batch_size,
+        max_num_pages=max_num_pages,
+        page_size=page_size,
         request_socket_path=request_socket_path,
         result_socket_path=result_socket_path,
-        max_batch_size=max_batch_size,
         top_p=top_p,
         top_k=top_k,
         min_p=min_p,
@@ -56,8 +58,6 @@ def run_scheduler_daemon(
         repetition_window=repetition_window,
         cfg_scale=cfg_scale,
         enable_cuda_graph=enable_cuda_graph,
-        max_num_pages=max_num_pages,
-        page_size=page_size,
     )
     logger.info(f"Scheduler started successfully with model: {model_name}")
     scheduler.run_forever()
@@ -145,24 +145,24 @@ class APIServer:
             # Create and start scheduler process
             self.scheduler_process = mp.Process(
                 target=run_scheduler_daemon,
-                args=(
-                    self.model_name,
-                    self.request_socket_path,
-                    self.result_socket_path,
-                    self.max_batch_size,
-                    self.top_p,
-                    self.top_k,
-                    self.min_p,
-                    self.temperature,
-                    self.repetition_penalty,
-                    self.repetition_window,
-                    self.cfg_scale,
-                    self.enable_cuda_graph,
-                    self.max_num_pages,
-                    self.page_size,
-                    get_global_log_level(),
-                    self.scheduler_type,
-                ),
+                kwargs={
+                    'model_name': self.model_name,
+                    'scheduler_type': self.scheduler_type,
+                    'max_batch_size': self.max_batch_size,
+                    'max_num_pages': self.max_num_pages,
+                    'page_size': self.page_size,
+                    'request_socket_path': self.request_socket_path,
+                    'result_socket_path': self.result_socket_path,
+                    'top_p': self.top_p,
+                    'top_k': self.top_k,
+                    'min_p': self.min_p,
+                    'temperature': self.temperature,
+                    'repetition_penalty': self.repetition_penalty,
+                    'repetition_window': self.repetition_window,
+                    'cfg_scale': self.cfg_scale,
+                    'enable_cuda_graph': self.enable_cuda_graph,
+                    'log_level': get_global_log_level(),
+                },
                 daemon=True,
             )
             self.scheduler_process.start()
