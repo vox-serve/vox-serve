@@ -13,7 +13,7 @@ import zmq
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 
-from .scheduler.base import Scheduler
+from .scheduler import load_scheduler
 from .utils import get_global_log_level, get_logger, set_global_log_level
 
 # Module-level logger - will be updated with proper log level in main()
@@ -36,12 +36,14 @@ def run_scheduler_daemon(
     max_num_pages: Optional[int],
     page_size: int,
     log_level: str,
+    scheduler_type: str,
 ) -> None:
     """Function to run scheduler in daemon subprocess"""
     # Set global log level in this subprocess
     set_global_log_level(log_level)
     logger = get_logger(__name__)
-    scheduler = Scheduler(
+    scheduler = load_scheduler(
+        scheduler_type=scheduler_type,
         model_name_or_path=model_name,
         request_socket_path=request_socket_path,
         result_socket_path=result_socket_path,
@@ -80,6 +82,7 @@ class APIServer:
         enable_cuda_graph: bool = True,
         max_num_pages: int = None,
         page_size: int = 2048,
+        scheduler_type: str = "base",
     ):
         self.model_name = model_name
         self.request_socket_path = request_socket_path
@@ -100,6 +103,7 @@ class APIServer:
         self.enable_cuda_graph = enable_cuda_graph
         self.max_num_pages = max_num_pages
         self.page_size = page_size
+        self.scheduler_type = scheduler_type
         self.scheduler_process = None
         self.logger = get_logger(__name__)
 
@@ -157,6 +161,7 @@ class APIServer:
                     self.max_num_pages,
                     self.page_size,
                     get_global_log_level(),
+                    self.scheduler_type,
                 ),
                 daemon=True,
             )
@@ -618,6 +623,13 @@ if __name__ == "__main__":
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
         help="Set the logging level (default: INFO)"
     )
+    parser.add_argument(
+        "--scheduler-type",
+        type=str,
+        default="base",
+        choices=["base", "online", "offline"],
+        help="Type of scheduler to use (default: base)"
+    )
     args = parser.parse_args()
 
     # Set global log level for the entire application
@@ -647,6 +659,7 @@ if __name__ == "__main__":
         repetition_window=args.repetition_window,
         cfg_scale=args.cfg_scale,
         enable_cuda_graph=enable_cuda_graph,
+        scheduler_type=args.scheduler_type,
     )
 
     # Register signal handlers for graceful shutdown
