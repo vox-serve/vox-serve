@@ -129,6 +129,7 @@ class Scheduler:
                 completion_payload = (
                     req.request_id.encode("utf-8") + b"|COMPLETION|" + json.dumps(completion_message).encode("utf-8")
                 )
+                self.logger.debug(f"Sending completion for request {req.request_id}")
                 self.result_socket.send(completion_payload)
 
         return

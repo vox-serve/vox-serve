@@ -203,7 +203,7 @@ class APIServer:
 
             except zmq.Again:
                 # No message available, sleep briefly to avoid busy waiting
-                time.sleep(0.01)
+                time.sleep(0.001)
                 continue
             except Exception as e:
                 if self.running:  # Only log if we're still supposed to be running
@@ -274,29 +274,33 @@ class APIServer:
                     raise HTTPException(status_code=500, detail="Generation timed out")
 
                 # Check for new chunks
+                new_chunks: list[bytes] = []
                 with self.request_lock:
                     request_data = self.pending_requests.get(request_id)
                     if request_data:
-                        available_chunks = len(request_data["chunks"])
+                        available = len(request_data["chunks"])
                         consumed = request_data["consumed_chunks"]
+                        new_chunks = request_data["chunks"][consumed:available]
+                        request_data["consumed_chunks"] = available
 
-                        # Yield any new chunks
-                        for i in range(consumed, available_chunks):
-                            yield request_data["chunks"][i]
-
-                        request_data["consumed_chunks"] = available_chunks
+                # Yield any new chunks
+                for chunk in new_chunks:
+                    yield chunk
 
                 # Small sleep to avoid busy waiting
-                time.sleep(0.01)
+                time.sleep(0.001)
 
             # Yield any remaining chunks after completion
+            remaining: list[bytes] = []
             with self.request_lock:
                 request_data = self.pending_requests.get(request_id)
                 if request_data:
                     consumed = request_data["consumed_chunks"]
-                    for i in range(consumed, len(request_data["chunks"])):
-                        yield request_data["chunks"][i]
+                    remaining = request_data["chunks"][consumed:]
                     del self.pending_requests[request_id]
+
+            for chunk in remaining:
+                yield chunk
 
         except Exception as e:
             # Clean up on error
