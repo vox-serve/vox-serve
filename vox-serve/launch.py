@@ -224,13 +224,12 @@ class APIServer:
                 self.logger.error(f"Error stopping scheduler: {e}")
             self.logger.info("Scheduler process stopped")
 
-    def stream_audio(self, text: str = None, voice: str = "tara", audio_path: str = None) -> Iterator[bytes]:
+    def stream_audio(self, text: str = None, audio_path: str = None) -> Iterator[bytes]:
         """
         Generate audio from text and yield audio chunks as they arrive.
 
         Args:
             text: Input text to synthesize (optional if audio_path provided)
-            voice: Voice to use for synthesis
             audio_path: Path to input audio file (optional)
 
         Yields:
@@ -257,7 +256,6 @@ class APIServer:
             request_dict = {
                 "request_id": request_id,
                 "prompt": text,
-                "voice": voice,
                 "audio_path": audio_path,
             }
 
@@ -310,13 +308,12 @@ class APIServer:
                 raise
             raise HTTPException(status_code=500, detail=f"Generation failed: {str(e)}") from e
 
-    def generate_audio(self, text: str = None, voice: str = "tara", audio_path: str = None) -> str:
+    def generate_audio(self, text: str = None, audio_path: str = None) -> str:
         """
         Generate audio from text and return path to the audio file.
 
         Args:
             text: Input text to synthesize (optional if audio_path provided)
-            voice: Voice to use for synthesis
             audio_path: Path to input audio file (optional)
 
         Returns:
@@ -338,7 +335,6 @@ class APIServer:
             request_dict = {
                 "request_id": request_id,
                 "prompt": text,
-                "voice": voice,
                 "audio_path": audio_path,
             }
 
@@ -411,7 +407,6 @@ api_server = None
 @app.post("/generate")
 async def generate(
     text: str = Form(...),
-    voice: Optional[str] = Form("tara"),
     audio: Optional[UploadFile] = File(None),
     streaming: bool = Form(False)
 ):
@@ -420,7 +415,6 @@ async def generate(
 
     Args:
         text: Input text to synthesize
-        voice: Voice to use for synthesis
         audio: Optional input audio file
         streaming: Whether to return streaming response (default: False)
 
@@ -460,7 +454,7 @@ async def generate(
                 yield header_bytes
 
                 # Stream audio chunks
-                for chunk in api_server.stream_audio(text, voice, audio_path):
+                for chunk in api_server.stream_audio(text, audio_path):
                     yield chunk
 
             return StreamingResponse(
@@ -473,7 +467,7 @@ async def generate(
             )
         else:
             # Non-streaming response (original behavior)
-            audio_file = api_server.generate_audio(text, voice, audio_path)
+            audio_file = api_server.generate_audio(text, audio_path)
             request_id = Path(audio_file).stem
 
             return FileResponse(path=audio_file, media_type="audio/wav", filename=f"{request_id}.wav")
