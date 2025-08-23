@@ -39,8 +39,19 @@ class RequestMetrics:
     total_latency: Optional[float] = None
     audio_duration: Optional[float] = None  # Duration of generated audio
     rtf: Optional[float] = None  # Real-time factor
+    streaming_viability: Optional[float] = None  # Streaming viability percentage
     success: bool = False
     error_message: Optional[str] = None
+
+    # Chunk-level timing data
+    chunk_arrival_times: List[float] = None
+    chunk_durations: List[float] = None
+
+    def __post_init__(self):
+        if self.chunk_arrival_times is None:
+            self.chunk_arrival_times = []
+        if self.chunk_durations is None:
+            self.chunk_durations = []
 
 
 @dataclass
@@ -68,6 +79,15 @@ class BenchmarkResults:
     rtf_p99: float = 0.0
     rtf_min: float = 0.0
     rtf_max: float = 0.0
+
+    # Streaming viability metrics (percentage)
+    streaming_viability_mean: float = 0.0
+    streaming_viability_p50: float = 0.0
+    streaming_viability_p90: float = 0.0
+    streaming_viability_p95: float = 0.0
+    streaming_viability_p99: float = 0.0
+    streaming_viability_min: float = 0.0
+    streaming_viability_max: float = 0.0
 
     # Total latency metrics (seconds)
     latency_mean: float = 0.0
@@ -112,6 +132,32 @@ class BenchmarkClient:
             bytes_per_sample = 2  # 16-bit audio
             return audio_samples / (sample_rate * bytes_per_sample)
 
+    def calculate_streaming_viability(self, metrics: RequestMetrics) -> Optional[float]:
+        """Calculate streaming viability (percentage of chunks satisfying real-time requirement)."""
+        if len(metrics.chunk_arrival_times) < 2 or len(metrics.chunk_durations) < 2:
+            return None
+
+        real_time_satisfied = 0
+        total_chunks = 0
+
+        # Start from the second chunk (i > 1, or index 1)
+        for i in range(1, len(metrics.chunk_arrival_times)):
+            if i < len(metrics.chunk_durations):
+                # Calculate arrival interval between (i-1)th and i-th chunks
+                arrival_interval = metrics.chunk_arrival_times[i] - metrics.chunk_arrival_times[i-1]
+                chunk_duration = metrics.chunk_durations[i]
+
+                # Check if arrival interval is shorter than chunk duration
+                if arrival_interval < chunk_duration:
+                    real_time_satisfied += 1
+
+                total_chunks += 1
+
+        if total_chunks == 0:
+            return None
+
+        return (real_time_satisfied / total_chunks) * 100.0
+
     async def make_request(self, session: aiohttp.ClientSession, request_id: str) -> RequestMetrics:
         """Make a single request and measure metrics."""
         metrics = RequestMetrics(request_id=request_id, start_time=time.time())
@@ -147,6 +193,11 @@ class BenchmarkClient:
                         metrics.ttfa = current_time - metrics.start_time
                         first_chunk_received = True
 
+                    # Record chunk arrival time and calculate chunk duration
+                    metrics.chunk_arrival_times.append(current_time)
+                    chunk_duration = self.get_audio_duration(chunk)
+                    metrics.chunk_durations.append(chunk_duration)
+
                     audio_chunks.append(chunk)
 
                 # Calculate final metrics
@@ -160,6 +211,9 @@ class BenchmarkClient:
                 # Calculate RTF (Real-Time Factor)
                 if metrics.audio_duration and metrics.total_latency:
                     metrics.rtf = metrics.audio_duration / metrics.total_latency
+
+                # Calculate streaming viability (real-time requirement satisfaction)
+                metrics.streaming_viability = self.calculate_streaming_viability(metrics)
 
                 metrics.success = True
 
@@ -227,7 +281,16 @@ class BenchmarkClient:
                     status = "✓" if result.success else "✗"
                     ttfa_str = f"{result.ttfa:.3f}s" if result.ttfa else "N/A"
                     rtf_str = f"{result.rtf:.3f}" if result.rtf else "N/A"
-                    print(f"{status} {result.request_id}: TTFA={ttfa_str}, RTF={rtf_str}")
+                    streaming_viability_str = (
+                        f"{result.streaming_viability:.1f}%"
+                        if result.streaming_viability is not None
+                        else "N/A"
+                    )
+                    print(
+                        f"{status} {result.request_id}: "
+                        f"TTFA={ttfa_str}, RTF={rtf_str}, "
+                        f"Streaming_viability={streaming_viability_str}"
+                    )
 
         return self.calculate_results()
 
@@ -249,6 +312,10 @@ class BenchmarkClient:
         # Extract metrics for successful requests
         ttfa_values = [m.ttfa for m in successful_metrics if m.ttfa is not None]
         rtf_values = [m.rtf for m in successful_metrics if m.rtf is not None]
+        streaming_viability_values = [
+            m.streaming_viability for m in successful_metrics
+            if m.streaming_viability is not None
+        ]
         latency_values = [m.total_latency for m in successful_metrics if m.total_latency is not None]
 
         # Calculate TTFA statistics
@@ -272,6 +339,17 @@ class BenchmarkClient:
             results.rtf_p99 = self._percentile(rtf_sorted, 99)
             results.rtf_min = min(rtf_values)
             results.rtf_max = max(rtf_values)
+
+        # Calculate streaming viability statistics
+        if streaming_viability_values:
+            streaming_viability_sorted = sorted(streaming_viability_values)
+            results.streaming_viability_mean = statistics.mean(streaming_viability_values)
+            results.streaming_viability_p50 = self._percentile(streaming_viability_sorted, 50)
+            results.streaming_viability_p90 = self._percentile(streaming_viability_sorted, 90)
+            results.streaming_viability_p95 = self._percentile(streaming_viability_sorted, 95)
+            results.streaming_viability_p99 = self._percentile(streaming_viability_sorted, 99)
+            results.streaming_viability_min = min(streaming_viability_values)
+            results.streaming_viability_max = max(streaming_viability_values)
 
         # Calculate latency statistics
         if latency_values:
@@ -342,6 +420,18 @@ class BenchmarkClient:
         print(f"P99:      {results.rtf_p99:.3f}")
         print(f"Min:      {results.rtf_min:.3f}")
         print(f"Max:      {results.rtf_max:.3f}")
+        print()
+
+        # Streaming viability metrics
+        print("STREAMING VIABILITY (Real-time Requirement)")
+        print("-" * 45)
+        print(f"Mean:     {results.streaming_viability_mean:.1f}%")
+        print(f"P50:      {results.streaming_viability_p50:.1f}%")
+        print(f"P90:      {results.streaming_viability_p90:.1f}%")
+        print(f"P95:      {results.streaming_viability_p95:.1f}%")
+        print(f"P99:      {results.streaming_viability_p99:.1f}%")
+        print(f"Min:      {results.streaming_viability_min:.1f}%")
+        print(f"Max:      {results.streaming_viability_max:.1f}%")
         print()
 
         # Total latency metrics
