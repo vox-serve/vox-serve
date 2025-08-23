@@ -21,9 +21,11 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 import aiohttp
+import numpy as np
 
 # Set random seed for reproducible results
 random.seed(42)
+np.random.seed(42)
 
 
 @dataclass
@@ -177,10 +179,12 @@ class BenchmarkClient:
         print(f"Target server: {self.base_url}")
         print("=" * 60)
 
-        # Calculate request intervals
-        interval = 1.0 / rate if rate > 0 else 0
+        # Setup Poisson arrival process
+        # For Poisson process, inter-arrival times follow exponential distribution
+        # with parameter lambda = rate (average rate)
         end_time = time.time() + duration
         request_count = 0
+        next_request_time = time.time()
 
         # Create HTTP session
         connector = aiohttp.TCPConnector(limit=100, limit_per_host=50)
@@ -189,8 +193,13 @@ class BenchmarkClient:
         async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
             tasks = []
 
-            # Schedule requests
-            while time.time() < end_time:
+            # Schedule requests using Poisson process
+            while next_request_time < end_time:
+                # Wait until it's time for the next request
+                current_time = time.time()
+                if next_request_time > current_time:
+                    await asyncio.sleep(next_request_time - current_time)
+
                 request_count += 1
                 request_id = f"req_{request_count:06d}"
 
@@ -198,9 +207,10 @@ class BenchmarkClient:
                 task = asyncio.create_task(self.make_request(session, request_id))
                 tasks.append(task)
 
-                # Wait for next request time
-                if interval > 0:
-                    await asyncio.sleep(interval)
+                # Generate next inter-arrival time using exponential distribution
+                # Mean inter-arrival time = 1/rate
+                inter_arrival_time = np.random.exponential(1.0 / rate) if rate > 0 else float('inf')
+                next_request_time += inter_arrival_time
 
             print(f"Scheduled {len(tasks)} requests. Waiting for completion...")
 
