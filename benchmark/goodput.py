@@ -122,10 +122,11 @@ class BenchmarkClient:
             # Prepare form data
             form_data = aiohttp.FormData()
             form_data.add_field("text", text)
+            form_data.add_field("streaming", "true")
 
             # Make streaming request
             async with session.post(
-                f"{self.base_url}/generate-stream", data=form_data, timeout=aiohttp.ClientTimeout(total=30)
+                f"{self.base_url}/generate", data=form_data, timeout=aiohttp.ClientTimeout(total=30)
             ) as response:
                 if response.status != 200:
                     metrics.error_message = f"HTTP {response.status}: {await response.text()}"

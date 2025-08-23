@@ -224,7 +224,7 @@ class APIServer:
                 self.logger.error(f"Error stopping scheduler: {e}")
             self.logger.info("Scheduler process stopped")
 
-    def stream_audio_chunks(self, text: str = None, voice: str = "tara", audio_path: str = None) -> Iterator[bytes]:
+    def stream_audio(self, text: str = None, voice: str = "tara", audio_path: str = None) -> Iterator[bytes]:
         """
         Generate audio from text and yield audio chunks as they arrive.
 
@@ -410,18 +410,22 @@ api_server = None
 
 @app.post("/generate")
 async def generate(
-    text: str = Form(...), voice: Optional[str] = Form("tara"), audio: Optional[UploadFile] = File(None)
+    text: str = Form(...),
+    voice: Optional[str] = Form("tara"),
+    audio: Optional[UploadFile] = File(None),
+    streaming: bool = Form(False)
 ):
     """
-    Generate speech from text and return audio file directly.
+    Generate speech from text and return audio file or streaming response.
 
     Args:
         text: Input text to synthesize
         voice: Voice to use for synthesis
         audio: Optional input audio file
+        streaming: Whether to return streaming response (default: False)
 
     Returns:
-        Audio file as direct response
+        Audio file as direct response (if streaming=False) or streaming audio response (if streaming=True)
     """
     if api_server is None:
         raise HTTPException(status_code=503, detail="Server not ready")
@@ -437,10 +441,42 @@ async def generate(
             f.write(content)
 
     try:
-        audio_file = api_server.generate_audio(text, voice, audio_path)
-        request_id = Path(audio_file).stem
+        if streaming:
+            # Streaming response
+            def audio_stream():
+                # WAV header for 24kHz mono 16-bit audio
+                wav_header = io.BytesIO()
+                with wave.open(wav_header, "wb") as wf:
+                    wf.setnchannels(1)  # Mono
+                    wf.setsampwidth(2)  # 16-bit
+                    wf.setframerate(24000)  # 24kHz
+                    wf.writeframes(b"")  # Empty data for header
 
-        return FileResponse(path=audio_file, media_type="audio/wav", filename=f"{request_id}.wav")
+                # Get header bytes and correct the chunk size for streaming
+                wav_header.seek(0)
+                header_bytes = wav_header.read()
+
+                # Send WAV header first
+                yield header_bytes
+
+                # Stream audio chunks
+                for chunk in api_server.stream_audio(text, voice, audio_path):
+                    yield chunk
+
+            return StreamingResponse(
+                audio_stream(),
+                media_type="audio/wav",
+                headers={
+                    "Content-Disposition": f"attachment; filename=stream_{uuid.uuid4().hex[:8]}.wav",
+                    "Cache-Control": "no-cache",
+                },
+            )
+        else:
+            # Non-streaming response (original behavior)
+            audio_file = api_server.generate_audio(text, voice, audio_path)
+            request_id = Path(audio_file).stem
+
+            return FileResponse(path=audio_file, media_type="audio/wav", filename=f"{request_id}.wav")
     except HTTPException:
         raise
     except Exception as e:
@@ -459,82 +495,6 @@ async def generate(
             cleanup_thread = threading.Thread(target=delayed_cleanup, daemon=True)
             cleanup_thread.start()
 
-
-@app.post("/generate-stream")
-async def generate_stream(
-    text: str = Form(...), voice: Optional[str] = Form("tara"), audio: Optional[UploadFile] = File(None)
-):
-    """
-    Generate speech from text and stream audio chunks as they are generated.
-
-    Args:
-        text: Input text to synthesize
-        voice: Voice to use for synthesis
-        audio: Optional input audio file
-
-    Returns:
-        Streaming audio response with WAV format chunks
-    """
-    if api_server is None:
-        raise HTTPException(status_code=503, detail="Server not ready")
-
-    audio_path = None
-    if audio:
-        # Save uploaded audio file
-        audio_filename = f"{uuid.uuid4()}_{audio.filename}"
-        audio_path = str(api_server.upload_dir / audio_filename)
-
-        with open(audio_path, "wb") as f:
-            content = await audio.read()
-            f.write(content)
-
-    try:
-
-        def audio_stream():
-            # WAV header for 24kHz mono 16-bit audio
-            wav_header = io.BytesIO()
-            with wave.open(wav_header, "wb") as wf:
-                wf.setnchannels(1)  # Mono
-                wf.setsampwidth(2)  # 16-bit
-                wf.setframerate(24000)  # 24kHz
-                wf.writeframes(b"")  # Empty data for header
-
-            # Get header bytes and correct the chunk size for streaming
-            wav_header.seek(0)
-            header_bytes = wav_header.read()
-
-            # Send WAV header first
-            yield header_bytes
-
-            # Stream audio chunks
-            for chunk in api_server.stream_audio_chunks(text, voice, audio_path):
-                yield chunk
-
-        return StreamingResponse(
-            audio_stream(),
-            media_type="audio/wav",
-            headers={
-                "Content-Disposition": f"attachment; filename=stream_{uuid.uuid4().hex[:8]}.wav",
-                "Cache-Control": "no-cache",
-            },
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
-    finally:
-        # Schedule cleanup of uploaded file after a delay to ensure processing is complete
-        if audio_path and Path(audio_path).exists():
-
-            def delayed_cleanup():
-                import time
-
-                time.sleep(60)  # Wait 60 seconds before cleanup
-                if Path(audio_path).exists():
-                    Path(audio_path).unlink()
-
-            cleanup_thread = threading.Thread(target=delayed_cleanup, daemon=True)
-            cleanup_thread.start()
 
 
 @app.get("/health")
