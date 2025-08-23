@@ -5,9 +5,9 @@ from typing import List
 import torch
 import zmq
 
-from .requests import Request
-from .utils import get_logger
-from .worker import CudaGraphWorker, ModelWorker
+from ..requests import Request
+from ..utils import get_logger
+from ..worker import CudaGraphWorker, ModelWorker
 
 
 class Scheduler:

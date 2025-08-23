@@ -13,7 +13,7 @@ import zmq
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 
-from .scheduler import Scheduler
+from .scheduler.base import Scheduler
 from .utils import get_global_log_level, get_logger, set_global_log_level
 
 # Module-level logger - will be updated with proper log level in main()
