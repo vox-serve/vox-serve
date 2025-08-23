@@ -394,7 +394,7 @@ class APIServer:
             if hasattr(self, "result_socket"):
                 self.result_socket.close()
             if hasattr(self, "context"):
-                self.context.term(linger=0)  # Don't wait for pending messages
+                self.context.term()  # Terminate ZMQ context
         except Exception as e:
             self.logger.error(f"Error cleaning up ZMQ: {e}")
 
