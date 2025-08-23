@@ -7,8 +7,8 @@ import torch
 
 @dataclass
 class SamplingConfig:
-    top_k: Optional[int] = None
     top_p: Optional[float] = None
+    top_k: Optional[int] = None
     min_p: Optional[float] = None
     temperature: float = 1.0
     repetition_penalty: Optional[float] = None

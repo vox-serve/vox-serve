@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -10,6 +11,39 @@ import requests
 import torch
 from huggingface_hub import snapshot_download
 from safetensors.torch import load_file as safe_load
+
+
+# Global log level configuration with thread safety
+class _LogLevelManager:
+    def __init__(self):
+        self._level = "INFO"
+        self._lock = threading.Lock()
+
+    def set_level(self, level: str) -> None:
+        with self._lock:
+            self._level = level.upper()
+
+    def get_level(self) -> str:
+        with self._lock:
+            return self._level
+
+
+_log_level_manager = _LogLevelManager()
+
+
+def set_global_log_level(level: str) -> None:
+    """
+    Set the global log level for the entire application.
+
+    Args:
+        level: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+    """
+    _log_level_manager.set_level(level)
+
+
+def get_global_log_level() -> str:
+    """Get the current global log level."""
+    return _log_level_manager.get_level()
 
 
 def load_hf_safetensor_state_dict(
@@ -125,13 +159,14 @@ def download_github_file(owner: str, repo: str, path: str, branch: str = "main",
     return dest
 
 
-def setup_logger(name: str, level: str = "INFO") -> logging.Logger:
+def setup_logger(name: str, level: str = None) -> logging.Logger:
     """
     Set up a centralized logger with consistent formatting.
 
     Args:
         name: Logger name (usually __name__)
-        level: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+        level: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL).
+               If None, uses the global log level.
 
     Returns:
         Configured logger instance
@@ -139,11 +174,18 @@ def setup_logger(name: str, level: str = "INFO") -> logging.Logger:
     logger = logging.getLogger(name)
 
     if logger.handlers:
+        # Update existing logger's level if needed
+        effective_level = level if level is not None else get_global_log_level()
+        logger.setLevel(getattr(logging, effective_level.upper()))
+        for handler in logger.handlers:
+            handler.setLevel(getattr(logging, effective_level.upper()))
         return logger
 
-    logger.setLevel(getattr(logging, level.upper()))
+    effective_level = level if level is not None else get_global_log_level()
+    logger.setLevel(getattr(logging, effective_level.upper()))
 
     handler = logging.StreamHandler(sys.stdout)
+    handler.setLevel(getattr(logging, effective_level.upper()))
     formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
     handler.setFormatter(formatter)
 
@@ -153,6 +195,6 @@ def setup_logger(name: str, level: str = "INFO") -> logging.Logger:
     return logger
 
 
-def get_logger(name: str, level: str = "INFO") -> logging.Logger:
-    """Get or create a logger with the given name."""
+def get_logger(name: str, level: str = None) -> logging.Logger:
+    """Get or create a logger with the given name using the global log level by default."""
     return setup_logger(name, level)

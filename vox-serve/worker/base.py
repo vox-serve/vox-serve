@@ -16,14 +16,29 @@ class ModelWorker:
     def __init__(
         self,
         model_name: str,
-        max_batch_size: int = 8,
-        top_p: float = 0.8,
-        top_k: int = 2,
-        temperature: float = 0.6,
-        repetition_penalty: float = 1.3,
+        max_batch_size: int,
+        max_num_pages: int,
+        page_size: int,
+        top_p: float = None,
+        top_k: int = None,
+        min_p: float = None,
+        temperature: float = None,
+        repetition_penalty: float = None,
+        repetition_window: int = None,
+        cfg_scale: float = None,
     ):
-        # Load model
-        self.model = load_model(model_name, device="cuda")
+        # Load model with sampling parameters
+        self.model = load_model(
+            model_name,
+            device="cuda",
+            top_p=top_p,
+            top_k=top_k,
+            min_p=min_p,
+            temperature=temperature,
+            repetition_penalty=repetition_penalty,
+            repetition_window=repetition_window,
+            cfg_scale=cfg_scale,
+        )
         self.device = "cuda:0"
         self.max_batch_size = max_batch_size
         self.logger = get_logger(__name__)
@@ -31,15 +46,18 @@ class ModelWorker:
         # Store sampling and repetition parameters
         self.top_p = top_p
         self.top_k = top_k
+        self.min_p = min_p
         self.temperature = temperature
         self.repetition_penalty = repetition_penalty
+        self.repetition_window = repetition_window
+        self.cfg_scale = cfg_scale
 
         # Tensor to store offset values for each client
         self.offsets = torch.zeros(self.max_batch_size, dtype=torch.int32, device=self.device)
 
-        # TODO: decide based on memory capacity
-        self.max_num_pages = max_batch_size
-        self.page_size = 2048
+        # Use CLI-provided values or defaults
+        self.max_num_pages = max_num_pages
+        self.page_size = page_size
 
         # Initialize empty pages
         self.empty_pages = queue.Queue()
@@ -605,4 +623,10 @@ class ModelWorker:
 
     def is_finished(self, request: Request):
         # TODO: request-specific max_tokens
-        return self.model.is_stop_id(request.lm_output_tokens[-1]) or request.next_position_id > self.model.max_tokens
+        if self.model.is_stop_id(request.lm_output_tokens[-1]):
+            request.finish_reason = "stop_id_encountered"
+            return True
+        elif request.next_position_id > self.model.max_tokens:
+            request.finish_reason = "position_limit_exceeded"
+            return True
+        return False

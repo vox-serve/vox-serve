@@ -5,9 +5,9 @@ from typing import List
 import torch
 import zmq
 
-from .requests import Request
-from .utils import get_logger
-from .worker import CudaGraphWorker
+from ..requests import Request
+from ..utils import get_logger
+from ..worker import CudaGraphWorker, ModelWorker
 
 
 class Scheduler:
@@ -16,14 +16,54 @@ class Scheduler:
         model_name_or_path: str,
         device: torch.device = torch.device("cuda"),
         max_batch_size: int = 8,
+        max_num_pages: int = 1024,
+        page_size: int = 128,
         request_socket_path: str = "/tmp/vox_serve_request.ipc",
         result_socket_path: str = "/tmp/vox_serve_result.ipc",
+        top_p: float = None,
+        top_k: int = None,
+        min_p: float = None,
+        temperature: float = None,
+        repetition_penalty: float = None,
+        repetition_window: int = None,
+        cfg_scale: float = None,
+        enable_cuda_graph: bool = True,
     ):
         self.device = device
         self.max_batch_size = max_batch_size
         self.logger = get_logger(__name__)
-        # TODO: switch between CudaGraphWorker and ModelWorker based on user input
-        self.model_worker = CudaGraphWorker(model_name_or_path, max_batch_size=max_batch_size)
+
+        # Switch between CudaGraphWorker and ModelWorker based on user input
+        if enable_cuda_graph:
+            self.logger.info("Using CudaGraphWorker with CUDA graph optimization")
+            self.model_worker = CudaGraphWorker(
+                model_name_or_path,
+                max_batch_size=max_batch_size,
+                top_p=top_p,
+                top_k=top_k,
+                min_p=min_p,
+                temperature=temperature,
+                repetition_penalty=repetition_penalty,
+                repetition_window=repetition_window,
+                cfg_scale=cfg_scale,
+                max_num_pages=max_num_pages,
+                page_size=page_size,
+            )
+        else:
+            self.logger.info("Using ModelWorker without CUDA graph optimization")
+            self.model_worker = ModelWorker(
+                model_name_or_path,
+                max_batch_size=max_batch_size,
+                top_p=top_p,
+                top_k=top_k,
+                min_p=min_p,
+                temperature=temperature,
+                repetition_penalty=repetition_penalty,
+                repetition_window=repetition_window,
+                cfg_scale=cfg_scale,
+                max_num_pages=max_num_pages,
+                page_size=page_size,
+            )
 
         self.active_requests: List[Request] = []
 
@@ -76,7 +116,7 @@ class Scheduler:
 
         # return results to clients
         for req in requests:
-            if not req.output_audio.empty():
+            while not req.output_audio.empty():
                 # Send audio chunk message: request_id|AUDIO|audio_data
                 message = req.request_id.encode("utf-8") + b"|AUDIO|" + req.output_audio.get()
                 self.result_socket.send(message)
@@ -84,11 +124,12 @@ class Scheduler:
             # send completion notification for finished requests
             if req.done_all:
                 self.model_worker.free_kv_cache(req)
-                completion_message = {"status": "completed", "reason": "position_limit_exceeded"}
+                completion_message = {"status": "completed", "reason": req.finish_reason or "unknown"}
                 # Send completion message: request_id|COMPLETION|json_data
                 completion_payload = (
                     req.request_id.encode("utf-8") + b"|COMPLETION|" + json.dumps(completion_message).encode("utf-8")
                 )
+                self.logger.debug(f"Sending completion for request {req.request_id}")
                 self.result_socket.send(completion_payload)
 
         return

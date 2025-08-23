@@ -13,18 +13,51 @@ import zmq
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 
-from .scheduler import Scheduler
-from .utils import get_logger
+from .scheduler import load_scheduler
+from .utils import get_global_log_level, get_logger, set_global_log_level
 
-# Module-level logger
+# Module-level logger - will be updated with proper log level in main()
 logger = get_logger(__name__)
 
 
-def run_scheduler_daemon(model_name, request_socket_path, result_socket_path):
+def run_scheduler_daemon(
+    model_name: str,
+    scheduler_type: str,
+    max_batch_size: int,
+    max_num_pages: Optional[int],
+    page_size: int,
+    request_socket_path: str,
+    result_socket_path: str,
+    top_p: Optional[float],
+    top_k: Optional[int],
+    min_p: Optional[float],
+    temperature: Optional[float],
+    repetition_penalty: Optional[float],
+    repetition_window: Optional[int],
+    cfg_scale: Optional[float],
+    enable_cuda_graph: bool,
+    log_level: str,
+) -> None:
     """Function to run scheduler in daemon subprocess"""
+    # Set global log level in this subprocess
+    set_global_log_level(log_level)
     logger = get_logger(__name__)
-    scheduler = Scheduler(
-        model_name_or_path=model_name, request_socket_path=request_socket_path, result_socket_path=result_socket_path
+    scheduler = load_scheduler(
+        scheduler_type=scheduler_type,
+        model_name_or_path=model_name,
+        max_batch_size=max_batch_size,
+        max_num_pages=max_num_pages,
+        page_size=page_size,
+        request_socket_path=request_socket_path,
+        result_socket_path=result_socket_path,
+        top_p=top_p,
+        top_k=top_k,
+        min_p=min_p,
+        temperature=temperature,
+        repetition_penalty=repetition_penalty,
+        repetition_window=repetition_window,
+        cfg_scale=cfg_scale,
+        enable_cuda_graph=enable_cuda_graph,
     )
     logger.info(f"Scheduler started successfully with model: {model_name}")
     scheduler.run_forever()
@@ -35,9 +68,21 @@ class APIServer:
         self,
         model_name: str = "canopylabs/orpheus-3b-0.1-ft",
         request_socket_path: str = "/tmp/vox_serve_request.ipc",
-        result_socket_path: str = "/tmp/vox_serve_reqult.ipc",
+        result_socket_path: str = "/tmp/vox_serve_result.ipc",
         output_dir: str = "/tmp/vox_serve_audio",
         timeout_seconds: float = 30.0,
+        max_batch_size: int = 8,
+        top_p: float = None,
+        top_k: int = None,
+        min_p: float = None,
+        temperature: float = None,
+        repetition_penalty: float = None,
+        repetition_window: int = None,
+        cfg_scale: float = None,
+        enable_cuda_graph: bool = True,
+        max_num_pages: int = None,
+        page_size: int = 2048,
+        scheduler_type: str = "base",
     ):
         self.model_name = model_name
         self.request_socket_path = request_socket_path
@@ -47,6 +92,18 @@ class APIServer:
         self.upload_dir = Path(output_dir) / "uploads"
         self.upload_dir.mkdir(exist_ok=True)
         self.timeout_seconds = timeout_seconds
+        self.max_batch_size = max_batch_size
+        self.top_p = top_p
+        self.top_k = top_k
+        self.min_p = min_p
+        self.temperature = temperature
+        self.repetition_penalty = repetition_penalty
+        self.repetition_window = repetition_window
+        self.cfg_scale = cfg_scale
+        self.enable_cuda_graph = enable_cuda_graph
+        self.max_num_pages = max_num_pages
+        self.page_size = page_size
+        self.scheduler_type = scheduler_type
         self.scheduler_process = None
         self.logger = get_logger(__name__)
 
@@ -71,7 +128,6 @@ class APIServer:
         self.result_socket.connect(f"ipc://{result_socket_path}")
 
         # Set socket timeouts for faster shutdown
-        self.result_socket.setsockopt(zmq.RCVTIMEO, 1000)  # 1 second timeout for message processing
         self.request_socket.setsockopt(zmq.SNDTIMEO, 1000)  # 1 second send timeout
 
         # Start background message processing thread
@@ -89,7 +145,24 @@ class APIServer:
             # Create and start scheduler process
             self.scheduler_process = mp.Process(
                 target=run_scheduler_daemon,
-                args=(self.model_name, self.request_socket_path, self.result_socket_path),
+                kwargs={
+                    'model_name': self.model_name,
+                    'scheduler_type': self.scheduler_type,
+                    'max_batch_size': self.max_batch_size,
+                    'max_num_pages': self.max_num_pages,
+                    'page_size': self.page_size,
+                    'request_socket_path': self.request_socket_path,
+                    'result_socket_path': self.result_socket_path,
+                    'top_p': self.top_p,
+                    'top_k': self.top_k,
+                    'min_p': self.min_p,
+                    'temperature': self.temperature,
+                    'repetition_penalty': self.repetition_penalty,
+                    'repetition_window': self.repetition_window,
+                    'cfg_scale': self.cfg_scale,
+                    'enable_cuda_graph': self.enable_cuda_graph,
+                    'log_level': get_global_log_level(),
+                },
                 daemon=True,
             )
             self.scheduler_process.start()
@@ -104,15 +177,19 @@ class APIServer:
         """Background thread to process incoming messages from scheduler"""
         while self.running:
             try:
-                # Receive message from scheduler (request_id|TYPE|data)
-                message = self.result_socket.recv()
+                while True:
+                    # Use NOBLOCK to prevent message loss and add small sleep for efficiency
+                    message = self.result_socket.recv(flags=zmq.NOBLOCK)
 
-                # Parse message format: request_id|TYPE|data
-                parts = message.split(b"|", 2)
-                if len(parts) >= 3:
-                    request_id = parts[0].decode("utf-8")
-                    message_type = parts[1].decode("utf-8")
-                    data = parts[2]
+                    # Parse message format: request_id|TYPE|data
+                    parts = message.split(b"|", 2)
+                    if len(parts) >= 3:
+                        request_id = parts[0].decode("utf-8")
+                        message_type = parts[1].decode("utf-8")
+                        data = parts[2]
+                    else:
+                        self.logger.warning(f"Malformed message received: {message[:100]}...")
+                        continue
 
                     # Route message to the appropriate request
                     with self.request_lock:
@@ -125,9 +202,13 @@ class APIServer:
                                 completion_info = json.loads(data.decode("utf-8"))
                                 self.logger.info(f"Request {request_id} completed: {completion_info}")
                                 self.pending_requests[request_id]["event"].set()
+                        else:
+                            # Log when we receive messages for unknown requests
+                            self.logger.warning(f"Received {message_type} message for unknown request {request_id}")
 
             except zmq.Again:
-                # Timeout, continue loop
+                # No message available, sleep briefly to avoid busy waiting
+                time.sleep(0.001)
                 continue
             except Exception as e:
                 if self.running:  # Only log if we're still supposed to be running
@@ -148,13 +229,12 @@ class APIServer:
                 self.logger.error(f"Error stopping scheduler: {e}")
             self.logger.info("Scheduler process stopped")
 
-    def stream_audio_chunks(self, text: str = None, voice: str = "tara", audio_path: str = None) -> Iterator[bytes]:
+    def stream_audio(self, text: str = None, audio_path: str = None) -> Iterator[bytes]:
         """
         Generate audio from text and yield audio chunks as they arrive.
 
         Args:
             text: Input text to synthesize (optional if audio_path provided)
-            voice: Voice to use for synthesis
             audio_path: Path to input audio file (optional)
 
         Yields:
@@ -164,6 +244,7 @@ class APIServer:
             HTTPException: If generation fails or times out
         """
         request_id = str(uuid.uuid4())
+        self.logger.info(f"Request {request_id} joined for streaming")
 
         # Register this request for concurrent processing
         completion_event = threading.Event()
@@ -180,7 +261,6 @@ class APIServer:
             request_dict = {
                 "request_id": request_id,
                 "prompt": text,
-                "voice": voice,
                 "audio_path": audio_path,
             }
 
@@ -197,29 +277,33 @@ class APIServer:
                     raise HTTPException(status_code=500, detail="Generation timed out")
 
                 # Check for new chunks
+                new_chunks: list[bytes] = []
                 with self.request_lock:
                     request_data = self.pending_requests.get(request_id)
                     if request_data:
-                        available_chunks = len(request_data["chunks"])
+                        available = len(request_data["chunks"])
                         consumed = request_data["consumed_chunks"]
+                        new_chunks = request_data["chunks"][consumed:available]
+                        request_data["consumed_chunks"] = available
 
-                        # Yield any new chunks
-                        for i in range(consumed, available_chunks):
-                            yield request_data["chunks"][i]
-
-                        request_data["consumed_chunks"] = available_chunks
+                # Yield any new chunks
+                for chunk in new_chunks:
+                    yield chunk
 
                 # Small sleep to avoid busy waiting
-                time.sleep(0.01)
+                time.sleep(0.001)
 
             # Yield any remaining chunks after completion
+            remaining: list[bytes] = []
             with self.request_lock:
                 request_data = self.pending_requests.get(request_id)
                 if request_data:
                     consumed = request_data["consumed_chunks"]
-                    for i in range(consumed, len(request_data["chunks"])):
-                        yield request_data["chunks"][i]
+                    remaining = request_data["chunks"][consumed:]
                     del self.pending_requests[request_id]
+
+            for chunk in remaining:
+                yield chunk
 
         except Exception as e:
             # Clean up on error
@@ -229,13 +313,12 @@ class APIServer:
                 raise
             raise HTTPException(status_code=500, detail=f"Generation failed: {str(e)}") from e
 
-    def generate_audio(self, text: str = None, voice: str = "tara", audio_path: str = None) -> str:
+    def generate_audio(self, text: str = None, audio_path: str = None) -> str:
         """
         Generate audio from text and return path to the audio file.
 
         Args:
             text: Input text to synthesize (optional if audio_path provided)
-            voice: Voice to use for synthesis
             audio_path: Path to input audio file (optional)
 
         Returns:
@@ -245,6 +328,7 @@ class APIServer:
             HTTPException: If generation fails or times out
         """
         request_id = str(uuid.uuid4())
+        self.logger.info(f"Request {request_id} joined for generation")
 
         # Register this request for concurrent processing
         completion_event = threading.Event()
@@ -256,7 +340,6 @@ class APIServer:
             request_dict = {
                 "request_id": request_id,
                 "prompt": text,
-                "voice": voice,
                 "audio_path": audio_path,
             }
 
@@ -312,7 +395,7 @@ class APIServer:
             if hasattr(self, "result_socket"):
                 self.result_socket.close()
             if hasattr(self, "context"):
-                self.context.term(linger=0)  # Don't wait for pending messages
+                self.context.term()  # Terminate ZMQ context
         except Exception as e:
             self.logger.error(f"Error cleaning up ZMQ: {e}")
 
@@ -328,18 +411,20 @@ api_server = None
 
 @app.post("/generate")
 async def generate(
-    text: str = Form(...), voice: Optional[str] = Form("tara"), audio: Optional[UploadFile] = File(None)
+    text: str = Form(...),
+    audio: Optional[UploadFile] = File(None),
+    streaming: bool = Form(False)
 ):
     """
-    Generate speech from text and return audio file directly.
+    Generate speech from text and return audio file or streaming response.
 
     Args:
         text: Input text to synthesize
-        voice: Voice to use for synthesis
         audio: Optional input audio file
+        streaming: Whether to return streaming response (default: False)
 
     Returns:
-        Audio file as direct response
+        Audio file as direct response (if streaming=False) or streaming audio response (if streaming=True)
     """
     if api_server is None:
         raise HTTPException(status_code=503, detail="Server not ready")
@@ -355,10 +440,42 @@ async def generate(
             f.write(content)
 
     try:
-        audio_file = api_server.generate_audio(text, voice, audio_path)
-        request_id = Path(audio_file).stem
+        if streaming:
+            # Streaming response
+            def audio_stream():
+                # WAV header for 24kHz mono 16-bit audio
+                wav_header = io.BytesIO()
+                with wave.open(wav_header, "wb") as wf:
+                    wf.setnchannels(1)  # Mono
+                    wf.setsampwidth(2)  # 16-bit
+                    wf.setframerate(24000)  # 24kHz
+                    wf.writeframes(b"")  # Empty data for header
 
-        return FileResponse(path=audio_file, media_type="audio/wav", filename=f"{request_id}.wav")
+                # Get header bytes and correct the chunk size for streaming
+                wav_header.seek(0)
+                header_bytes = wav_header.read()
+
+                # Send WAV header first
+                yield header_bytes
+
+                # Stream audio chunks
+                for chunk in api_server.stream_audio(text, audio_path):
+                    yield chunk
+
+            return StreamingResponse(
+                audio_stream(),
+                media_type="audio/wav",
+                headers={
+                    "Content-Disposition": f"attachment; filename=stream_{uuid.uuid4().hex[:8]}.wav",
+                    "Cache-Control": "no-cache",
+                },
+            )
+        else:
+            # Non-streaming response (original behavior)
+            audio_file = api_server.generate_audio(text, audio_path)
+            request_id = Path(audio_file).stem
+
+            return FileResponse(path=audio_file, media_type="audio/wav", filename=f"{request_id}.wav")
     except HTTPException:
         raise
     except Exception as e:
@@ -377,82 +494,6 @@ async def generate(
             cleanup_thread = threading.Thread(target=delayed_cleanup, daemon=True)
             cleanup_thread.start()
 
-
-@app.post("/generate-stream")
-async def generate_stream(
-    text: str = Form(...), voice: Optional[str] = Form("tara"), audio: Optional[UploadFile] = File(None)
-):
-    """
-    Generate speech from text and stream audio chunks as they are generated.
-
-    Args:
-        text: Input text to synthesize
-        voice: Voice to use for synthesis
-        audio: Optional input audio file
-
-    Returns:
-        Streaming audio response with WAV format chunks
-    """
-    if api_server is None:
-        raise HTTPException(status_code=503, detail="Server not ready")
-
-    audio_path = None
-    if audio:
-        # Save uploaded audio file
-        audio_filename = f"{uuid.uuid4()}_{audio.filename}"
-        audio_path = str(api_server.upload_dir / audio_filename)
-
-        with open(audio_path, "wb") as f:
-            content = await audio.read()
-            f.write(content)
-
-    try:
-
-        def audio_stream():
-            # WAV header for 24kHz mono 16-bit audio
-            wav_header = io.BytesIO()
-            with wave.open(wav_header, "wb") as wf:
-                wf.setnchannels(1)  # Mono
-                wf.setsampwidth(2)  # 16-bit
-                wf.setframerate(24000)  # 24kHz
-                wf.writeframes(b"")  # Empty data for header
-
-            # Get header bytes and correct the chunk size for streaming
-            wav_header.seek(0)
-            header_bytes = wav_header.read()
-
-            # Send WAV header first
-            yield header_bytes
-
-            # Stream audio chunks
-            for chunk in api_server.stream_audio_chunks(text, voice, audio_path):
-                yield chunk
-
-        return StreamingResponse(
-            audio_stream(),
-            media_type="audio/wav",
-            headers={
-                "Content-Disposition": f"attachment; filename=stream_{uuid.uuid4().hex[:8]}.wav",
-                "Cache-Control": "no-cache",
-            },
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
-    finally:
-        # Schedule cleanup of uploaded file after a delay to ensure processing is complete
-        if audio_path and Path(audio_path).exists():
-
-            def delayed_cleanup():
-                import time
-
-                time.sleep(60)  # Wait 60 seconds before cleanup
-                if Path(audio_path).exists():
-                    Path(audio_path).unlink()
-
-            cleanup_thread = threading.Thread(target=delayed_cleanup, daemon=True)
-            cleanup_thread.start()
 
 
 @app.get("/health")
@@ -492,9 +533,107 @@ if __name__ == "__main__":
         default="canopylabs/orpheus-3b-0.1-ft",
         help="Model name or path to use for text-to-speech synthesis (default: canopylabs/orpheus-3b-0.1-ft)",
     )
-    parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind the server to (default: 0.0.0.0)")
-    parser.add_argument("--port", type=int, default=8000, help="Port to bind the server to (default: 8000)")
+    parser.add_argument(
+        "--host",
+        type=str,
+        default="0.0.0.0",
+        help="Host to bind the server to (default: 0.0.0.0)"
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8000,
+        help="Port to bind the server to (default: 8000)"
+    )
+    parser.add_argument(
+        "--max-batch-size",
+        type=int,
+        default=8,
+        help="Maximum batch size for inference (default: 8)"
+    )
+    parser.add_argument(
+        "--max-num-pages",
+        type=int,
+        default=1024,
+        help="Maximum number of KV cache pages (default: 1024)"
+    )
+    parser.add_argument(
+        "--page-size",
+        type=int,
+        default=128,
+        help="Size of each KV cache page (default: 128)"
+    )
+    parser.add_argument(
+        "--top-p",
+        type=float,
+        default=None,
+        help="Top-p sampling parameter (default: None)"
+    )
+    parser.add_argument(
+        "--top-k",
+        type=int,
+        default=None,
+        help="Top-k sampling parameter (default: None)"
+    )
+    parser.add_argument(
+        "--min-p",
+        type=float,
+        default=None,
+        help="Min-p sampling parameter (default: None)"
+    )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=None,
+        help="Temperature for sampling (default: None)"
+    )
+    parser.add_argument(
+        "--repetition-penalty",
+        type=float,
+        default=None,
+        help="Repetition penalty (default: None)"
+    )
+    parser.add_argument(
+        "--repetition-window",
+        type=int,
+        default=None,
+        help="Repetition window size (default: None)"
+    )
+    parser.add_argument(
+        "--cfg-scale",
+        type=float,
+        default=None,
+        help="CFG scale for guidance (default: None)"
+    )
+    parser.add_argument(
+        "--enable-cuda-graph",
+        action="store_true",
+        default=True,
+        help="Enable CUDA graph optimization for decode phase (default: True)"
+    )
+    parser.add_argument(
+        "--disable-cuda-graph",
+        action="store_true",
+        help="Disable CUDA graph optimization for decode phase"
+    )
+    parser.add_argument(
+        "--log-level",
+        type=str,
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="Set the logging level (default: INFO)"
+    )
+    parser.add_argument(
+        "--scheduler-type",
+        type=str,
+        default="base",
+        choices=["base", "online", "offline"],
+        help="Type of scheduler to use (default: base)"
+    )
     args = parser.parse_args()
+
+    # Set global log level for the entire application
+    set_global_log_level(args.log_level)
 
     # Set multiprocessing start method for CUDA compatibility
     try:
@@ -503,8 +642,25 @@ if __name__ == "__main__":
         # Already set, ignore
         pass
 
+    # Determine final CUDA graph setting
+    enable_cuda_graph = args.enable_cuda_graph and not args.disable_cuda_graph
+
     # Initialize API server instance with specified model
-    api_server = APIServer(model_name=args.model)
+    api_server = APIServer(
+        model_name=args.model,
+        max_batch_size=args.max_batch_size,
+        max_num_pages=args.max_num_pages,
+        page_size=args.page_size,
+        top_p=args.top_p,
+        top_k=args.top_k,
+        min_p=args.min_p,
+        temperature=args.temperature,
+        repetition_penalty=args.repetition_penalty,
+        repetition_window=args.repetition_window,
+        cfg_scale=args.cfg_scale,
+        enable_cuda_graph=enable_cuda_graph,
+        scheduler_type=args.scheduler_type,
+    )
 
     # Register signal handlers for graceful shutdown
     signal.signal(signal.SIGINT, signal_handler)
