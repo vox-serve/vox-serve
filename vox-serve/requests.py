@@ -41,6 +41,7 @@ class Request:
     next_audio_decode_idx: int = 0
     is_audio_available: bool = False
     done_all: bool = False
+    finish_reason: str = None
 
     # future optimization
     is_pressing: bool = False

@@ -623,4 +623,10 @@ class ModelWorker:
 
     def is_finished(self, request: Request):
         # TODO: request-specific max_tokens
-        return self.model.is_stop_id(request.lm_output_tokens[-1]) or request.next_position_id > self.model.max_tokens
+        if self.model.is_stop_id(request.lm_output_tokens[-1]):
+            request.finish_reason = "stop_id_encountered"
+            return True
+        elif request.next_position_id > self.model.max_tokens:
+            request.finish_reason = "position_limit_exceeded"
+            return True
+        return False

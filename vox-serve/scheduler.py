@@ -124,7 +124,7 @@ class Scheduler:
             # send completion notification for finished requests
             if req.done_all:
                 self.model_worker.free_kv_cache(req)
-                completion_message = {"status": "completed", "reason": "position_limit_exceeded"}
+                completion_message = {"status": "completed", "reason": req.finish_reason or "unknown"}
                 # Send completion message: request_id|COMPLETION|json_data
                 completion_payload = (
                     req.request_id.encode("utf-8") + b"|COMPLETION|" + json.dumps(completion_message).encode("utf-8")
