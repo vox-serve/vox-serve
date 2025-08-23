@@ -381,17 +381,18 @@ class BenchmarkClient:
         return sorted_values[lower_index] * (1 - weight) + sorted_values[upper_index] * weight
 
     def print_results(self, results: BenchmarkResults):
-        """Print formatted benchmark results."""
-        print("\n" + "=" * 60)
-        print("BENCHMARK RESULTS")
-        print("=" * 60)
+        """Print formatted benchmark results as markdown tables."""
+        print("\n# Benchmark Results\n")
 
         # Request summary
         success_rate = (results.successful_requests / results.total_requests * 100) if results.total_requests > 0 else 0
-        print(f"Total Requests:      {results.total_requests}")
-        print(f"Successful:          {results.successful_requests}")
-        print(f"Failed:              {results.failed_requests}")
-        print(f"Success Rate:        {success_rate:.1f}%")
+        print("## Request Summary\n")
+        print("| Metric | Value |")
+        print("|--------|-------|")
+        print(f"| Total Requests | {results.total_requests} |")
+        print(f"| Successful | {results.successful_requests} |")
+        print(f"| Failed | {results.failed_requests} |")
+        print(f"| Success Rate | {success_rate:.1f}% |")
         print()
 
         if results.successful_requests == 0:
@@ -399,70 +400,74 @@ class BenchmarkClient:
             return
 
         # TTFA metrics
-        print("TIME TO FIRST AUDIO (TTFA)")
-        print("-" * 30)
-        print(f"Mean:     {results.ttfa_mean:.3f}s")
-        print(f"P50:      {results.ttfa_p50:.3f}s")
-        print(f"P90:      {results.ttfa_p90:.3f}s")
-        print(f"P95:      {results.ttfa_p95:.3f}s")
-        print(f"P99:      {results.ttfa_p99:.3f}s")
-        print(f"Min:      {results.ttfa_min:.3f}s")
-        print(f"Max:      {results.ttfa_max:.3f}s")
+        print("## Time to First Audio (TTFA)\n")
+        print("| Statistic | Value (seconds) |")
+        print("|-----------|-----------------|")
+        print(f"| Mean | {results.ttfa_mean:.3f} |")
+        print(f"| P50 | {results.ttfa_p50:.3f} |")
+        print(f"| P90 | {results.ttfa_p90:.3f} |")
+        print(f"| P95 | {results.ttfa_p95:.3f} |")
+        print(f"| P99 | {results.ttfa_p99:.3f} |")
+        print(f"| Min | {results.ttfa_min:.3f} |")
+        print(f"| Max | {results.ttfa_max:.3f} |")
         print()
 
         # RTF metrics
-        print("REAL-TIME FACTOR (RTF)")
-        print("-" * 30)
-        print(f"Mean:     {results.rtf_mean:.3f}")
-        print(f"P50:      {results.rtf_p50:.3f}")
-        print(f"P90:      {results.rtf_p90:.3f}")
-        print(f"P95:      {results.rtf_p95:.3f}")
-        print(f"P99:      {results.rtf_p99:.3f}")
-        print(f"Min:      {results.rtf_min:.3f}")
-        print(f"Max:      {results.rtf_max:.3f}")
+        print("## Real-Time Factor (RTF)\n")
+        print("| Statistic | Value |")
+        print("|-----------|-------|")
+        print(f"| Mean | {results.rtf_mean:.3f} |")
+        print(f"| P50 | {results.rtf_p50:.3f} |")
+        print(f"| P90 | {results.rtf_p90:.3f} |")
+        print(f"| P95 | {results.rtf_p95:.3f} |")
+        print(f"| P99 | {results.rtf_p99:.3f} |")
+        print(f"| Min | {results.rtf_min:.3f} |")
+        print(f"| Max | {results.rtf_max:.3f} |")
         print()
 
         # Streaming viability metrics
-        print("STREAMING VIABILITY (Real-time Requirement)")
-        print("-" * 45)
-        print(f"Mean:     {results.streaming_viability_mean:.1f}%")
-        print(f"P50:      {results.streaming_viability_p50:.1f}%")
-        print(f"P90:      {results.streaming_viability_p90:.1f}%")
-        print(f"P95:      {results.streaming_viability_p95:.1f}%")
-        print(f"P99:      {results.streaming_viability_p99:.1f}%")
-        print(f"Min:      {results.streaming_viability_min:.1f}%")
-        print(f"Max:      {results.streaming_viability_max:.1f}%")
+        print("## Streaming Viability (Real-time Requirement)\n")
+        print("| Statistic | Value (%) |")
+        print("|-----------|-----------|")
+        print(f"| Mean | {results.streaming_viability_mean:.1f} |")
+        print(f"| P50 | {results.streaming_viability_p50:.1f} |")
+        print(f"| P90 | {results.streaming_viability_p90:.1f} |")
+        print(f"| P95 | {results.streaming_viability_p95:.1f} |")
+        print(f"| P99 | {results.streaming_viability_p99:.1f} |")
+        print(f"| Min | {results.streaming_viability_min:.1f} |")
+        print(f"| Max | {results.streaming_viability_max:.1f} |")
         print()
 
         # Total latency metrics
-        print("TOTAL LATENCY")
-        print("-" * 30)
-        print(f"Mean:     {results.latency_mean:.3f}s")
-        print(f"P50:      {results.latency_p50:.3f}s")
-        print(f"P90:      {results.latency_p90:.3f}s")
-        print(f"P95:      {results.latency_p95:.3f}s")
-        print(f"P99:      {results.latency_p99:.3f}s")
-        print(f"Min:      {results.latency_min:.3f}s")
-        print(f"Max:      {results.latency_max:.3f}s")
+        print("## Total Latency\n")
+        print("| Statistic | Value (seconds) |")
+        print("|-----------|-----------------|")
+        print(f"| Mean | {results.latency_mean:.3f} |")
+        print(f"| P50 | {results.latency_p50:.3f} |")
+        print(f"| P90 | {results.latency_p90:.3f} |")
+        print(f"| P95 | {results.latency_p95:.3f} |")
+        print(f"| P99 | {results.latency_p99:.3f} |")
+        print(f"| Min | {results.latency_min:.3f} |")
+        print(f"| Max | {results.latency_max:.3f} |")
         print()
 
         # Performance insights
-        print("PERFORMANCE INSIGHTS")
-        print("-" * 30)
+        print("## Performance Insights\n")
         avg_rtf = results.rtf_mean
         if avg_rtf > 1.0:
-            print(f"⚡ System is {avg_rtf:.1f}x FASTER than real-time")
+            print(f"⚡ System is **{avg_rtf:.1f}x FASTER** than real-time")
         elif avg_rtf < 1.0:
-            print(f"⚠️  System is {1 / avg_rtf:.1f}x SLOWER than real-time")
+            print(f"⚠️  System is **{1 / avg_rtf:.1f}x SLOWER** than real-time")
         else:
             print("📊 System runs at exactly real-time speed")
 
+        print()
         if results.ttfa_p95 < 0.5:
-            print("✅ Excellent TTFA latency (P95 < 0.5s)")
+            print("✅ **Excellent** TTFA latency (P95 < 0.5s)")
         elif results.ttfa_p95 < 1.0:
-            print("👍 Good TTFA latency (P95 < 1.0s)")
+            print("👍 **Good** TTFA latency (P95 < 1.0s)")
         else:
-            print("⚠️  High TTFA latency (P95 > 1.0s)")
+            print("⚠️  **High** TTFA latency (P95 > 1.0s)")
 
 
 async def main():
