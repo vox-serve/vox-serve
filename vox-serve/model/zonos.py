@@ -813,9 +813,6 @@ class ZonosModel(BaseLM):
         )
         logits += self.logit_bias
 
-        if getattr(attn_wrapper, "qo_indptr", None) is not None:
-            logits = logits[attn_wrapper.qo_indptr[:-1] - 1]
-
         return logits
 
     def sampling(

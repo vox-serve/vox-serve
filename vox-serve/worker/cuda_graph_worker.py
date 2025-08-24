@@ -484,6 +484,11 @@ class CudaGraphWorker(ModelWorker):
                 input_masks=input_masks,
             )
 
+            # select last token for each request for prefill
+            if getattr(self.prefill_wrapper, "qo_indptr", None) is not None:
+                logits = logits[self.prefill_wrapper.qo_indptr[:-1] - 1]
+                backbone_hidden_states = backbone_hidden_states[self.prefill_wrapper.qo_indptr[:-1] - 1]
+
             output_ids, hidden_for_depth = self.model.sampling(
                 logits=logits,
                 hidden_states=backbone_hidden_states,
@@ -505,6 +510,10 @@ class CudaGraphWorker(ModelWorker):
                 input_features=input_features,
                 input_masks=input_masks,
             )
+
+            # select last token for each request for prefill
+            if getattr(self.prefill_wrapper, "qo_indptr", None) is not None:
+                logits = logits[self.prefill_wrapper.qo_indptr[:-1] - 1]
 
             self.nvtx_range_pop() # backbone_forward
             output_ids = self.model.sampling(

@@ -607,11 +607,6 @@ class CSMModel(BaseLMWithDepth):
             kv_cache=kv_cache,
         )
 
-        # select last token for each request for prefill
-        if getattr(attn_wrapper, "qo_indptr", None) is not None:
-            backbone_logits = backbone_logits[attn_wrapper.qo_indptr[:-1] - 1]
-            backbone_last_hidden = backbone_last_hidden[attn_wrapper.qo_indptr[:-1] - 1]
-
         # add codebook dimension
         return backbone_logits[:, None, :], backbone_last_hidden
 
