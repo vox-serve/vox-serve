@@ -445,12 +445,12 @@ class CudaGraphWorker(ModelWorker):
         batch_size = len(requests)
 
         # Prepare input_masks and input_features as single tensors
-        if input_masks[0] is not None:
+        if self.model.needs_input_masks:
             input_masks = torch.cat(input_masks, dim=0)
         else:
             input_masks = None
 
-        if input_features[0] is not None:
+        if self.model.needs_input_features:
             input_features = torch.cat(input_features, dim=0)
         else:
             input_features = None
@@ -586,9 +586,9 @@ class CudaGraphWorker(ModelWorker):
         )
 
         # Copy input_masks and input_features as single tensors to CUDA graph buffers
-        if input_masks[0] is not None:
+        if self.model.needs_input_masks:
             self.cuda_graph_buffers["input_masks"][:padded_batch_size].copy_(torch.cat(input_masks, dim=0))
-        if input_features[0] is not None:
+        if self.model.needs_input_features:
             self.cuda_graph_buffers["input_features"][:padded_batch_size].copy_(torch.cat(input_features, dim=0))
 
         # Replay the CUDA graph

@@ -261,12 +261,12 @@ class ModelWorker:
         position_ids = torch.tensor(position_ids, device=self.device, dtype=torch.int32)
 
         # Prepare input_masks and input_features as single tensors
-        if input_masks[0] is not None:
+        if self.model.needs_input_masks:
             input_masks = torch.cat(input_masks, dim=0)
         else:
             input_masks = None
 
-        if input_features[0] is not None:
+        if self.model.needs_input_features:
             input_features = torch.cat(input_features, dim=0)
         else:
             input_features = None
@@ -383,12 +383,12 @@ class ModelWorker:
         position_ids = torch.tensor(position_ids, device=self.device, dtype=torch.int32)
 
         # Handle optional inputs
-        if input_masks[0] is not None:
+        if self.model.needs_input_masks:
             input_masks = torch.cat(input_masks, dim=0)
         else:
             input_masks = None
 
-        if input_features[0] is not None:
+        if self.model.needs_input_features:
             input_features = torch.cat(input_features, dim=0)
         else:
             input_features = None

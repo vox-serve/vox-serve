@@ -653,6 +653,16 @@ class ZonosModel(BaseLM):
         """Vocabulary size of the model."""
         return 1025
 
+    @property
+    def needs_input_features(self) -> bool:
+        """Indicates if the model requires input_features."""
+        return True
+
+    @property
+    def needs_input_masks(self) -> bool:
+        """Indicates if the model requires input_masks."""
+        return True
+
     def is_stop_id(self, token_ids: List[int]) -> bool:
         return token_ids[0] == self.eos_token_id
 

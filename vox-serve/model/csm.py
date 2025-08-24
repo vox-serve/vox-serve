@@ -411,6 +411,11 @@ class CSMModel(BaseLMWithDepth):
         return True
 
     @property
+    def needs_input_masks(self) -> bool:
+        """Indicates if the model requires input_masks."""
+        return True
+
+    @property
     def embed_text_tokens(self):
         """Embedding layer for text tokens."""
         return self.model.embed_text_tokens
