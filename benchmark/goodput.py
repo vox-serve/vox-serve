@@ -4,7 +4,6 @@ Benchmarking goodput in online serving scenario.
 
 Measures performance metrics:
 - TTFA (Time to First Audio): Latency from request start to first audio chunk
-- RTF (Real-Time Factor) attainment: Whether the generation is faster than real-time
 
 Usage:
     python goodput.py --host localhost --port 8000 --rate 10 --duration 60
@@ -38,7 +37,6 @@ class RequestMetrics:
     end_time: Optional[float] = None
     total_latency: Optional[float] = None
     audio_duration: Optional[float] = None  # Duration of generated audio
-    rtf: Optional[float] = None  # Real-time factor
     streaming_viability: Optional[float] = None  # Streaming viability percentage
     success: bool = False
     error_message: Optional[str] = None
@@ -70,15 +68,6 @@ class BenchmarkResults:
     ttfa_p99: float = 0.0
     ttfa_min: float = 0.0
     ttfa_max: float = 0.0
-
-    # RTF metrics
-    rtf_mean: float = 0.0
-    rtf_p50: float = 0.0
-    rtf_p90: float = 0.0
-    rtf_p95: float = 0.0
-    rtf_p99: float = 0.0
-    rtf_min: float = 0.0
-    rtf_max: float = 0.0
 
     # Streaming viability metrics (percentage)
     streaming_viability_mean: float = 0.0
@@ -208,10 +197,6 @@ class BenchmarkClient:
                 full_audio = b"".join(audio_chunks)
                 metrics.audio_duration = self.get_audio_duration(full_audio)
 
-                # Calculate RTF (Real-Time Factor)
-                if metrics.audio_duration and metrics.total_latency:
-                    metrics.rtf = metrics.audio_duration / metrics.total_latency
-
                 # Calculate streaming viability (real-time requirement satisfaction)
                 metrics.streaming_viability = self.calculate_streaming_viability(metrics)
 
@@ -280,7 +265,6 @@ class BenchmarkClient:
                     # Print real-time progress
                     status = "✓" if result.success else "✗"
                     ttfa_str = f"{result.ttfa:.3f}s" if result.ttfa else "N/A"
-                    rtf_str = f"{result.rtf:.3f}" if result.rtf else "N/A"
                     streaming_viability_str = (
                         f"{result.streaming_viability:.1f}%"
                         if result.streaming_viability is not None
@@ -288,7 +272,7 @@ class BenchmarkClient:
                     )
                     print(
                         f"{status} {result.request_id}: "
-                        f"TTFA={ttfa_str}, RTF={rtf_str}, "
+                        f"TTFA={ttfa_str}, "
                         f"Streaming_viability={streaming_viability_str}"
                     )
 
@@ -311,7 +295,6 @@ class BenchmarkClient:
 
         # Extract metrics for successful requests
         ttfa_values = [m.ttfa for m in successful_metrics if m.ttfa is not None]
-        rtf_values = [m.rtf for m in successful_metrics if m.rtf is not None]
         streaming_viability_values = [
             m.streaming_viability for m in successful_metrics
             if m.streaming_viability is not None
@@ -328,17 +311,6 @@ class BenchmarkClient:
             results.ttfa_p99 = self._percentile(ttfa_sorted, 99)
             results.ttfa_min = min(ttfa_values)
             results.ttfa_max = max(ttfa_values)
-
-        # Calculate RTF statistics
-        if rtf_values:
-            rtf_sorted = sorted(rtf_values)
-            results.rtf_mean = statistics.mean(rtf_values)
-            results.rtf_p50 = self._percentile(rtf_sorted, 50)
-            results.rtf_p90 = self._percentile(rtf_sorted, 90)
-            results.rtf_p95 = self._percentile(rtf_sorted, 95)
-            results.rtf_p99 = self._percentile(rtf_sorted, 99)
-            results.rtf_min = min(rtf_values)
-            results.rtf_max = max(rtf_values)
 
         # Calculate streaming viability statistics
         if streaming_viability_values:
@@ -412,19 +384,6 @@ class BenchmarkClient:
         print(f"| Max | {results.ttfa_max:.3f} |")
         print()
 
-        # RTF metrics
-        print("## Real-Time Factor (RTF)\n")
-        print("| Statistic | Value |")
-        print("|-----------|-------|")
-        print(f"| Mean | {results.rtf_mean:.3f} |")
-        print(f"| P50 | {results.rtf_p50:.3f} |")
-        print(f"| P90 | {results.rtf_p90:.3f} |")
-        print(f"| P95 | {results.rtf_p95:.3f} |")
-        print(f"| P99 | {results.rtf_p99:.3f} |")
-        print(f"| Min | {results.rtf_min:.3f} |")
-        print(f"| Max | {results.rtf_max:.3f} |")
-        print()
-
         # Streaming viability metrics
         print("## Streaming Viability (Real-time Requirement)\n")
         print("| Statistic | Value (%) |")
@@ -453,15 +412,6 @@ class BenchmarkClient:
 
         # Performance insights
         print("## Performance Insights\n")
-        avg_rtf = results.rtf_mean
-        if avg_rtf > 1.0:
-            print(f"⚡ System is **{avg_rtf:.1f}x FASTER** than real-time")
-        elif avg_rtf < 1.0:
-            print(f"⚠️  System is **{1 / avg_rtf:.1f}x SLOWER** than real-time")
-        else:
-            print("📊 System runs at exactly real-time speed")
-
-        print()
         if results.ttfa_p95 < 0.5:
             print("✅ **Excellent** TTFA latency (P95 < 0.5s)")
         elif results.ttfa_p95 < 1.0:
