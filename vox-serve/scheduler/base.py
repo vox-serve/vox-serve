@@ -28,6 +28,7 @@ class Scheduler:
         repetition_window: int = None,
         cfg_scale: float = None,
         enable_cuda_graph: bool = True,
+        enable_nvtx: bool = False,
     ):
         self.device = device
         self.max_batch_size = max_batch_size
@@ -48,6 +49,7 @@ class Scheduler:
                 cfg_scale=cfg_scale,
                 max_num_pages=max_num_pages,
                 page_size=page_size,
+                enable_nvtx=enable_nvtx,
             )
         else:
             self.logger.info("Using ModelWorker without CUDA graph optimization")
@@ -63,6 +65,7 @@ class Scheduler:
                 cfg_scale=cfg_scale,
                 max_num_pages=max_num_pages,
                 page_size=page_size,
+                enable_nvtx=enable_nvtx,
             )
 
         self.active_requests: List[Request] = []

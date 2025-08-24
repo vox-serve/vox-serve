@@ -36,6 +36,7 @@ def run_scheduler_daemon(
     repetition_window: Optional[int],
     cfg_scale: Optional[float],
     enable_cuda_graph: bool,
+    enable_nvtx: bool,
     log_level: str,
 ) -> None:
     """Function to run scheduler in daemon subprocess"""
@@ -58,6 +59,7 @@ def run_scheduler_daemon(
         repetition_window=repetition_window,
         cfg_scale=cfg_scale,
         enable_cuda_graph=enable_cuda_graph,
+        enable_nvtx=enable_nvtx,
     )
     logger.info(f"Scheduler started successfully with model: {model_name}")
     scheduler.run_forever()
@@ -67,6 +69,7 @@ class APIServer:
     def __init__(
         self,
         model_name: str = "canopylabs/orpheus-3b-0.1-ft",
+        scheduler_type: str = "base",
         request_socket_path: str = "/tmp/vox_serve_request.ipc",
         result_socket_path: str = "/tmp/vox_serve_result.ipc",
         output_dir: str = "/tmp/vox_serve_audio",
@@ -80,9 +83,9 @@ class APIServer:
         repetition_window: int = None,
         cfg_scale: float = None,
         enable_cuda_graph: bool = True,
+        enable_nvtx: bool = False,
         max_num_pages: int = None,
         page_size: int = 2048,
-        scheduler_type: str = "base",
     ):
         self.model_name = model_name
         self.request_socket_path = request_socket_path
@@ -101,6 +104,7 @@ class APIServer:
         self.repetition_window = repetition_window
         self.cfg_scale = cfg_scale
         self.enable_cuda_graph = enable_cuda_graph
+        self.enable_nvtx = enable_nvtx
         self.max_num_pages = max_num_pages
         self.page_size = page_size
         self.scheduler_type = scheduler_type
@@ -161,6 +165,7 @@ class APIServer:
                     'repetition_window': self.repetition_window,
                     'cfg_scale': self.cfg_scale,
                     'enable_cuda_graph': self.enable_cuda_graph,
+                    'enable_nvtx': self.enable_nvtx,
                     'log_level': get_global_log_level(),
                 },
                 daemon=True,
@@ -630,6 +635,11 @@ if __name__ == "__main__":
         choices=["base", "online", "offline"],
         help="Type of scheduler to use (default: base)"
     )
+    parser.add_argument(
+        "--enable-nvtx",
+        action="store_true",
+        help="Enable NVTX profiling for performance analysis (default: False)"
+    )
     args = parser.parse_args()
 
     # Set global log level for the entire application
@@ -648,6 +658,7 @@ if __name__ == "__main__":
     # Initialize API server instance with specified model
     api_server = APIServer(
         model_name=args.model,
+        scheduler_type=args.scheduler_type,
         max_batch_size=args.max_batch_size,
         max_num_pages=args.max_num_pages,
         page_size=args.page_size,
@@ -659,7 +670,7 @@ if __name__ == "__main__":
         repetition_window=args.repetition_window,
         cfg_scale=args.cfg_scale,
         enable_cuda_graph=enable_cuda_graph,
-        scheduler_type=args.scheduler_type,
+        enable_nvtx=args.enable_nvtx,
     )
 
     # Register signal handlers for graceful shutdown

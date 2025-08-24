@@ -26,6 +26,7 @@ class ModelWorker:
         repetition_penalty: float = None,
         repetition_window: int = None,
         cfg_scale: float = None,
+        enable_nvtx: bool = False,
     ):
         # Load model with sampling parameters
         self.model = load_model(
@@ -42,6 +43,9 @@ class ModelWorker:
         self.device = "cuda:0"
         self.max_batch_size = max_batch_size
         self.logger = get_logger(__name__)
+
+        # Set NVTX profiling based on parameter
+        self.nvtx_enabled = enable_nvtx
 
         # Store sampling and repetition parameters
         self.top_p = top_p
@@ -528,6 +532,27 @@ class ModelWorker:
         encoded = torchaudio.functional.resample(encoded, orig_freq=44100, new_freq=orig_sr)
 
         return encoded
+
+    def nvtx_range_push(self, name: str):
+        """
+        Push an NVTX range with CUDA synchronization if profiling is enabled.
+        Does nothing if NVTX profiling is disabled.
+
+        Args:
+            name: Name of the NVTX range
+        """
+        if self.nvtx_enabled:
+            torch.cuda.synchronize()
+            torch.cuda.nvtx.range_push(name)
+
+    def nvtx_range_pop(self):
+        """
+        Pop an NVTX range with CUDA synchronization if profiling is enabled.
+        Does nothing if NVTX profiling is disabled.
+        """
+        if self.nvtx_enabled:
+            torch.cuda.synchronize()
+            torch.cuda.nvtx.range_pop()
 
     def free_kv_cache(self, request: Request):
         """
