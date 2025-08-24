@@ -260,18 +260,16 @@ class ModelWorker:
         input_ids = torch.tensor(input_ids, device=self.device, dtype=torch.int32)
         position_ids = torch.tensor(position_ids, device=self.device, dtype=torch.int32)
 
-        # TODO: maybe model should have property about this?
+        # Prepare input_masks and input_features as single tensors
         if input_masks[0] is not None:
             input_masks = torch.cat(input_masks, dim=0)
         else:
             input_masks = None
 
-        # TODO: for zonos's purpose, the input_features has to be list of tensors for prefill.
-        # This is not a good design and we should fix it.
-        # if input_features[0] is not None:
-        #     input_features = torch.cat(input_features, dim=0)
-        # else:
-        #     input_features = None
+        if input_features[0] is not None:
+            input_features = torch.cat(input_features, dim=0)
+        else:
+            input_features = None
 
         qo_indptr_tensor = torch.tensor(qo_indptr, device=self.device, dtype=torch.int32)
         paged_kv_indptr_tensor = torch.tensor(paged_kv_indptr, device=self.device, dtype=torch.int32)

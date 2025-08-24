@@ -150,13 +150,12 @@ class CudaGraphWorker(ModelWorker):
         position_ids_buffer = torch.zeros(self.max_batch_size, dtype=torch.int32, device=self.device)
         input_features_buffer = torch.zeros(
             self.max_batch_size,
-            self.model.n_codebooks,
             self.model.hidden_size,
             dtype=torch.bfloat16,
             device=self.device,
         )
         input_masks_buffer = torch.zeros(
-            self.max_batch_size, self.model.n_codebooks, dtype=torch.bool, device=self.device
+            self.max_batch_size, dtype=torch.bool, device=self.device
         )
 
         # Create output buffer (assuming vocab size, will be adjusted based on model)
@@ -445,18 +444,16 @@ class CudaGraphWorker(ModelWorker):
 
         batch_size = len(requests)
 
-        # TODO: maybe model should have property about this?
+        # Prepare input_masks and input_features as single tensors
         if input_masks[0] is not None:
             input_masks = torch.cat(input_masks, dim=0)
         else:
             input_masks = None
 
-        # TODO: for zonos's purpose, the input_features has to be list of tensors for prefill.
-        # This is not a good design and we should fix it.
-        # if input_features[0] is not None:
-        #     input_features = torch.cat(input_features, dim=0)
-        # else:
-        #     input_features = None
+        if input_features[0] is not None:
+            input_features = torch.cat(input_features, dim=0)
+        else:
+            input_features = None
 
         qo_indptr_tensor = torch.tensor(qo_indptr, device=self.device, dtype=torch.int32)
         paged_kv_indptr_tensor = torch.tensor(paged_kv_indptr, device=self.device, dtype=torch.int32)
@@ -588,7 +585,7 @@ class CudaGraphWorker(ModelWorker):
             torch.tensor(position_ids, device=self.device, dtype=torch.int32)
         )
 
-        # TODO: maybe model should have property about this?
+        # Copy input_masks and input_features as single tensors to CUDA graph buffers
         if input_masks[0] is not None:
             self.cuda_graph_buffers["input_masks"][:padded_batch_size].copy_(torch.cat(input_masks, dim=0))
         if input_features[0] is not None:
