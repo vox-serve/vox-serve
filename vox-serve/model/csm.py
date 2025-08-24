@@ -636,9 +636,8 @@ class CSMModel(BaseLMWithDepth):
 
         # there are 33 codebooks (32 audio + 1 text), but the output from backbone transformer is single codebook
         # so here we allocate output_ids for all codebooks but do sampling only for the first one
-        output_ids = torch.zeros(logits.shape[0], self.n_codebooks, dtype=torch.long, device=self.device)
-        for i in range(logits.shape[1]):
-            output_ids[:, i] = Sampler.run_sampling(logits[:, i], config=sampling_params)
+        output_ids = Sampler.run_sampling(logits.view(-1, self.vocab_size), config=sampling_params)
+        output_ids = output_ids.view(logits.shape[0], logits.shape[1])
 
         c0_embed = self.embed_audio_tokens_single(output_ids[:, 0], 0)
         # backbone_ids.shape=torch.Size([1])

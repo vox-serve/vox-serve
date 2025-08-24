@@ -421,9 +421,8 @@ class OrpheusModel(BaseLM):
                 logits[i], req.repetition_cache, sampling_params.repetition_penalty
             )
 
-        output_ids = torch.zeros(logits.shape[0], logits.shape[1], dtype=torch.long, device=self.device)
-        for i in range(self.n_codebooks):
-            output_ids[:, i] = Sampler.run_sampling(logits[:, i], config=sampling_params)
+        output_ids = Sampler.run_sampling(logits.view(-1, self.vocab_size), config=sampling_params)
+        output_ids = output_ids.view(logits.shape[0], logits.shape[1])
 
         # update repetition cache
         for i, req in enumerate(requests):
