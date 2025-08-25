@@ -17,6 +17,7 @@ class FlashInferPrefillWrapper:
         n_state: int,
         page_size: int,
         batch_size: int = None,
+        max_seq_len: int = None,
         device: torch.device = torch.device("cuda"),
         qo_indptr_buffer: torch.Tensor = None,
         paged_kv_indptr_buffer: torch.Tensor = None,
@@ -27,10 +28,11 @@ class FlashInferPrefillWrapper:
         self.device = device
         self.use_cuda_graph = use_cuda_graph
         self.batch_size = batch_size
+        self.max_seq_len = max_seq_len
 
         if self.use_cuda_graph:
-            # TODO: to be used only for depth transformer, where the sequence length per request is always 2
-            assert batch_size is not None, "batch_size must be specified for cuda graph optimization"
+            assert self.batch_size is not None, "batch_size must be specified for cuda graph optimization"
+            assert max_seq_len is not None, "max_seq_len must be specified for cuda graph optimization"
             self.attn_wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
                 attn_buffer,
                 "NHD",
@@ -40,8 +42,8 @@ class FlashInferPrefillWrapper:
                 paged_kv_indices_buf=paged_kv_indices_buffer,
                 paged_kv_last_page_len_buf=paged_kv_last_page_len_buffer,
             )
-            self.token_to_page = torch.zeros(2 * batch_size, dtype=torch.long, device=device)
-            self.token_to_cache = torch.zeros(2 * batch_size, dtype=torch.long, device=device)
+            self.token_to_page = torch.zeros(max_seq_len, dtype=torch.long, device=device)
+            self.token_to_cache = torch.zeros(max_seq_len, dtype=torch.long, device=device)
 
         else:
             self.attn_wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
@@ -81,34 +83,35 @@ class FlashInferPrefillWrapper:
         self.paged_kv_indices = paged_kv_indices
         self.paged_kv_last_page_len = paged_kv_last_page_len
 
-        # Precompute KV cache update locations as a single tensor
-        # Format: [start_idx, end_idx, page_idx, cache_start, cache_end, n_new_token]
         n_req = qo_indptr.shape[0] - 1
 
-        # 1) compute per-request starts, lengths, page indices, cache starts/ends
-        starts = qo_indptr[:-1]  # shape [n_req]
-        ends = qo_indptr[1:]
-        lengths = ends - starts  # shape [n_req]
-        page_idxs = paged_kv_indices[paged_kv_indptr[:-1]]  # shape [n_req]
-        cache_ends = paged_kv_last_page_len  # shape [n_req]
-        cache_starts = cache_ends - lengths  # shape [n_req]
+        # Per-request counts
+        starts = qo_indptr[:-1].to(torch.int32)                     # [n_req]
+        lens   = (qo_indptr[1:] - qo_indptr[:-1]).to(torch.int32)   # [n_req]
+        total_tokens = int(lens.sum().item())
 
-        # 2) now build the flat mappings
-        total_tokens = int(lengths.sum().item())  # total across all requests
+        # Pages/lengths AFTER append
+        num_pages_after = (paged_kv_indptr[1:] - paged_kv_indptr[:-1]).to(torch.int32) # [n_req]
+        kv_len_after = (num_pages_after - 1) * self.page_size + paged_kv_last_page_len # [n_req], int32
 
-        # for each new token, which request (0…n_req-1) it belongs to
-        segment_ids = torch.repeat_interleave(torch.arange(n_req, device=self.device), lengths)  # shape [total_tokens]
+        # Flatten to per-token
+        seg = torch.repeat_interleave(torch.arange(n_req, device=self.device, dtype=torch.int32), lens)  # [T]
+        intra = torch.arange(total_tokens, device=self.device, dtype=torch.int32) - torch.repeat_interleave(starts, lens)
 
-        # global token positions 0…total_tokens-1
-        token_pos = torch.arange(total_tokens, device=self.device)
+        # Starting index of the newly appended run (per request), then absolute index per token
+        start_new = kv_len_after[seg] - lens[seg]                # [T], int32
+        g = start_new + intra                                    # [T], int32
 
-        # 3) fill the two output tensors in one shot
-        if self.use_cuda_graph:
-            self.token_to_page[:] = page_idxs[segment_ids]
-            self.token_to_cache[:] = cache_starts[segment_ids] + (token_pos - starts[segment_ids])
-        else:
-            self.token_to_page = page_idxs[segment_ids]
-            self.token_to_cache = cache_starts[segment_ids] + (token_pos - starts[segment_ids])
+        # Map to page + offset using the (post-append) page table
+        page_off = torch.div(g, self.page_size, rounding_mode='floor').to(torch.int32)
+        off_in_page = (g - page_off * self.page_size).to(torch.int32)
+        abs_page_ptr = (paged_kv_indptr[:-1])[seg] + page_off    # [T], int32
+
+        print(f"{paged_kv_indices[abs_page_ptr]=} {off_in_page=}")
+        self.token_to_page[:total_tokens] = paged_kv_indices[abs_page_ptr]         # [total_tokens], page ids
+        self.token_to_cache[:total_tokens] = off_in_page                           # [total_tokens], offsets within page
+        self.token_to_page[total_tokens:] = -1
+        self.token_to_cache[total_tokens:] = -1
 
 
     def run(self, q, kv_cache):

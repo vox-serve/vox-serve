@@ -21,7 +21,8 @@ class CudaGraphWorker(ModelWorker):
         super().__init__(*args, **kwargs)
 
         # CUDA graph related attributes
-        self.cuda_graphs_lm: Dict[int, torch.cuda.CUDAGraph] = {}
+        self.cuda_graphs_lm_decode: Dict[int, torch.cuda.CUDAGraph] = {}
+        self.cuda_graphs_lm_prefill: Dict[int, torch.cuda.CUDAGraph] = {}
         self.cuda_graphs_detokenization: Dict[int, torch.cuda.CUDAGraph] = {}
         self.cuda_graphs_depth_prefill: Dict[int, torch.cuda.CUDAGraph] = {}
         self.cuda_graphs_depth_decode: Dict[int, torch.cuda.CUDAGraph] = {}
@@ -38,20 +39,33 @@ class CudaGraphWorker(ModelWorker):
 
     def _prepare_attention_wrappers(self):
         self.cuda_graph_batch_sizes = [2**i for i in range(int(np.log2(self.max_batch_size)) + 1)]
+        # Define sequence length buckets for prefill CUDA graphs
+        self.cuda_graph_seq_len_buckets = [32, 64, 128, 256, 512, 1024, 2048]
 
         self.flashinfer_buffer = torch.empty(256 * 1024 * 1024, dtype=torch.uint8, device=self.device)
 
         self.paged_kv_indptr_buffer = torch.zeros(self.max_batch_size + 1).to(self.device).to(torch.int32)
         self.paged_kv_indices_buffer = torch.zeros(self.max_num_pages).to(self.device).to(torch.int32)
         self.paged_kv_last_page_len_buffer = torch.zeros(self.max_batch_size).to(self.device).to(torch.int32)
-
-        self.prefill_wrapper = FlashInferPrefillWrapper(
-            attn_buffer=self.flashinfer_buffer,
-            n_qo_head=self.model.num_attention_heads,
-            n_kv_head=self.model.num_key_value_heads,
-            n_state=self.model.hidden_size,
-            page_size=self.page_size,
-        )
+        
+        # Create prefill wrappers for CUDA graphs with different sequence lengths
+        self.prefill_wrappers = {}
+        for seq_len in self.cuda_graph_seq_len_buckets:
+            batch_size = 1
+            self.prefill_wrappers[seq_len] = FlashInferPrefillWrapper(
+                attn_buffer=self.flashinfer_buffer,
+                n_qo_head=self.model.num_attention_heads,
+                n_kv_head=self.model.num_key_value_heads,
+                n_state=self.model.hidden_size,
+                page_size=self.page_size,
+                batch_size=batch_size,
+                max_seq_len=seq_len,
+                qo_indptr_buffer=self.paged_kv_indptr_buffer[: batch_size + 1],
+                paged_kv_indptr_buffer=self.paged_kv_indptr_buffer[: batch_size + 1],
+                paged_kv_indices_buffer=self.paged_kv_indices_buffer,
+                paged_kv_last_page_len_buffer=self.paged_kv_last_page_len_buffer[:batch_size],
+                use_cuda_graph=True,
+            )
 
         self.decode_wrappers = {}
         for batch_size in self.cuda_graph_batch_sizes:
@@ -102,6 +116,7 @@ class CudaGraphWorker(ModelWorker):
                     n_state=self.model.depth_hidden_size,
                     page_size=self.model.depth_n_codebooks,
                     batch_size=batch_size,
+                    max_seq_len=2 * batch_size,
                     qo_indptr_buffer=self.depth_qo_indptr_buffer[: batch_size + 1],
                     paged_kv_indptr_buffer=self.depth_paged_kv_indptr_buffer[: batch_size + 1],
                     paged_kv_indices_buffer=self.depth_paged_kv_indices_buffer[:batch_size],
@@ -137,10 +152,126 @@ class CudaGraphWorker(ModelWorker):
             self.depth_decode_wrappers = None
             self.depth_kv_cache = None
 
+    def _initialize_prefill_cuda_graphs(self):
+        """Initialize CUDA graphs for prefill phase with different sequence length buckets."""
+        self.logger.info("Initializing prefill CUDA graphs...")
+        
+        # Create prefill input buffers for maximum sequence length
+        max_seq_len = max(self.cuda_graph_seq_len_buckets)
+        
+        prefill_input_ids_buffer = torch.zeros(
+            max_seq_len, self.model.n_codebooks, dtype=torch.int32, device=self.device
+        )
+        prefill_position_ids_buffer = torch.zeros(
+            max_seq_len, dtype=torch.int32, device=self.device
+        )
+        prefill_input_features_buffer = torch.zeros(
+            max_seq_len, self.model.hidden_size,
+            dtype=torch.bfloat16, device=self.device
+        )
+        prefill_input_masks_buffer = torch.zeros(
+            max_seq_len, dtype=torch.bool, device=self.device
+        )
+        
+        # Create prefill output buffers
+        prefill_logits_buffer = torch.zeros(
+            max_seq_len,
+            1 if self.has_depth_transformer else self.model.n_codebooks,
+            self.model.vocab_size,
+            dtype=torch.bfloat16, device=self.device
+        )
+        prefill_backbone_hidden_states_buffer = torch.zeros(
+            max_seq_len, self.model.hidden_size,
+            dtype=torch.bfloat16, device=self.device
+        )
+        
+        # Add prefill buffers to the unified buffer dictionary
+        self.cuda_graph_buffers.update({
+            "prefill_input_ids": prefill_input_ids_buffer,
+            "prefill_position_ids": prefill_position_ids_buffer,
+            "prefill_input_features": prefill_input_features_buffer,
+            "prefill_input_masks": prefill_input_masks_buffer,
+            "prefill_logits": prefill_logits_buffer,
+            "prefill_backbone_hidden_states": prefill_backbone_hidden_states_buffer,
+        })
+        
+        # Capture CUDA graphs for different batch size and sequence length combinations
+        for seq_len in self.cuda_graph_seq_len_buckets:
+            batch_size = 1
+            self.logger.info(f"Capturing prefill CUDA graph for seq_len={seq_len}")
+
+            seq_len_per_batch = seq_len // batch_size
+            
+            # Create buffers for flashinfer planning
+            # qo_indptr[-1] == seq_len
+            qo_indptr = torch.arange(batch_size + 1, dtype=torch.int32, device=self.device) * seq_len_per_batch
+            paged_kv_indptr = torch.arange(batch_size + 1, dtype=torch.int32, device=self.device) * max(1, seq_len_per_batch // self.page_size)
+            paged_kv_indices = torch.arange(self.max_num_pages, dtype=torch.int32, device=self.device)
+            paged_kv_last_page_len = torch.zeros(batch_size, dtype=torch.int32, device=self.device)
+            
+            # Plan the prefill wrapper
+            self.prefill_wrappers[seq_len].plan(
+                qo_indptr,
+                paged_kv_indptr,
+                paged_kv_indices,
+                paged_kv_last_page_len,
+                torch.bfloat16,
+            )
+            torch.cuda.synchronize()
+            
+            # Warmup runs
+            for _ in range(5):
+                self.model.forward(
+                    input_ids=self.cuda_graph_buffers["prefill_input_ids"][:seq_len],
+                    position_ids=self.cuda_graph_buffers["prefill_position_ids"][:seq_len],
+                    attn_wrapper=self.prefill_wrappers[seq_len],
+                    kv_cache=self.kv_cache,
+                    input_features=self.cuda_graph_buffers["prefill_input_features"][:seq_len],
+                    input_masks=self.cuda_graph_buffers["prefill_input_masks"][:seq_len],
+                )
+            torch.cuda.synchronize()
+            
+            # Create and capture CUDA graph
+            prefill_graph = torch.cuda.CUDAGraph()
+            
+            with torch.cuda.graph(prefill_graph):
+                if self.has_depth_transformer:
+                    logits_output, backbone_hidden_states = self.model.forward(
+                        input_ids=self.cuda_graph_buffers["prefill_input_ids"][:seq_len],
+                        position_ids=self.cuda_graph_buffers["prefill_position_ids"][:seq_len],
+                        attn_wrapper=self.prefill_wrappers[seq_len],
+                        kv_cache=self.kv_cache,
+                        input_features=self.cuda_graph_buffers["prefill_input_features"][:seq_len],
+                        input_masks=self.cuda_graph_buffers["prefill_input_masks"][:seq_len],
+                    )
+
+                    self.cuda_graph_buffers["prefill_logits"][:seq_len].copy_(logits_output)
+                    self.cuda_graph_buffers["prefill_backbone_hidden_states"][:seq_len].copy_(backbone_hidden_states)
+
+                else:
+                    logits_output = self.model.forward(
+                        input_ids=self.cuda_graph_buffers["prefill_input_ids"][:seq_len],
+                        position_ids=self.cuda_graph_buffers["prefill_position_ids"][:seq_len],
+                        attn_wrapper=self.prefill_wrappers[seq_len],
+                        kv_cache=self.kv_cache,
+                        input_features=self.cuda_graph_buffers["prefill_input_features"][:seq_len],
+                        input_masks=self.cuda_graph_buffers["prefill_input_masks"][:seq_len],
+                    )
+                    
+                    self.cuda_graph_buffers["prefill_logits"][:seq_len].copy_(logits_output)
+            
+            # Store the captured prefill graph
+            self.cuda_graphs_lm_prefill[seq_len] = prefill_graph
+        
+        self.logger.info(f"Prefill CUDA graphs initialized for {len(self.cuda_graphs_lm_prefill)} combinations")
+
     def _initialize_cuda_graphs(self):
         """Initialize CUDA graphs for different batch sizes."""
         self.nvtx_range_push("cuda_graph_initialization")
 
+        self.logger.info("Initializing CUDA graphs for prefill phase...")
+        self._initialize_prefill_cuda_graphs()
+        
         self.logger.info("Initializing CUDA graphs for LM decode phase...")
 
         # Create input buffers
@@ -171,14 +302,14 @@ class CudaGraphWorker(ModelWorker):
         )
 
         # Store buffers
-        self.cuda_graph_buffers = {
+        self.cuda_graph_buffers.update({
             "input_ids": input_ids_buffer,
             "position_ids": position_ids_buffer,
             "logits": logits_buffer,
             "input_features": input_features_buffer,
             "input_masks": input_masks_buffer,
             "backbone_hidden_states": backbone_hidden_states_buffer,
-        }
+        })
 
         self.logger.info("Initializing CUDA graphs for decode phase...")
 
@@ -245,7 +376,7 @@ class CudaGraphWorker(ModelWorker):
                     self.cuda_graph_buffers["logits"][:batch_size].copy_(logits_output)
 
             # Store the captured graph
-            self.cuda_graphs_lm[batch_size] = graph
+            self.cuda_graphs_lm_decode[batch_size] = graph
 
         self.logger.info("CUDA graphs for decode phase initialized.")
 
@@ -298,7 +429,7 @@ class CudaGraphWorker(ModelWorker):
         self.logger.info("CUDA graphs for detokenization phase initialized.")
 
         if not self.has_depth_transformer:
-            self.logger.info(f"CUDA graphs initialized for batch sizes: {list(self.cuda_graphs_lm.keys())}")
+            self.logger.info(f"CUDA graphs initialized for batch sizes: {list(self.cuda_graphs_lm_decode.keys())}")
             return
 
         self.logger.info("Initializing CUDA graphs for depth transformer...")
@@ -408,7 +539,7 @@ class CudaGraphWorker(ModelWorker):
 
         self.logger.info("CUDA graphs for depth transformer decode phase initialized.")
 
-        self.logger.info(f"CUDA graphs initialized for batch sizes: {list(self.cuda_graphs_lm.keys())}")
+        self.logger.info(f"CUDA graphs initialized for batch sizes: {list(self.cuda_graphs_lm_decode.keys())}")
         self.nvtx_range_pop() # cuda_graph_initialization
 
     def _get_cuda_graph_batch_size(self, actual_batch_size: int) -> int:
@@ -421,13 +552,146 @@ class CudaGraphWorker(ModelWorker):
                 return batch_size
         # If actual batch size exceeds all captured sizes, use the largest one
         return max(self.cuda_graph_batch_sizes)
+    
+    def _get_cuda_graph_seq_len(self, actual_seq_len: int) -> int:
+        """
+        Find the next valid CUDA graph sequence length bucket for padding.
+        Returns the smallest bucket that can accommodate the actual sequence length.
+        """
+        for seq_len in self.cuda_graph_seq_len_buckets:
+            if seq_len >= actual_seq_len:
+                return seq_len
+        # If sequence length exceeds all buckets, return None to fall back to regular forward
+        return None
+        
+    def _can_use_prefill_cuda_graph(self, requests: List[Request]) -> bool:
+        """
+        Check if we can use CUDA graphs for the current prefill batch.
+        Returns True if all requests have compatible sequence lengths.
+        """
+        if not requests:
+            return False
+
+        # Get the total sequence length in this batch
+        total_seq_len = sum(len(req.input_tokens) for req in requests if hasattr(req, 'input_tokens') and req.input_tokens)
+        
+        # Check if we have a suitable bucket
+        return self._get_cuda_graph_seq_len(total_seq_len) is not None
 
     def run_lm_prefill(self, requests: List[Request]):
         """
-        Override parent's run_lm_prefill to add CUDA graph optimization.
-        We use CUDA graph only for depth transformer.
+        Override parent's run_lm_prefill to add CUDA graph optimization for prefill phase.
         """
         self.nvtx_range_push(f"lm_prefill_bs{len(requests)}")
+        
+        # Check if we can use CUDA graphs for this batch
+        if self._can_use_prefill_cuda_graph(requests):
+            self._run_lm_prefill_with_cuda_graph(requests)
+        else:
+            self._run_lm_prefill_fallback(requests)
+            
+        self.nvtx_range_pop() # lm_prefill
+        
+    def _run_lm_prefill_with_cuda_graph(self, requests: List[Request]):
+        """Run prefill using CUDA graphs with padding."""
+        self.nvtx_range_push("lm_prefill_cuda_graph")
+        
+        lm_inputs = self._prepare_lm_inputs(requests)
+        qo_indptr = lm_inputs["qo_indptr"]
+        paged_kv_indptr = lm_inputs["paged_kv_indptr"]
+        paged_kv_indices = lm_inputs["paged_kv_indices"]
+        paged_kv_last_page_len = lm_inputs["paged_kv_last_page_len"]
+        input_ids = lm_inputs["input_ids"]
+        position_ids = lm_inputs["position_ids"]
+        input_features = lm_inputs["input_features"]
+        input_masks = lm_inputs["input_masks"]
+        
+        batch_size = len(requests)
+        actual_seq_len = sum(len(req.input_tokens) for req in requests)
+        padded_seq_len = self._get_cuda_graph_seq_len(actual_seq_len)
+
+        self.logger.debug(f"Using prefill CUDA graph: batch_size={batch_size} seq_len={padded_seq_len} (actual: {actual_seq_len})")
+
+        if actual_seq_len < padded_seq_len:
+            padding_size = padded_seq_len - actual_seq_len
+
+            # Pad input tensors by repeating the last element
+            input_ids.extend([input_ids[-1]] * padding_size)
+            position_ids.extend([position_ids[-1]] * padding_size)
+
+            if self.model.needs_input_features:
+                input_features.extend([input_features[-1][-1:]] * padding_size)
+            if self.model.needs_input_masks:
+                input_masks.extend([input_masks[-1][-1:]] * padding_size)
+
+        # Plan attention wrapper
+        qo_indptr_tensor = torch.tensor(qo_indptr, dtype=torch.int32, device=self.device)
+        paged_kv_indptr_tensor = torch.tensor(paged_kv_indptr, device=self.device, dtype=torch.int32)
+        paged_kv_indices_tensor = torch.tensor(paged_kv_indices, device=self.device, dtype=torch.int32)
+        paged_kv_last_page_len_tensor = torch.tensor(paged_kv_last_page_len, device=self.device, dtype=torch.int32)
+        
+        self.prefill_wrappers[padded_seq_len].plan(
+            qo_indptr_tensor,
+            paged_kv_indptr_tensor,
+            paged_kv_indices_tensor,
+            paged_kv_last_page_len_tensor,
+            torch.bfloat16,
+        )
+        torch.cuda.synchronize()
+        
+        graph = self.cuda_graphs_lm_prefill[padded_seq_len]
+
+        # Copy inputs to CUDA graph buffers
+        self.cuda_graph_buffers["prefill_input_ids"][:padded_seq_len].copy_(
+            torch.tensor(input_ids, device=self.device, dtype=torch.int32)
+        )
+        self.cuda_graph_buffers["prefill_position_ids"][:padded_seq_len].copy_(
+            torch.tensor(position_ids, device=self.device, dtype=torch.int32)
+        )
+
+        if self.model.needs_input_features:
+            self.cuda_graph_buffers["prefill_input_features"][:padded_seq_len].copy_(torch.cat(input_features, dim=0))
+        if self.model.needs_input_masks:
+            self.cuda_graph_buffers["prefill_input_masks"][:padded_seq_len].copy_(torch.cat(input_masks, dim=0))
+
+        # Replay the CUDA graph
+        self.nvtx_range_push("cuda_graph_replay")
+        graph.replay()
+        self.nvtx_range_pop()
+
+        logits = self.cuda_graph_buffers["logits"][:actual_seq_len]
+        logits = logits[qo_indptr_tensor[1:] - 1]
+
+        if self.has_depth_transformer:
+            backbone_hidden_states = self.cuda_graph_buffers["backbone_hidden_states"][:actual_seq_len]
+            backbone_hidden_states = backbone_hidden_states[qo_indptr_tensor[1:] - 1]
+
+        self.nvtx_range_push("sampling")
+        if self.has_depth_transformer:
+            output_ids, hidden_for_depth = self.model.sampling(
+                logits=logits,
+                hidden_states=backbone_hidden_states,
+                requests=requests,
+            )
+
+            self.nvtx_range_pop() # sampling
+            actual_batch_size = len(requests)
+            padded_batch_size = self._get_cuda_graph_batch_size(actual_batch_size)
+            output_ids = self.run_lm_depth(output_ids, hidden_for_depth, requests, actual_batch_size, padded_batch_size)
+
+        else:
+            output_ids = self.model.sampling(
+                logits=logits,
+                requests=requests,
+            )
+            self.nvtx_range_pop() # sampling
+
+        self.nvtx_range_pop() # lm_prefill_cuda_graph
+        
+    def _run_lm_prefill_fallback(self, requests: List[Request]):
+        """Fallback to regular prefill when CUDA graphs cannot be used."""
+        self.nvtx_range_push("prefill_fallback")
+        
         lm_inputs = self._prepare_lm_inputs(requests)
 
         qo_indptr = lm_inputs["qo_indptr"]
@@ -483,8 +747,8 @@ class CudaGraphWorker(ModelWorker):
 
             # select last token for each request for prefill
             if getattr(self.prefill_wrapper, "qo_indptr", None) is not None:
-                logits = logits[self.prefill_wrapper.qo_indptr[:-1] - 1]
-                backbone_hidden_states = backbone_hidden_states[self.prefill_wrapper.qo_indptr[:-1] - 1]
+                logits = logits[self.prefill_wrapper.qo_indptr[1:] - 1]
+                backbone_hidden_states = backbone_hidden_states[self.prefill_wrapper.qo_indptr[1:] - 1]
 
             output_ids, hidden_for_depth = self.model.sampling(
                 logits=logits,
@@ -510,15 +774,15 @@ class CudaGraphWorker(ModelWorker):
 
             # select last token for each request for prefill
             if getattr(self.prefill_wrapper, "qo_indptr", None) is not None:
-                logits = logits[self.prefill_wrapper.qo_indptr[:-1] - 1]
+                logits = logits[self.prefill_wrapper.qo_indptr[1:] - 1]
 
             self.nvtx_range_pop() # backbone_forward
             output_ids = self.model.sampling(
                 logits=logits,
                 requests=requests,
             )
-
-        self.nvtx_range_pop() # lm_prefill
+        
+        self.nvtx_range_pop() # prefill_fallback
 
     def run_lm_decode(self, requests: List[Request]):
         """
@@ -547,9 +811,9 @@ class CudaGraphWorker(ModelWorker):
             input_ids.extend([input_ids[-1]] * padding_size)
             position_ids.extend([position_ids[-1]] * padding_size)
 
-            if input_features[0] is not None:
+            if self.model.needs_input_features:
                 input_features.extend([input_features[-1]] * padding_size)
-            if input_masks[0] is not None:
+            if self.model.needs_input_masks:
                 input_masks.extend([input_masks[-1]] * padding_size)
 
             # Pad paged KV cache indices
@@ -576,7 +840,7 @@ class CudaGraphWorker(ModelWorker):
         )
         torch.cuda.synchronize()
 
-        graph = self.cuda_graphs_lm[padded_batch_size]
+        graph = self.cuda_graphs_lm_decode[padded_batch_size]
 
         self.cuda_graph_buffers["input_ids"][:padded_batch_size].copy_(
             torch.tensor(input_ids, device=self.device, dtype=torch.int32)
@@ -615,7 +879,6 @@ class CudaGraphWorker(ModelWorker):
             output_ids = self.run_lm_depth(output_ids, hidden_for_depth, requests, actual_batch_size, padded_batch_size)
 
         else:
-            tick = time.time()
             output_ids = self.model.sampling(
                 logits=logits,
                 requests=requests,
@@ -703,7 +966,7 @@ class CudaGraphWorker(ModelWorker):
                 depth_logits = self.cuda_graph_buffers["depth_logits"][: 2 * padded_batch_size]
                 # Get the actual batch size from the prefill outputs
                 actual_qo_indptr = torch.arange(actual_batch_size + 1, device=self.device, dtype=torch.int32) * 2
-                depth_logits = depth_logits[actual_qo_indptr[:-1] - 1]
+                depth_logits = depth_logits[actual_qo_indptr[1:] - 1]
 
                 output_ids[:, i], hidden_for_depth = self.model.depth_sampling(
                     logits=depth_logits,
