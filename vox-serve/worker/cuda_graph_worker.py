@@ -619,41 +619,26 @@ class CudaGraphWorker(ModelWorker):
         self.logger.debug(f"No suitable prefill CUDA graph for batch_size {batch_size}, seq_len {seq_len}")
         return None
 
-    def _can_use_prefill_cuda_graph(self, requests: List[Request]) -> bool:
-        """
-        Check if we can use CUDA graphs for the current prefill batch.
-        Returns True if all requests have compatible batch size and sequence lengths.
-        """
-        if not requests:
-            return False
-
-        batch_size = len(requests)
-        # Get the total sequence length in this batch
-        total_seq_len = sum(
-            len(req.input_tokens)
-            for req in requests if hasattr(req, 'input_tokens') and req.input_tokens
-        )
-
-        # Check if we have a suitable graph
-        return self._get_prefill_cuda_graph_key(batch_size, total_seq_len) is not None
-
     def run_lm_prefill(self, requests: List[Request]):
         """
         Override parent's run_lm_prefill to add CUDA graph optimization for prefill phase.
         """
         self.nvtx_range_push(f"lm_prefill_bs{len(requests)}")
+        lm_inputs = self._prepare_lm_inputs(requests)
+
+        actual_batch_size = len(requests)
+        actual_seq_len = len(lm_inputs["input_ids"])
 
         # Check if we can use CUDA graphs for this batch
-        if self._can_use_prefill_cuda_graph(requests):
-            self._run_lm_prefill_with_cuda_graph(requests)
+        if self._get_prefill_cuda_graph_key(actual_batch_size, actual_seq_len) is not None:
+            self._run_lm_prefill_with_cuda_graph(requests, lm_inputs)
         else:
-            self._run_lm_prefill_fallback(requests)
+            self._run_lm_prefill_fallback(requests, lm_inputs)
 
         self.nvtx_range_pop() # lm_prefill
 
-    def _run_lm_prefill_with_cuda_graph(self, requests: List[Request]):
+    def _run_lm_prefill_with_cuda_graph(self, requests: List[Request], lm_inputs: Dict):
         """Run prefill using CUDA graphs with padding."""
-        lm_inputs = self._prepare_lm_inputs(requests)
         qo_indptr = lm_inputs["qo_indptr"]
         paged_kv_indptr = lm_inputs["paged_kv_indptr"]
         paged_kv_indices = lm_inputs["paged_kv_indices"]
@@ -781,10 +766,8 @@ class CudaGraphWorker(ModelWorker):
 
         self.nvtx_range_pop() # lm_prefill_cuda_graph
 
-    def _run_lm_prefill_fallback(self, requests: List[Request]):
+    def _run_lm_prefill_fallback(self, requests: List[Request], lm_inputs: Dict):
         """Fallback to regular prefill when CUDA graphs cannot be used."""
-        lm_inputs = self._prepare_lm_inputs(requests)
-
         qo_indptr = lm_inputs["qo_indptr"]
         paged_kv_indptr = lm_inputs["paged_kv_indptr"]
         paged_kv_indices = lm_inputs["paged_kv_indices"]
