@@ -11,7 +11,9 @@ from typing import Dict, Iterator, Optional
 
 import zmq
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
+from starlette.concurrency import run_in_threadpool
 
 from .scheduler import load_scheduler
 from .utils import get_global_log_level, get_logger, set_global_log_level
@@ -410,6 +412,15 @@ class APIServer:
 # Initialize FastAPI app
 app = FastAPI(title="Vox-Serve API", description="Text-to-Speech API using Orpheus model")
 
+# Add CORS middleware to allow cross-origin requests
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allow all origins
+    allow_credentials=True,
+    allow_methods=["*"],  # Allow all HTTP methods
+    allow_headers=["*"],  # Allow all headers
+)
+
 # Global API server instance (will be initialized in main)
 api_server = None
 
@@ -418,7 +429,7 @@ api_server = None
 async def generate(
     text: str = Form(...),
     audio: Optional[UploadFile] = File(None),
-    streaming: bool = Form(False)
+    streaming: bool = Form(True)
 ):
     """
     Generate speech from text and return audio file or streaming response.
@@ -426,7 +437,7 @@ async def generate(
     Args:
         text: Input text to synthesize
         audio: Optional input audio file
-        streaming: Whether to return streaming response (default: False)
+        streaming: Whether to return streaming response (default: True)
 
     Returns:
         Audio file as direct response (if streaming=False) or streaming audio response (if streaming=True)
@@ -476,8 +487,8 @@ async def generate(
                 },
             )
         else:
-            # Non-streaming response (original behavior)
-            audio_file = api_server.generate_audio(text, audio_path)
+            # Non-streaming response
+            audio_file = await run_in_threadpool(api_server.generate_audio, text, audio_path)
             request_id = Path(audio_file).stem
 
             return FileResponse(path=audio_file, media_type="audio/wav", filename=f"{request_id}.wav")
