@@ -203,7 +203,7 @@ class CudaGraphWorker(ModelWorker):
             dtype=torch.bfloat16, device=self.device
         )
         prefill_input_masks_buffer = torch.zeros(
-            max_seq_len, dtype=torch.bool, device=self.device
+            max_seq_len, self.model.n_codebooks, dtype=torch.bool, device=self.device
         )
 
         # Create prefill output buffers
@@ -336,7 +336,7 @@ class CudaGraphWorker(ModelWorker):
             device=self.device,
         )
         input_masks_buffer = torch.zeros(
-            self.max_batch_size, dtype=torch.bool, device=self.device
+            self.max_batch_size, self.model.n_codebooks, dtype=torch.bool, device=self.device
         )
 
         # Create output buffer (assuming vocab size, will be adjusted based on model)
@@ -835,8 +835,8 @@ class CudaGraphWorker(ModelWorker):
             self.nvtx_range_pop() # sampling
             depth_padded_batch_size = self._get_cuda_graph_batch_size(actual_batch_size)
             output_ids = self.run_lm_depth(
-                output_ids,
-                hidden_for_depth,
+                output_ids[:actual_batch_size],
+                hidden_for_depth[:actual_batch_size],
                 requests,
                 actual_batch_size,
                 depth_padded_batch_size,
@@ -1035,7 +1035,13 @@ class CudaGraphWorker(ModelWorker):
             )
 
             self.nvtx_range_pop() # sampling
-            output_ids = self.run_lm_depth(output_ids, hidden_for_depth, requests, actual_batch_size, padded_batch_size)
+            output_ids = self.run_lm_depth(
+                output_ids[:actual_batch_size],
+                hidden_for_depth[:actual_batch_size],
+                requests,
+                actual_batch_size,
+                padded_batch_size,
+            )
 
         else:
             output_ids = self.model.sampling(
@@ -1056,7 +1062,7 @@ class CudaGraphWorker(ModelWorker):
         if actual_batch_size < padded_batch_size:
             padding_size = padded_batch_size - actual_batch_size
             # Pad by repeating the last hidden state
-            last_hidden = hidden_for_depth[-1:].expand(padding_size, -1)
+            last_hidden = hidden_for_depth[-1:].expand(padding_size, -1, -1)
             hidden_for_depth = torch.cat([hidden_for_depth, last_hidden], dim=0)
 
         depth_position_ids = torch.tensor([0, 1] * padded_batch_size, device=self.device, dtype=torch.int32)
@@ -1115,7 +1121,10 @@ class CudaGraphWorker(ModelWorker):
 
                 graph = self.cuda_graphs_depth_prefill[padded_batch_size]
 
-                self.cuda_graph_buffers["depth_hidden_states"][: 2 * padded_batch_size].copy_(hidden_for_depth)
+                # [bs, 2, hidden_size] -> [2*bs, hidden_size]
+                self.cuda_graph_buffers["depth_hidden_states"][: 2 * padded_batch_size].copy_(
+                    hidden_for_depth.view(2 * padded_batch_size, -1)
+                )
                 self.cuda_graph_buffers["depth_position_ids"][: 2 * padded_batch_size].copy_(depth_position_ids)
 
                 self.nvtx_range_push("depth_prefill_replay")

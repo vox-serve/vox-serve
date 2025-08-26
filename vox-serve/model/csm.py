@@ -638,13 +638,10 @@ class CSMModel(BaseLMWithDepth):
         # so here we allocate output_ids for all codebooks but do sampling only for the first one
         output_ids = Sampler.run_sampling(logits.view(-1, self.vocab_size), config=sampling_params)
         output_ids = output_ids.view(logits.shape[0], logits.shape[1])
+        output_ids = output_ids.expand(-1, self.n_codebooks)  # [bs, 33]
 
         c0_embed = self.embed_audio_tokens_single(output_ids[:, 0], 0)
-        # backbone_ids.shape=torch.Size([1])
-        # print(f"{backbone_last_hidden.shape=}, {c0_embed.shape=}") # [bs, 2048], [bs, 2048]
-        hidden_for_depth = torch.cat([hidden_states[:, None, :], c0_embed[:, None, :]], dim=1).view(
-            -1, c0_embed.shape[-1]
-        )
+        hidden_for_depth = torch.cat([hidden_states[:, None, :], c0_embed[:, None, :]], dim=1) # (bs, 2, hidden_size)
 
         for i, req in enumerate(requests):
             req.input_masks = torch.ones(self.n_codebooks, dtype=torch.bool, device=self.device)[None, :]

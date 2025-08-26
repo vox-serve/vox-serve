@@ -795,6 +795,7 @@ class ZonosModel(BaseLM):
         # Create input mask for feature positions (all positions except the last one)
         input_mask = torch.ones(seq_len, dtype=torch.bool, device=input_features.device)
         input_mask[-1] = False  # Last position should not be filled with features
+        input_mask = input_mask[:, None].expand(-1, self.n_codebooks) # Expand for n_codebooks
 
         repetition_cache = torch.zeros(
             self.default_sampling_config.repetition_window if self.default_sampling_config.repetition_window > 0 else 1,
@@ -825,7 +826,7 @@ class ZonosModel(BaseLM):
         inputs_embeds = self.model.embed_tokens(input_ids)
 
         # for prefill requests, except for the last token, replace embeddings with input_features
-        inputs_embeds = torch.where(input_masks[:, None], input_features, inputs_embeds)
+        inputs_embeds = torch.where(input_masks[:, :1], input_features, inputs_embeds)
 
         logits = self.model(
             inputs_embeds=inputs_embeds,
