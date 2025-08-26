@@ -303,6 +303,24 @@ class CudaGraphWorker(ModelWorker):
                     # Store the captured prefill graph
                     self.cuda_graphs_lm_prefill[key] = prefill_graph
 
+                    # Test replay latency
+                    for _ in range(3):
+                        prefill_graph.replay()
+                    torch.cuda.synchronize()
+                    times = []
+                    for _ in range(10):
+                        start = torch.cuda.Event(enable_timing=True)
+                        end = torch.cuda.Event(enable_timing=True)
+                        start.record()
+                        prefill_graph.replay()
+                        end.record()
+                        torch.cuda.synchronize()
+                        times.append(start.elapsed_time(end))
+                    self.logger.debug(
+                        f"Prefill CUDA graph (batch={batch_size}, seq_len={seq_len}) avg replay:"
+                        f" {sum(times)/len(times):.3f}ms"
+                    )
+
         self.logger.info(
             "Prefill CUDA graphs initialized: %d combinations",
             len(self.cuda_graphs_lm_prefill),
@@ -412,6 +430,24 @@ class CudaGraphWorker(ModelWorker):
             # Store the captured graph
             self.cuda_graphs_lm_decode[batch_size] = graph
 
+            # Test replay latency
+            for _ in range(3):
+                graph.replay()
+            torch.cuda.synchronize()
+            times = []
+            for _ in range(10):
+                start = torch.cuda.Event(enable_timing=True)
+                end = torch.cuda.Event(enable_timing=True)
+                start.record()
+                graph.replay()
+                end.record()
+                torch.cuda.synchronize()
+                times.append(start.elapsed_time(end))
+            self.logger.debug(
+                f"Decode CUDA graph (batch={batch_size}) avg replay:"
+                f" {sum(times)/len(times):.3f}ms"
+            )
+
         self.logger.info("CUDA graphs for decode phase initialized.")
 
     def _initialize_detokenization_cuda_graphs(self):
@@ -459,6 +495,23 @@ class CudaGraphWorker(ModelWorker):
                 self.cuda_graph_buffers["detokenize_output"][:batch_size].copy_(audio_output)
 
             self.cuda_graphs_detokenization[batch_size] = detokenize_graph
+
+            # Test replay latency
+            for _ in range(3):
+                detokenize_graph.replay()
+            torch.cuda.synchronize()
+            times = []
+            for _ in range(10):
+                start = torch.cuda.Event(enable_timing=True)
+                end = torch.cuda.Event(enable_timing=True)
+                start.record()
+                detokenize_graph.replay()
+                end.record()
+                torch.cuda.synchronize()
+                times.append(start.elapsed_time(end))
+            self.logger.debug(
+                f"Detokenization CUDA graph (batch={batch_size}) avg replay: {sum(times)/len(times):.3f}ms"
+            )
 
         self.logger.info("CUDA graphs for detokenization phase initialized.")
 
@@ -532,6 +585,24 @@ class CudaGraphWorker(ModelWorker):
             # Store the captured depth graph
             self.cuda_graphs_depth_prefill[batch_size] = depth_graph_prefill
 
+            # Test replay latency
+            for _ in range(3):
+                depth_graph_prefill.replay()
+            torch.cuda.synchronize()
+            times = []
+            for _ in range(10):
+                start = torch.cuda.Event(enable_timing=True)
+                end = torch.cuda.Event(enable_timing=True)
+                start.record()
+                depth_graph_prefill.replay()
+                end.record()
+                torch.cuda.synchronize()
+                times.append(start.elapsed_time(end))
+            self.logger.debug(
+                f"Depth prefill CUDA graph (batch={batch_size}) avg replay:"
+                f" {sum(times)/len(times):.3f}ms"
+            )
+
             # Decode graph capturing
             self.depth_decode_wrappers[batch_size].plan(
                 depth_paged_kv_indptr,
@@ -566,6 +637,24 @@ class CudaGraphWorker(ModelWorker):
 
             # Store the captured depth graph
             self.cuda_graphs_depth_decode[batch_size] = depth_graph
+
+            # Test replay latency
+            for _ in range(3):
+                depth_graph.replay()
+            torch.cuda.synchronize()
+            times = []
+            for _ in range(10):
+                start = torch.cuda.Event(enable_timing=True)
+                end = torch.cuda.Event(enable_timing=True)
+                start.record()
+                depth_graph.replay()
+                end.record()
+                torch.cuda.synchronize()
+                times.append(start.elapsed_time(end))
+            self.logger.debug(
+                f"Depth decode CUDA graph (batch={batch_size}) avg replay:"
+                f" {sum(times)/len(times):.3f}ms"
+            )
 
         self.logger.info("CUDA graphs for depth transformer decode phase initialized.")
 
