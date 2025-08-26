@@ -95,8 +95,8 @@ class FlashInferPrefillWrapper:
         kv_len_after = (num_pages_after - 1) * self.page_size + paged_kv_last_page_len # [n_req], int32
 
         # Flatten to per-token
-        seg = torch.repeat_interleave(torch.arange(n_req, device=self.device, dtype=torch.int32), lens)  # [T]
-        intra = torch.arange(total_tokens, device=self.device, dtype=torch.int32) - torch.repeat_interleave(starts, lens)
+        seg = torch.repeat_interleave(torch.arange(n_req, dtype=torch.int32), lens)  # [T]
+        intra = torch.arange(total_tokens, dtype=torch.int32) - torch.repeat_interleave(starts, lens)
 
         # Starting index of the newly appended run (per request), then absolute index per token
         start_new = kv_len_after[seg] - lens[seg]                # [T], int32
@@ -107,11 +107,14 @@ class FlashInferPrefillWrapper:
         off_in_page = (g - page_off * self.page_size).to(torch.int32)
         abs_page_ptr = (paged_kv_indptr[:-1])[seg] + page_off    # [T], int32
 
-        print(f"{paged_kv_indices[abs_page_ptr]=} {off_in_page=}")
-        self.token_to_page[:total_tokens] = paged_kv_indices[abs_page_ptr]         # [total_tokens], page ids
-        self.token_to_cache[:total_tokens] = off_in_page                           # [total_tokens], offsets within page
-        self.token_to_page[total_tokens:] = -1
-        self.token_to_cache[total_tokens:] = -1
+        if self.use_cuda_graph:
+            self.token_to_page[:total_tokens] = paged_kv_indices[abs_page_ptr].to(self.device)
+            self.token_to_cache[:total_tokens] = off_in_page.to(self.device)
+            self.token_to_page[total_tokens:] = -1
+            self.token_to_cache[total_tokens:] = -1
+        else:
+            self.token_to_page = paged_kv_indices[abs_page_ptr].to(self.device)
+            self.token_to_cache = off_in_page.to(self.device)
 
 
     def run(self, q, kv_cache):
