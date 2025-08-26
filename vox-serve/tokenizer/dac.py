@@ -10,6 +10,7 @@ class DAC:
         super().__init__()
         self.dac = DacModel.from_pretrained("descript/dac_44khz")
         self.dac.eval().requires_grad_(False)
+        self.dac.decode = torch.compile(self.dac.decode, mode="default")
         self.codebook_size = self.dac.config.codebook_size
         self.num_codebooks = self.dac.quantizer.n_codebooks
         self.sampling_rate = self.dac.config.sampling_rate
