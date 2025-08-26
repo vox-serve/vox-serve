@@ -2601,6 +2601,9 @@ class GLMAudioDecoder(nn.Module):
         self.hift = GLMHiFTModel(f0_predictor=ConvRNNF0Predictor())
         self.hift.load_state_dict(torch.load(hift_path, map_location=self.device))
 
+        # self.flow.inference = torch.compile(self.flow.inference, mode="default")
+        self.hift.inference = torch.compile(self.hift.inference, mode="default")
+
     def forward(
         self,
         audio_ids: torch.Tensor,
