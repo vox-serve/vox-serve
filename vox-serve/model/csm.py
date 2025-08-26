@@ -543,7 +543,7 @@ class CSMModel(BaseLMWithDepth):
     @property
     def detokenize_interval(self) -> int:
         """Interval at which to detokenize outputs."""
-        return 1
+        return 10
 
     @property
     def detokenize_overlap(self) -> int:
@@ -558,7 +558,7 @@ class CSMModel(BaseLMWithDepth):
     @property
     def output_audio_length(self) -> int:
         """Output audio length (in samples) at each postprocess call."""
-        return 1920  # 24000 / 12.5
+        return 19200  # 24000 / 12.5
 
     @property
     def max_tokens(self) -> int:
