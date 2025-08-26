@@ -71,12 +71,6 @@ class BenchmarkResults:
 
     # Streaming viability metrics (percentage)
     streaming_viability_mean: float = 0.0
-    streaming_viability_p50: float = 0.0
-    streaming_viability_p90: float = 0.0
-    streaming_viability_p95: float = 0.0
-    streaming_viability_p99: float = 0.0
-    streaming_viability_min: float = 0.0
-    streaming_viability_max: float = 0.0
 
     # Total latency metrics (seconds)
     latency_mean: float = 0.0
@@ -169,7 +163,7 @@ class BenchmarkClient:
 
                 # Read streaming response
                 audio_chunks = []
-                first_chunk_received = False
+                chunk_count = 0
 
                 # Use iter_any() instead of iter_chunked() to properly detect end of stream
                 async for chunk in response.content.iter_any():
@@ -177,10 +171,11 @@ class BenchmarkClient:
                         break
 
                     current_time = time.time()
+                    chunk_count += 1
 
-                    if not first_chunk_received:
+                    # Measure TTFA on the second chunk (first chunk is often just header)
+                    if chunk_count == 2:
                         metrics.ttfa = current_time - metrics.start_time
-                        first_chunk_received = True
 
                     # Record chunk arrival time and calculate chunk duration
                     metrics.chunk_arrival_times.append(current_time)
@@ -314,14 +309,7 @@ class BenchmarkClient:
 
         # Calculate streaming viability statistics
         if streaming_viability_values:
-            streaming_viability_sorted = sorted(streaming_viability_values)
             results.streaming_viability_mean = statistics.mean(streaming_viability_values)
-            results.streaming_viability_p50 = self._percentile(streaming_viability_sorted, 50)
-            results.streaming_viability_p90 = self._percentile(streaming_viability_sorted, 90)
-            results.streaming_viability_p95 = self._percentile(streaming_viability_sorted, 95)
-            results.streaming_viability_p99 = self._percentile(streaming_viability_sorted, 99)
-            results.streaming_viability_min = min(streaming_viability_values)
-            results.streaming_viability_max = max(streaming_viability_values)
 
         # Calculate latency statistics
         if latency_values:
@@ -389,12 +377,6 @@ class BenchmarkClient:
         print("| Statistic | Value (%) |")
         print("|-----------|-----------|")
         print(f"| Mean | {results.streaming_viability_mean:.1f} |")
-        print(f"| P50 | {results.streaming_viability_p50:.1f} |")
-        print(f"| P90 | {results.streaming_viability_p90:.1f} |")
-        print(f"| P95 | {results.streaming_viability_p95:.1f} |")
-        print(f"| P99 | {results.streaming_viability_p99:.1f} |")
-        print(f"| Min | {results.streaming_viability_min:.1f} |")
-        print(f"| Max | {results.streaming_viability_max:.1f} |")
         print()
 
         # Total latency metrics
