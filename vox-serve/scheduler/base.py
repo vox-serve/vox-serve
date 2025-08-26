@@ -85,7 +85,8 @@ class Scheduler:
         self._prepare_requests()
 
         # TODO: advanced scheduling logic here for LM forward
-        requests = self.active_requests
+        # Naive scheduling: take up to max_batch_size requests
+        requests = self.active_requests[:self.max_batch_size]
 
         is_prefill = False
         for req in requests:
@@ -111,6 +112,8 @@ class Scheduler:
         requests_to_detokenize = []
 
         for req in requests:
+            if len(requests_to_detokenize) > self.max_batch_size:
+                break
             if req.done_all or self.model_worker.do_detokenize(req):
                 requests_to_detokenize.append(req)
 
