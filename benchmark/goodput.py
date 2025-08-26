@@ -139,7 +139,8 @@ class BenchmarkClient:
         if total_chunks == 0:
             return None
 
-        return (real_time_satisfied / total_chunks) * 100.0
+        # return (real_time_satisfied / total_chunks) * 100.0
+        return (real_time_satisfied == total_chunks) * 100.0 # All chunks satisfied real-time requirement
 
     async def make_request(self, session: aiohttp.ClientSession, request_id: str) -> RequestMetrics:
         """Make a single request and measure metrics."""
@@ -391,15 +392,6 @@ class BenchmarkClient:
         print(f"| Min | {results.latency_min:.3f} |")
         print(f"| Max | {results.latency_max:.3f} |")
         print()
-
-        # Performance insights
-        print("## Performance Insights\n")
-        if results.ttfa_p95 < 0.5:
-            print("✅ **Excellent** TTFA latency (P95 < 0.5s)")
-        elif results.ttfa_p95 < 1.0:
-            print("👍 **Good** TTFA latency (P95 < 1.0s)")
-        else:
-            print("⚠️  **High** TTFA latency (P95 > 1.0s)")
 
 
 async def main():
