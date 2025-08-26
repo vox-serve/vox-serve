@@ -160,6 +160,23 @@ class CudaGraphWorker(ModelWorker):
             self.depth_decode_wrappers = None
             self.depth_kv_cache = None
 
+    def _initialize_cuda_graphs(self):
+        """Initialize CUDA graphs for different batch sizes."""
+        self.logger.info("Initializing CUDA graphs for prefill phase...")
+        self._initialize_prefill_cuda_graphs()
+        
+        self.logger.info("Initializing CUDA graphs for LM decode phase...")
+        self._initialize_decode_cuda_graphs()
+        
+        self.logger.info("Initializing CUDA graphs for detokenization phase...")
+        self._initialize_detokenization_cuda_graphs()
+        
+        if self.has_depth_transformer:
+            self.logger.info("Initializing CUDA graphs for depth transformer...")
+            self._initialize_depth_cuda_graphs()
+            
+        self.logger.info(f"CUDA graphs initialized for batch sizes: {list(self.cuda_graphs_lm_decode.keys())}")
+    
     def _initialize_prefill_cuda_graphs(self):
         """Initialize CUDA graphs for prefill phase with different sequence length buckets."""
         self.logger.info("Initializing prefill CUDA graphs...")
@@ -284,14 +301,9 @@ class CudaGraphWorker(ModelWorker):
                     self.cuda_graphs_lm_prefill[key] = prefill_graph
         
         self.logger.info(f"Prefill CUDA graphs initialized for {len(self.cuda_graphs_lm_prefill)} (batch_size, seq_len) combinations")
-
-    def _initialize_cuda_graphs(self):
-        """Initialize CUDA graphs for different batch sizes."""
-        self.logger.info("Initializing CUDA graphs for prefill phase...")
-        self._initialize_prefill_cuda_graphs()
         
-        self.logger.info("Initializing CUDA graphs for LM decode phase...")
-
+    def _initialize_decode_cuda_graphs(self):
+        """Initialize CUDA graphs for LM decode phase."""
         # Create input buffers
         input_ids_buffer = torch.zeros(
             self.max_batch_size, self.model.n_codebooks, dtype=torch.int32, device=self.device
@@ -328,8 +340,6 @@ class CudaGraphWorker(ModelWorker):
             "input_masks": input_masks_buffer,
             "backbone_hidden_states": backbone_hidden_states_buffer,
         })
-
-        self.logger.info("Initializing CUDA graphs for decode phase...")
 
         for batch_size in self.cuda_graph_batch_sizes:
             if batch_size > self.max_batch_size:
@@ -397,9 +407,9 @@ class CudaGraphWorker(ModelWorker):
             self.cuda_graphs_lm_decode[batch_size] = graph
 
         self.logger.info("CUDA graphs for decode phase initialized.")
-
-        self.logger.info("Initializing CUDA graphs for detokenization phase...")
-
+        
+    def _initialize_detokenization_cuda_graphs(self):
+        """Initialize CUDA graphs for detokenization phase."""
         detokenize_input_buffer = torch.zeros(
             self.max_batch_size,
             self.model.detokenize_interval,
@@ -445,13 +455,9 @@ class CudaGraphWorker(ModelWorker):
             self.cuda_graphs_detokenization[batch_size] = detokenize_graph
 
         self.logger.info("CUDA graphs for detokenization phase initialized.")
-
-        if not self.has_depth_transformer:
-            self.logger.info(f"CUDA graphs initialized for batch sizes: {list(self.cuda_graphs_lm_decode.keys())}")
-            return
-
-        self.logger.info("Initializing CUDA graphs for depth transformer...")
-
+        
+    def _initialize_depth_cuda_graphs(self):
+        """Initialize CUDA graphs for depth transformer (both prefill and decode phases)."""
         # We reserve input tensors with batch size of `2 * self.max_batch_size` since the first step of
         # depth transformer has sequence length of 2 per request.
         depth_hidden_states_buffer = torch.zeros(
@@ -556,8 +562,6 @@ class CudaGraphWorker(ModelWorker):
             self.cuda_graphs_depth_decode[batch_size] = depth_graph
 
         self.logger.info("CUDA graphs for depth transformer decode phase initialized.")
-
-        self.logger.info(f"CUDA graphs initialized for batch sizes: {list(self.cuda_graphs_lm_decode.keys())}")
 
     def _get_cuda_graph_batch_size(self, actual_batch_size: int) -> int:
         """
