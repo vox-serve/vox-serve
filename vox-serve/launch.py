@@ -73,7 +73,7 @@ class APIServer:
         request_socket_path: str = "/tmp/vox_serve_request.ipc",
         result_socket_path: str = "/tmp/vox_serve_result.ipc",
         output_dir: str = "/tmp/vox_serve_audio",
-        timeout_seconds: float = 30.0,
+        timeout_seconds: float = 600.0,
         max_batch_size: int = 8,
         top_p: float = None,
         top_k: int = None,
