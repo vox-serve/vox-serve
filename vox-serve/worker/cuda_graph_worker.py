@@ -683,7 +683,8 @@ class CudaGraphWorker(ModelWorker):
         """
         # Get the padded batch size and seq len
         padded_batch_size = self.max_batch_size # For prefill, we always use max batch size
-        padded_seq_len = self._get_cuda_graph_seq_len(seq_len)
+        # considering the padding tokens to match max batch size
+        padded_seq_len = self._get_cuda_graph_seq_len(seq_len + (padded_batch_size - batch_size))
 
         if padded_seq_len is None:
             self.logger.debug(f"No suitable CUDA graph seq_len bucket for actual seq_len {seq_len}")
