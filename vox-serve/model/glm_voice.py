@@ -512,9 +512,6 @@ class GLMVoiceModel(BaseLM):
             kv_cache=kv_cache,
         )
 
-        if getattr(attn_wrapper, "qo_indptr", None) is not None:
-            logits = logits[attn_wrapper.qo_indptr[:-1] - 1]
-
         return logits[:, None, :]  # add codebook dimension
 
     def sampling(

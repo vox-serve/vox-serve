@@ -411,6 +411,11 @@ class CSMModel(BaseLMWithDepth):
         return True
 
     @property
+    def needs_input_masks(self) -> bool:
+        """Indicates if the model requires input_masks."""
+        return True
+
+    @property
     def embed_text_tokens(self):
         """Embedding layer for text tokens."""
         return self.model.embed_text_tokens
@@ -538,7 +543,7 @@ class CSMModel(BaseLMWithDepth):
     @property
     def detokenize_interval(self) -> int:
         """Interval at which to detokenize outputs."""
-        return 1
+        return 10
 
     @property
     def detokenize_overlap(self) -> int:
@@ -553,7 +558,7 @@ class CSMModel(BaseLMWithDepth):
     @property
     def output_audio_length(self) -> int:
         """Output audio length (in samples) at each postprocess call."""
-        return 1920  # 24000 / 12.5
+        return 19200  # 24000 / 12.5
 
     @property
     def max_tokens(self) -> int:
@@ -607,11 +612,6 @@ class CSMModel(BaseLMWithDepth):
             kv_cache=kv_cache,
         )
 
-        # select last token for each request for prefill
-        if getattr(attn_wrapper, "qo_indptr", None) is not None:
-            backbone_logits = backbone_logits[attn_wrapper.qo_indptr[:-1] - 1]
-            backbone_last_hidden = backbone_last_hidden[attn_wrapper.qo_indptr[:-1] - 1]
-
         # add codebook dimension
         return backbone_logits[:, None, :], backbone_last_hidden
 
@@ -638,13 +638,10 @@ class CSMModel(BaseLMWithDepth):
         # so here we allocate output_ids for all codebooks but do sampling only for the first one
         output_ids = Sampler.run_sampling(logits.view(-1, self.vocab_size), config=sampling_params)
         output_ids = output_ids.view(logits.shape[0], logits.shape[1])
+        output_ids = output_ids.expand(-1, self.n_codebooks)  # [bs, 33]
 
         c0_embed = self.embed_audio_tokens_single(output_ids[:, 0], 0)
-        # backbone_ids.shape=torch.Size([1])
-        # print(f"{backbone_last_hidden.shape=}, {c0_embed.shape=}") # [bs, 2048], [bs, 2048]
-        hidden_for_depth = torch.cat([hidden_states[:, None, :], c0_embed[:, None, :]], dim=1).view(
-            -1, c0_embed.shape[-1]
-        )
+        hidden_for_depth = torch.cat([hidden_states[:, None, :], c0_embed[:, None, :]], dim=1) # (bs, 2, hidden_size)
 
         for i, req in enumerate(requests):
             req.input_masks = torch.ones(self.n_codebooks, dtype=torch.bool, device=self.device)[None, :]

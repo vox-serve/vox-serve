@@ -28,6 +28,7 @@ class Scheduler:
         repetition_window: int = None,
         cfg_scale: float = None,
         enable_cuda_graph: bool = True,
+        enable_nvtx: bool = False,
     ):
         self.device = device
         self.max_batch_size = max_batch_size
@@ -48,6 +49,7 @@ class Scheduler:
                 cfg_scale=cfg_scale,
                 max_num_pages=max_num_pages,
                 page_size=page_size,
+                enable_nvtx=enable_nvtx,
             )
         else:
             self.logger.info("Using ModelWorker without CUDA graph optimization")
@@ -63,6 +65,7 @@ class Scheduler:
                 cfg_scale=cfg_scale,
                 max_num_pages=max_num_pages,
                 page_size=page_size,
+                enable_nvtx=enable_nvtx,
             )
 
         self.active_requests: List[Request] = []
@@ -82,7 +85,8 @@ class Scheduler:
         self._prepare_requests()
 
         # TODO: advanced scheduling logic here for LM forward
-        requests = self.active_requests
+        # Naive scheduling: take up to max_batch_size requests
+        requests = self.active_requests[:self.max_batch_size]
 
         is_prefill = False
         for req in requests:
@@ -108,6 +112,8 @@ class Scheduler:
         requests_to_detokenize = []
 
         for req in requests:
+            if len(requests_to_detokenize) > self.max_batch_size:
+                break
             if req.done_all or self.model_worker.do_detokenize(req):
                 requests_to_detokenize.append(req)
 

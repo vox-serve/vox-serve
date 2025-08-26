@@ -653,6 +653,16 @@ class ZonosModel(BaseLM):
         """Vocabulary size of the model."""
         return 1025
 
+    @property
+    def needs_input_features(self) -> bool:
+        """Indicates if the model requires input_features."""
+        return True
+
+    @property
+    def needs_input_masks(self) -> bool:
+        """Indicates if the model requires input_masks."""
+        return True
+
     def is_stop_id(self, token_ids: List[int]) -> bool:
         return token_ids[0] == self.eos_token_id
 
@@ -772,6 +782,21 @@ class ZonosModel(BaseLM):
             dim=0,
         )
 
+        # Create expanded input_features to match token sequence length
+        # Repeat each feature embedding for all positions except the last one
+        seq_len = prefix_tokens.shape[0]
+        expanded_features = torch.zeros(
+            seq_len, input_features.shape[-1],
+            device=input_features.device,
+            dtype=input_features.dtype
+        )
+        expanded_features[:-1] = input_features.squeeze(0)  # Fill all positions except last with features
+
+        # Create input mask for feature positions (all positions except the last one)
+        input_mask = torch.ones(seq_len, dtype=torch.bool, device=input_features.device)
+        input_mask[-1] = False  # Last position should not be filled with features
+        input_mask = input_mask[:, None].expand(-1, self.n_codebooks) # Expand for n_codebooks
+
         repetition_cache = torch.zeros(
             self.default_sampling_config.repetition_window if self.default_sampling_config.repetition_window > 0 else 1,
             self.n_codebooks,
@@ -781,7 +806,10 @@ class ZonosModel(BaseLM):
         )
 
         return PreprocessOutput(
-            input_tokens=prefix_tokens.tolist(), input_features=input_features, repetition_cache=repetition_cache
+            input_tokens=prefix_tokens.tolist(),
+            input_features=expanded_features,
+            input_masks=input_mask,
+            repetition_cache=repetition_cache
         )
 
     def forward(
@@ -791,19 +819,14 @@ class ZonosModel(BaseLM):
         attn_wrapper: FlashInferWrapper,
         kv_cache: torch.Tensor,
         input_features: torch.Tensor | None = None,
+        input_masks: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> torch.Tensor:
         """Forward pass through the model."""
         inputs_embeds = self.model.embed_tokens(input_ids)
 
-        if getattr(attn_wrapper, "qo_indptr", None) is not None:
-            # includes prefill request
-            for i, feature in enumerate(input_features):
-                if feature is None:
-                    continue
-
-                # In Zonos, the prompt tokens except for the last one are filled with feature embeddings
-                inputs_embeds[attn_wrapper.qo_indptr[i] : attn_wrapper.qo_indptr[i + 1] - 1] = feature
+        # for prefill requests, except for the last token, replace embeddings with input_features
+        inputs_embeds = torch.where(input_masks[:, :1], input_features, inputs_embeds)
 
         logits = self.model(
             inputs_embeds=inputs_embeds,
@@ -812,9 +835,6 @@ class ZonosModel(BaseLM):
             kv_cache=kv_cache,
         )
         logits += self.logit_bias
-
-        if getattr(attn_wrapper, "qo_indptr", None) is not None:
-            logits = logits[attn_wrapper.qo_indptr[:-1] - 1]
 
         return logits
 
@@ -842,14 +862,12 @@ class ZonosModel(BaseLM):
 
         # update repetition cache
         for i, req in enumerate(requests):
-            if req.repetition_cache is None:
-                continue
-
-            Sampler.update_repetition_penalty_cache(
-                req.repetition_cache,
-                output_ids[i],
-                sampling_params.repetition_window,
-            )
+            if req.repetition_cache is not None:
+                Sampler.update_repetition_penalty_cache(
+                    req.repetition_cache,
+                    output_ids[i],
+                    sampling_params.repetition_window,
+                )
 
             # mask part of the output tokens for the first n_codebooks - 1 tokens
             # use len(req.lm_output_tokens) + 1 since the output is not yet appended
@@ -857,7 +875,9 @@ class ZonosModel(BaseLM):
                 for j in range(len(req.lm_output_tokens) + 1, self.n_codebooks):
                     output_ids[i, j] = self.masked_token_id
 
-            req.input_features = None  # not used in decode phase
+            # for decode phase, input_features are not used
+            req.input_features = torch.zeros(1, self.hidden_size, device=self.device, dtype=torch.bfloat16)
+            req.input_masks = torch.zeros(1, dtype=torch.bool, device=self.device)
 
             # no additional logic for CSM model for now. TODO: revert delay patterns here?
             req.lm_output_tokens.append(output_ids[i].tolist())

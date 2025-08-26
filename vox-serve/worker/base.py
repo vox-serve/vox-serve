@@ -26,6 +26,7 @@ class ModelWorker:
         repetition_penalty: float = None,
         repetition_window: int = None,
         cfg_scale: float = None,
+        enable_nvtx: bool = False,
     ):
         # Load model with sampling parameters
         self.model = load_model(
@@ -42,6 +43,9 @@ class ModelWorker:
         self.device = "cuda:0"
         self.max_batch_size = max_batch_size
         self.logger = get_logger(__name__)
+
+        # Set NVTX profiling based on parameter
+        self.nvtx_enabled = enable_nvtx
 
         # Store sampling and repetition parameters
         self.top_p = top_p
@@ -256,18 +260,16 @@ class ModelWorker:
         input_ids = torch.tensor(input_ids, device=self.device, dtype=torch.int32)
         position_ids = torch.tensor(position_ids, device=self.device, dtype=torch.int32)
 
-        # TODO: maybe model should have property about this?
-        if input_masks[0] is not None:
+        # Prepare input_masks and input_features as single tensors
+        if self.model.needs_input_masks:
             input_masks = torch.cat(input_masks, dim=0)
         else:
             input_masks = None
 
-        # TODO: for zonos's purpose, the input_features has to be list of tensors for prefill.
-        # This is not a good design and we should fix it.
-        # if input_features[0] is not None:
-        #     input_features = torch.cat(input_features, dim=0)
-        # else:
-        #     input_features = None
+        if self.model.needs_input_features:
+            input_features = torch.cat(input_features, dim=0)
+        else:
+            input_features = None
 
         qo_indptr_tensor = torch.tensor(qo_indptr, device=self.device, dtype=torch.int32)
         paged_kv_indptr_tensor = torch.tensor(paged_kv_indptr, device=self.device, dtype=torch.int32)
@@ -293,6 +295,11 @@ class ModelWorker:
                 input_features=input_features,
                 input_masks=input_masks,
             )
+
+            # select last token for each request for prefill
+            if getattr(self.prefill_wrapper, "qo_indptr", None) is not None:
+                logits = logits[self.prefill_wrapper.qo_indptr[:-1] - 1]
+                backbone_hidden_states = backbone_hidden_states[self.prefill_wrapper.qo_indptr[:-1] - 1]
 
             output_ids, hidden_for_depth = self.model.sampling(
                 logits=logits,
@@ -346,6 +353,10 @@ class ModelWorker:
                 input_masks=input_masks,
             )
 
+            # select last token for each request for prefill
+            if getattr(self.prefill_wrapper, "qo_indptr", None) is not None:
+                logits = logits[self.prefill_wrapper.qo_indptr[:-1] - 1]
+
             output_ids = self.model.sampling(
                 logits=logits,
                 requests=requests,
@@ -372,12 +383,12 @@ class ModelWorker:
         position_ids = torch.tensor(position_ids, device=self.device, dtype=torch.int32)
 
         # Handle optional inputs
-        if input_masks[0] is not None:
+        if self.model.needs_input_masks:
             input_masks = torch.cat(input_masks, dim=0)
         else:
             input_masks = None
 
-        if input_features[0] is not None:
+        if self.model.needs_input_features:
             input_features = torch.cat(input_features, dim=0)
         else:
             input_features = None
@@ -528,6 +539,27 @@ class ModelWorker:
         encoded = torchaudio.functional.resample(encoded, orig_freq=44100, new_freq=orig_sr)
 
         return encoded
+
+    def nvtx_range_push(self, name: str):
+        """
+        Push an NVTX range with CUDA synchronization if profiling is enabled.
+        Does nothing if NVTX profiling is disabled.
+
+        Args:
+            name: Name of the NVTX range
+        """
+        if self.nvtx_enabled:
+            torch.cuda.synchronize()
+            torch.cuda.nvtx.range_push(name)
+
+    def nvtx_range_pop(self):
+        """
+        Pop an NVTX range with CUDA synchronization if profiling is enabled.
+        Does nothing if NVTX profiling is disabled.
+        """
+        if self.nvtx_enabled:
+            torch.cuda.synchronize()
+            torch.cuda.nvtx.range_pop()
 
     def free_kv_cache(self, request: Request):
         """

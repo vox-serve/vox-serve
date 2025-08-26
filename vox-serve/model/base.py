@@ -83,6 +83,16 @@ class BaseLM(ABC):
         return False
 
     @property
+    def needs_input_features(self) -> bool:
+        """Indicates if the model requires input_features."""
+        return False
+
+    @property
+    def needs_input_masks(self) -> bool:
+        """Indicates if the model requires input_masks."""
+        return False
+
+    @property
     @abstractmethod
     def detokenize_interval(self) -> int:
         """Interval at which to detokenize outputs."""
