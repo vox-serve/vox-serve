@@ -172,3 +172,10 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# nsys profiling files
+*.nsys-rep
+
+# audio files 
+*.wav
+*.mp3

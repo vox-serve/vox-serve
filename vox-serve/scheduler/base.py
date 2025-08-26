@@ -170,7 +170,7 @@ class Scheduler:
                     new_request = Request(
                         request_id=request_dict["request_id"],
                         prompt=request_dict["prompt"],
-                        audio_path=request_dict.get("audio_path"),
+                        audio_path=request_dict.get("audio_path") if self.model_worker.supports_audio_input else None,
                     )
 
                     self.logger.debug(f"{new_request=}")

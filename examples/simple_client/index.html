@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Streaming Voice Client</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            margin: 0;
+            padding: 2rem;
+            background-color: #f4f7f6;
+            color: #333;
+            display: flex;
+            justify-content: center;
+        }
+        .container {
+            max-width: 600px;
+            width: 100%;
+            background: #fff;
+            padding: 2rem;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+        }
+        h1 {
+            text-align: center;
+            color: #1a1a1a;
+            margin-top: 0;
+        }
+        form {
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+        label {
+            font-weight: bold;
+        }
+        input[type="text"],
+        textarea {
+            width: 100%;
+            padding: 0.75rem;
+            border-radius: 4px;
+            border: 1px solid #ccc;
+            font-size: 1rem;
+            box-sizing: border-box;
+        }
+        textarea {
+            resize: vertical;
+        }
+        button {
+            padding: 0.75rem;
+            font-size: 1rem;
+            font-weight: bold;
+            color: #fff;
+            background-color: #007bff;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        button:disabled {
+            background-color: #aaa;
+            cursor: not-allowed;
+        }
+        #status {
+            margin-top: 1.5rem;
+            text-align: center;
+            font-weight: bold;
+            height: 20px;
+        }
+        /* We don't need the <audio> element for playback anymore, but we can keep it for UI consistency or hide it */
+        audio {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>Streaming Voice Synthesis</h1>
+    <form id="tts-form">
+        <label for="server-url">Server URL:</label>
+        <input 
+            type="text" 
+            id="server-url" 
+            name="server-url" 
+            value="http://localhost:8000/generate" 
+            required>
+        
+        <label for="text-input">Text to Synthesize:</label>
+        <textarea id="text-input" name="text" rows="5" placeholder="Enter text here...">How many stars are there in the sky?</textarea>
+
+        <label for="audio-input" class="file-input-label"><strong>Optional Audio Input:</strong></label>
+        <input id="audio-input" name="audio" type="file" accept="audio/*">
+
+        <button type="submit" id="generate-button">Generate and Play</button>
+    </form>
+    
+    <div id="status"></div>
+    <audio id="audio-player"></audio>
+</div>
+
+<script>
+    const ttsForm = document.getElementById('tts-form');
+    const generateButton = document.getElementById('generate-button');
+    const statusDiv = document.getElementById('status');
+    
+    // Web Audio API variables
+    let audioContext;
+    let nextPlayTime = 0;
+    let wavData = new Uint8Array(0);
+
+    // Helper to initialize AudioContext on user interaction
+    function initAudioContext() {
+        if (!audioContext) {
+            try {
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                nextPlayTime = audioContext.currentTime;
+            } catch (e) {
+                statusDiv.textContent = 'Error: Web Audio API is not supported by this browser.';
+                console.error(e);
+            }
+        }
+    }
+    
+    // --- WAV PARSER ---
+    // This is a simplified parser. It assumes a standard 44-byte WAV header.
+    function parseWavHeader(wavBytes) {
+        const dataView = new DataView(wavBytes.buffer);
+        // Check for "RIFF" and "WAVE"
+        if (dataView.getUint32(0, false) !== 0x52494646 || dataView.getUint32(8, false) !== 0x57415645) {
+            console.error("Not a valid WAV file.");
+            return null;
+        }
+        return {
+            numChannels: dataView.getUint16(22, true),
+            sampleRate: dataView.getUint32(24, true),
+            bitsPerSample: dataView.getUint16(34, true),
+        };
+    }
+
+    async function processAudioChunk(chunk, wavInfo) {
+        if (!audioContext || !wavInfo) return;
+
+        // --- DATA CONVERSION ---
+        // Convert the raw 16-bit PCM data to 32-bit float samples (-1.0 to 1.0)
+        const pcmData = new Int16Array(chunk.buffer, chunk.byteOffset);
+        const floatData = new Float32Array(pcmData.length);
+        for (let i = 0; i < pcmData.length; i++) {
+            floatData[i] = pcmData[i] / 32768.0;
+        }
+
+        // --- BUFFER CREATION AND SCHEDULING ---
+        const audioBuffer = audioContext.createBuffer(
+            wavInfo.numChannels,
+            floatData.length / wavInfo.numChannels,
+            wavInfo.sampleRate
+        );
+
+        // This assumes mono or stereo and interleaves the data correctly
+        for (let channel = 0; channel < wavInfo.numChannels; channel++) {
+            const channelData = audioBuffer.getChannelData(channel);
+            for (let i = 0; i < floatData.length / wavInfo.numChannels; i++) {
+                channelData[i] = floatData[i * wavInfo.numChannels + channel];
+            }
+        }
+        
+        const source = audioContext.createBufferSource();
+        source.buffer = audioBuffer;
+        source.connect(audioContext.destination);
+
+        // Schedule the buffer to play right after the previous one
+        if (nextPlayTime < audioContext.currentTime) {
+            nextPlayTime = audioContext.currentTime;
+        }
+        source.start(nextPlayTime);
+        
+        // Update the time for the next buffer
+        nextPlayTime += audioBuffer.duration;
+    }
+
+
+    ttsForm.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        
+        initAudioContext();
+        if (!audioContext) return;
+
+        generateButton.disabled = true;
+        statusDiv.textContent = 'Connecting to server...';
+        
+        // Reset playback state for a new request
+        nextPlayTime = audioContext.currentTime;
+        let wavInfo = null;
+        let headerParsed = false;
+        let leftoverData = new Uint8Array(0);
+
+        try {
+            const formData = new FormData(ttsForm);
+            formData.append('streaming', 'true');
+            const apiUrl = document.getElementById('server-url').value;
+
+            const response = await fetch(apiUrl, { method: 'POST', body: formData });
+
+            if (!response.ok) {
+                throw new Error(`Server error: ${response.status} ${response.statusText}`);
+            }
+
+            statusDiv.textContent = 'Streaming audio...';
+            const reader = response.body.getReader();
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) {
+                    statusDiv.textContent = 'Playback finished.';
+                    break;
+                }
+
+                // Append new data to any leftover data from the previous chunk
+                const currentData = new Uint8Array(leftoverData.length + value.length);
+                currentData.set(leftoverData);
+                currentData.set(value, leftoverData.length);
+
+                if (!headerParsed) {
+                    // The standard WAV header is 44 bytes. We wait until we have at least that much.
+                    if (currentData.length >= 44) {
+                        wavInfo = parseWavHeader(currentData);
+                        if (!wavInfo) {
+                            throw new Error("Failed to parse WAV header.");
+                        }
+                        console.log("WAV Info:", wavInfo);
+                        headerParsed = true;
+                        
+                        // The actual audio data starts after the 44-byte header
+                        const audioData = currentData.slice(44);
+                        processAudioChunk(audioData, wavInfo);
+                        leftoverData = new Uint8Array(0);
+                    } else {
+                        // Not enough data for the header yet, store it and wait for the next chunk
+                        leftoverData = currentData;
+                    }
+                } else {
+                    // Header is already parsed, process the audio data
+                    // We process data in chunks that align with the sample size (e.g., 2 bytes for 16-bit audio)
+                    const sampleSize = wavInfo.bitsPerSample / 8;
+                    const processableLength = Math.floor(currentData.length / sampleSize) * sampleSize;
+                    
+                    if (processableLength > 0) {
+                        const audioData = currentData.slice(0, processableLength);
+                        processAudioChunk(audioData, wavInfo);
+                    }
+                    
+                    // Store any bytes that don't form a complete sample for the next iteration
+                    leftoverData = currentData.slice(processableLength);
+                }
+            }
+        } catch (error) {
+            console.error('Streaming failed:', error);
+            statusDiv.textContent = `Error: ${error.message}`;
+        } finally {
+            generateButton.disabled = false;
+        }
+    });
+
+</script>
+</body>
+</html>

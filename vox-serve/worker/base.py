@@ -92,6 +92,11 @@ class ModelWorker:
         """Overlap size for detokenization."""
         return self.model.detokenize_overlap
 
+    @property
+    def supports_audio_input(self) -> bool:
+        """Whether the model supports audio input."""
+        return self.model.supports_audio_input
+
     def _prepare_attention_wrappers(self):
         self.flashinfer_buffer = torch.empty(256 * 1024 * 1024, dtype=torch.uint8, device=self.device)
 
