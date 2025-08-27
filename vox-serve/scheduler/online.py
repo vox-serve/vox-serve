@@ -44,7 +44,7 @@ class OnlineScheduler(Scheduler):
         # Check for request completion and mark as done
         for req in lm_requests:
             if self.model_worker.is_finished(req):
-                req.done_all = True
+                req.done_lm_generation = True
 
         # Select requests for detokenization with priority-aware batching
         detokenize_requests = self._select_detokenize_requests()
@@ -103,7 +103,7 @@ class OnlineScheduler(Scheduler):
         # try to piggyback non-critical requests to reach the next CUDA graph batch size
         current_batch_size = len(selected_requests)
 
-        if current_batch_size not in self.available_batch_sizes:
+        if current_batch_size < self.max_batch_size and current_batch_size not in self.available_batch_sizes:
             # Find the next larger CUDA graph batch size
             target_batch_size = None
             for size in sorted(self.available_batch_sizes):
@@ -126,7 +126,7 @@ class OnlineScheduler(Scheduler):
         # Get all requests that are ready for detokenization
         detokenize_candidates = []
         for req in self.active_requests:
-            if req.done_all or self.model_worker.do_detokenize(req):
+            if req.done_lm_generation or self.model_worker.do_detokenize(req):
                 detokenize_candidates.append(req)
 
         if not detokenize_candidates:
@@ -200,4 +200,4 @@ class OnlineScheduler(Scheduler):
             latest_chunk_start_time = first_chunk_send_time + total_playback_time - req.chunk_durations[-1]
 
             # If the latest chunk has already started playing, request is pressing
-            req.is_pressing = current_time >= latest_chunk_start_time
+            req.is_pressing = current_time >= latest_chunk_start_time - 2.0 # 1.0s buffer

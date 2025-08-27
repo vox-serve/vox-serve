@@ -39,7 +39,7 @@ class Request:
     # progress status
     done_lm_prefill: bool = False
     next_audio_decode_idx: int = 0
-    is_audio_available: bool = False
+    done_lm_generation: bool = False
     done_all: bool = False
     finish_reason: str = None
 
