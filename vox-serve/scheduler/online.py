@@ -121,7 +121,7 @@ class OnlineScheduler(Scheduler):
     def _select_detokenize_requests(self) -> List[Request]:
         """
         Select requests for detokenization with priority-aware batching.
-        Similar logic to LM request selection but for detokenization pipeline.
+        Only processes detokenization if there's at least one pressing request ready.
         """
         # Get all requests that are ready for detokenization
         detokenize_candidates = []
@@ -135,6 +135,10 @@ class OnlineScheduler(Scheduler):
         # Separate critical and non-critical detokenization requests
         critical_requests = [req for req in detokenize_candidates if req.is_pressing]
         non_critical_requests = [req for req in detokenize_candidates if not req.is_pressing]
+
+        # If there are no pressing requests ready for detokenization, do nothing
+        if not critical_requests:
+            return []
 
         # First, take critical requests up to max_batch_size
         selected_requests = critical_requests[: self.max_batch_size]
