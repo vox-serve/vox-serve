@@ -43,8 +43,12 @@ class Request:
     done_all: bool = False
     finish_reason: str = None
 
-    # future optimization
     is_pressing: bool = False
+    is_streaming: bool = False
+
+    # timestamp tracking for online scheduling
+    chunk_send_timestamps: List[float] = field(default_factory=list)  # when each chunk was sent
+    chunk_durations: List[float] = field(default_factory=list)  # duration of each chunk in seconds
 
     # optional inputs for inference or sampling
     input_features: torch.Tensor = None

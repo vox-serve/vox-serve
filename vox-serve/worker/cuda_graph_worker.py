@@ -39,6 +39,10 @@ class CudaGraphWorker(ModelWorker):
         if self.has_depth_transformer:
             self.depth_kv_cache.zero_()
 
+    @property
+    def available_batch_sizes(self) -> List[int]:
+        return self.cuda_graph_batch_sizes
+
     def _prepare_attention_wrappers(self):
         # sort in decreasing order to the cuda graph for largest batch is captured first and the smaller
         # shapes can reuse the memory

@@ -97,6 +97,14 @@ class ModelWorker:
         """Whether the model supports audio input."""
         return self.model.supports_audio_input
 
+    @property
+    def available_batch_sizes(self) -> List[int]:
+        """
+        Return the available batch sizes supported by the model.
+        For the base model worker, there is no restriction.
+        """
+        return None
+
     def _prepare_attention_wrappers(self):
         self.flashinfer_buffer = torch.empty(256 * 1024 * 1024, dtype=torch.uint8, device=self.device)
 

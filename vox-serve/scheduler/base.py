@@ -76,6 +76,8 @@ class Scheduler:
         self.result_socket = self.context.socket(zmq.PUSH)
         self.result_socket.bind(f"ipc://{result_socket_path}")
 
+        self.available_batch_sizes = self.model_worker.available_batch_sizes
+
     def _step(self):
         """
         Process the next batch of requests.
@@ -84,7 +86,6 @@ class Scheduler:
         # insert/remove requests to self.active_requests
         self._prepare_requests()
 
-        # TODO: advanced scheduling logic here for LM forward
         # Naive scheduling: take up to max_batch_size requests
         requests = self.active_requests[:self.max_batch_size]
 
@@ -107,7 +108,6 @@ class Scheduler:
             if self.model_worker.is_finished(req):
                 req.done_all = True
 
-        # TODO: advanced scheduling logic here for detokenization (independent of LM forward),
         # including multiple chunks from a single request for some cases
         requests_to_detokenize = []
 
@@ -171,6 +171,8 @@ class Scheduler:
                         request_id=request_dict["request_id"],
                         prompt=request_dict["prompt"],
                         audio_path=request_dict.get("audio_path") if self.model_worker.supports_audio_input else None,
+                        is_streaming=request_dict["is_streaming"],
+                        is_pressing=request_dict["is_streaming"], # at first, streaming requests are pressing
                     )
 
                     self.logger.debug(f"{new_request=}")
