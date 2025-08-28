@@ -1,8 +1,8 @@
 # VoxServe: a serving system for SpeechLMs
 
-**⚠️ This project is under heavy construction — interfaces are not stable, and performance tuning are in progress.**
+**⚠️ This project is under heavy construction — interfaces are not stable, and performance tuning is in progress.**
 
-VoxServe is a serving system for Speech Language mMdels (SpeechLMs). VoxServe provides low-latency & high-throughput inference for language models trained for speech tokens, specifically text-to-speech (TTS) and speech-to-speech (STS) models.
+VoxServe is a serving system for Speech Language Models (SpeechLMs). VoxServe provides low-latency & high-throughput inference for language models trained for speech tokens, specifically text-to-speech (TTS) and speech-to-speech (STS) models.
 
 ### Usage
 
@@ -20,7 +20,7 @@ And call the server like this:
 curl -X POST "http://localhost:<port-number>/generate" -F "text=Hello world" -F "streaming=true" -o output.wav
 ```
 
-We currently support following TTS and STS models:
+We currently support the following TTS and STS models:
 
 - `csm`: [CSM-1B](https://huggingface.co/sesame/csm-1b)
 - `orpheus`: [Orpheus-3B](https://huggingface.co/canopylabs/orpheus-3b-0.1-ft)
