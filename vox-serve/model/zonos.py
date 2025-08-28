@@ -881,7 +881,10 @@ class ZonosModel(BaseLM):
 
             # no additional logic for CSM model for now. TODO: revert delay patterns here?
             req.lm_output_tokens.append(output_ids[i].tolist())
-            req.lm_output_audio_tokens.append(output_ids[i].tolist())
+
+            if not self.is_stop_id(output_ids[i].tolist()):
+                # Don't add the EOS token to lm_output_audio_tokens
+                req.lm_output_audio_tokens.append(output_ids[i].tolist())
 
         return output_ids
 

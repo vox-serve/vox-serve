@@ -29,22 +29,20 @@ class OnlineScheduler(Scheduler):
         # Select requests for LM forward with priority-aware batching
         lm_requests = self._select_lm_requests()
 
-        if len(lm_requests) == 0:
-            return
+        if lm_requests:
+            # Check if any request needs prefill
+            is_prefill = any(not req.done_lm_prefill for req in lm_requests)
 
-        # Check if any request needs prefill
-        is_prefill = any(not req.done_lm_prefill for req in lm_requests)
+            # Run LM inference (prefill or decode)
+            if is_prefill:
+                self.model_worker.run_lm_prefill(lm_requests)
+            else:
+                self.model_worker.run_lm_decode(lm_requests)
 
-        # Run LM inference (prefill or decode)
-        if is_prefill:
-            self.model_worker.run_lm_prefill(lm_requests)
-        else:
-            self.model_worker.run_lm_decode(lm_requests)
-
-        # Check for request completion and mark as done
-        for req in lm_requests:
-            if self.model_worker.is_finished(req):
-                req.done_lm_generation = True
+            # Check for request completion and mark as done
+            for req in lm_requests:
+                if self.model_worker.is_finished(req):
+                    req.done_lm_generation = True
 
         # Select requests for detokenization with priority-aware batching
         detokenize_requests = self._select_detokenize_requests()
@@ -54,7 +52,7 @@ class OnlineScheduler(Scheduler):
             self.model_worker.run_detokenize(detokenize_requests)
 
         # Return results to clients with timestamp tracking
-        for req in lm_requests:
+        for req in self.active_requests:
             while not req.output_audio.empty():
                 audio_chunk = req.output_audio.get()
 
@@ -92,9 +90,11 @@ class OnlineScheduler(Scheduler):
         # Update pressing status for all streaming requests
         self._update_pressing_status()
 
+        lm_candidates = [req for req in self.active_requests if not req.done_lm_generation]
+
         # Separate critical (pressing) and non-critical requests
-        critical_requests = [req for req in self.active_requests if req.is_pressing]
-        non_critical_requests = [req for req in self.active_requests if not req.is_pressing]
+        critical_requests = [req for req in lm_candidates if req.is_pressing]
+        non_critical_requests = [req for req in lm_candidates if not req.is_pressing]
 
         # First, take critical requests up to max_batch_size
         selected_requests = critical_requests[: self.max_batch_size]
@@ -124,10 +124,9 @@ class OnlineScheduler(Scheduler):
         Only processes detokenization if there's at least one pressing request ready.
         """
         # Get all requests that are ready for detokenization
-        detokenize_candidates = []
-        for req in self.active_requests:
-            if req.done_lm_generation or self.model_worker.do_detokenize(req):
-                detokenize_candidates.append(req)
+        detokenize_candidates = [
+            req for req in self.active_requests if req.done_lm_generation or self.model_worker.do_detokenize(req)
+        ]
 
         if not detokenize_candidates:
             return []

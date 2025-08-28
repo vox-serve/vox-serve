@@ -1236,7 +1236,9 @@ class CudaGraphWorker(ModelWorker):
 
             if req.done_lm_generation and req.next_audio_decode_idx >= len(req.lm_output_audio_tokens):
                 req.done_all = True
-                self.logger.debug(f"{len(req.lm_output_audio_tokens)} tokens have been decoded for request {req.request_id}")
+                self.logger.debug(
+                    f"{len(req.lm_output_audio_tokens)} tokens have been decoded for request {req.request_id}"
+                )
 
         self.nvtx_range_pop() # detokenize
         return
