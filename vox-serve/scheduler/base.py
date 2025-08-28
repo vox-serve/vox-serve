@@ -76,6 +76,9 @@ class Scheduler:
         self.result_socket = self.context.socket(zmq.PUSH)
         self.result_socket.bind(f"ipc://{result_socket_path}")
 
+        # self.available_batch_sizes = self.model_worker.available_batch_sizes
+        self.available_batch_sizes = [16, 32, 64, 128]
+
     def _step(self):
         """
         Process the next batch of requests.
@@ -84,44 +87,47 @@ class Scheduler:
         # insert/remove requests to self.active_requests
         self._prepare_requests()
 
-        # TODO: advanced scheduling logic here for LM forward
         # Naive scheduling: take up to max_batch_size requests
-        requests = self.active_requests[:self.max_batch_size]
+        lm_requests = []
+
+        for req in self.active_requests:
+            if len(lm_requests) > self.max_batch_size:
+                break
+            if not req.done_lm_generation:
+                lm_requests.append(req)
 
         is_prefill = False
-        for req in requests:
+        for req in lm_requests:
             is_prefill = is_prefill or (not req.done_lm_prefill)
 
-        if len(requests) == 0:
+        if len(lm_requests) == 0:
             time.sleep(0.1)
             return
 
         # run either prefill or decode of LM
         if is_prefill:
-            self.model_worker.run_lm_prefill(requests)
+            self.model_worker.run_lm_prefill(lm_requests)
         else:
-            self.model_worker.run_lm_decode(requests)
+            self.model_worker.run_lm_decode(lm_requests)
 
         # check for request completion and mark as done
-        for req in requests:
+        for req in lm_requests:
             if self.model_worker.is_finished(req):
-                req.done_all = True
+                req.done_lm_generation = True
 
-        # TODO: advanced scheduling logic here for detokenization (independent of LM forward),
-        # including multiple chunks from a single request for some cases
-        requests_to_detokenize = []
+        detokenize_requests = []
 
-        for req in requests:
-            if len(requests_to_detokenize) > self.max_batch_size:
+        for req in self.active_requests:
+            if len(detokenize_requests) > self.max_batch_size:
                 break
-            if req.done_all or self.model_worker.do_detokenize(req):
-                requests_to_detokenize.append(req)
+            if req.done_lm_generation or self.model_worker.do_detokenize(req):
+                detokenize_requests.append(req)
 
         # run detokenization if needed
-        self.model_worker.run_detokenize(requests_to_detokenize)
+        self.model_worker.run_detokenize(detokenize_requests)
 
         # return results to clients
-        for req in requests:
+        for req in detokenize_requests:
             while not req.output_audio.empty():
                 # Send audio chunk message: request_id|AUDIO|audio_data
                 message = req.request_id.encode("utf-8") + b"|AUDIO|" + req.output_audio.get()
@@ -171,6 +177,8 @@ class Scheduler:
                         request_id=request_dict["request_id"],
                         prompt=request_dict["prompt"],
                         audio_path=request_dict.get("audio_path") if self.model_worker.supports_audio_input else None,
+                        is_streaming=request_dict["is_streaming"],
+                        is_pressing=request_dict["is_streaming"], # at first, streaming requests are pressing
                     )
 
                     self.logger.debug(f"{new_request=}")

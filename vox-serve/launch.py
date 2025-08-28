@@ -269,6 +269,7 @@ class APIServer:
                 "request_id": request_id,
                 "prompt": text,
                 "audio_path": audio_path,
+                "is_streaming": True,
             }
 
             request_json = json.dumps(request_dict)
@@ -348,6 +349,7 @@ class APIServer:
                 "request_id": request_id,
                 "prompt": text,
                 "audio_path": audio_path,
+                "is_streaming": False,
             }
 
             request_json = json.dumps(request_dict)

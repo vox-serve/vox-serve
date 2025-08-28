@@ -10,11 +10,11 @@ from huggingface_hub import hf_hub_download
 from torch import nn
 from torch.nn import functional as F
 
+from ..encoder.glm import GLMVoiceEncoder
 from ..flashinfer_utils import FlashInferWrapper
 from ..requests import Request
 from ..sampling import Sampler, SamplingConfig
-from ..tokenizer.glm_decoder import GLMAudioDecoder
-from ..tokenizer.glm_encoder import GLMVoiceEncoder
+from ..tokenizer.glm import GLMAudioDecoder
 from ..utils import get_logger, load_hf_safetensor_state_dict
 from .base import BaseLM, PreprocessOutput
 

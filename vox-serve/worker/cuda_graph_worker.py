@@ -39,6 +39,10 @@ class CudaGraphWorker(ModelWorker):
         if self.has_depth_transformer:
             self.depth_kv_cache.zero_()
 
+    @property
+    def available_batch_sizes(self) -> List[int]:
+        return self.cuda_graph_batch_sizes
+
     def _prepare_attention_wrappers(self):
         # sort in decreasing order to the cuda graph for largest batch is captured first and the smaller
         # shapes can reuse the memory
@@ -1178,7 +1182,7 @@ class CudaGraphWorker(ModelWorker):
                 req.next_audio_decode_idx : req.next_audio_decode_idx + self.detokenize_interval
             ]
 
-            if req.done_all:
+            if req.done_lm_generation:
                 # exclude the last token since it is a stop token
                 if len(new_tokens) > 1:
                     new_tokens = new_tokens[:-1]
@@ -1229,6 +1233,12 @@ class CudaGraphWorker(ModelWorker):
             req.output_audio.put(audio_bytes)
 
             req.next_audio_decode_idx += self.detokenize_interval - self.detokenize_overlap
+
+            if req.done_lm_generation and req.next_audio_decode_idx >= len(req.lm_output_audio_tokens):
+                req.done_all = True
+                self.logger.debug(
+                    f"{len(req.lm_output_audio_tokens)} tokens have been decoded for request {req.request_id}"
+                )
 
         self.nvtx_range_pop() # detokenize
         return

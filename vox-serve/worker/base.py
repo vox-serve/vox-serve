@@ -97,6 +97,14 @@ class ModelWorker:
         """Whether the model supports audio input."""
         return self.model.supports_audio_input
 
+    @property
+    def available_batch_sizes(self) -> List[int]:
+        """
+        Return the available batch sizes supported by the model.
+        For the base model worker, there is no restriction.
+        """
+        return None
+
     def _prepare_attention_wrappers(self):
         self.flashinfer_buffer = torch.empty(256 * 1024 * 1024, dtype=torch.uint8, device=self.device)
 
@@ -489,7 +497,7 @@ class ModelWorker:
                 req.next_audio_decode_idx : req.next_audio_decode_idx + self.detokenize_interval
             ]
 
-            if req.done_all:
+            if req.done_lm_generation:
                 # exclude the last token since it is a stop token
                 if len(new_tokens) > 1:
                     new_tokens = new_tokens[:-1]
@@ -525,6 +533,9 @@ class ModelWorker:
             req.output_audio.put(audio_bytes)
 
             req.next_audio_decode_idx += self.detokenize_interval - self.detokenize_overlap
+
+            if req.done_lm_generation and req.next_audio_decode_idx >= len(req.lm_output_audio_tokens):
+                req.done_all = True
 
         return
 
@@ -601,6 +612,7 @@ class ModelWorker:
             request.lm_output_tokens = []
             request.next_position_id = 1
             request.next_audio_decode_idx = 0
+            request.done_lm_generation = False
             request.done_all = False
 
             # Create random input tokens
@@ -662,8 +674,10 @@ class ModelWorker:
         # TODO: request-specific max_tokens
         if self.model.is_stop_id(request.lm_output_tokens[-1]):
             request.finish_reason = "stop_id_encountered"
+            self.logger.debug(f"Request {request.request_id}: stop_id encountered.")
             return True
         elif request.next_position_id > self.model.max_tokens:
             request.finish_reason = "position_limit_exceeded"
+            self.logger.debug(f"Request {request.request_id}: position limit exceeded.")
             return True
         return False

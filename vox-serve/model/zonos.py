@@ -877,11 +877,14 @@ class ZonosModel(BaseLM):
 
             # for decode phase, input_features are not used
             req.input_features = torch.zeros(1, self.hidden_size, device=self.device, dtype=torch.bfloat16)
-            req.input_masks = torch.zeros(1, dtype=torch.bool, device=self.device)
+            req.input_masks = torch.zeros(1, self.n_codebooks, dtype=torch.bool, device=self.device)
 
             # no additional logic for CSM model for now. TODO: revert delay patterns here?
             req.lm_output_tokens.append(output_ids[i].tolist())
-            req.lm_output_audio_tokens.append(output_ids[i].tolist())
+
+            if not self.is_stop_id(output_ids[i].tolist()):
+                # Don't add the EOS token to lm_output_audio_tokens
+                req.lm_output_audio_tokens.append(output_ids[i].tolist())
 
         return output_ids
 
