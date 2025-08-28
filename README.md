@@ -1,41 +1,32 @@
-# vox-serve
+# VoxServe: a serving system for SpeechLMs
 
-A PyTorch-based text-to-speech inference server using the Orpheus model with distributed architecture.
+**⚠️ This project is under heavy construction — interfaces are not stable, and performance tuning are in progress.**
 
-## Usage
+VoxServe is a serving system for Speech Language mMdels (SpeechLMs). VoxServe provides low-latency & high-throughput inference for language models trained for speech tokens, specifically text-to-speech (TTS) and speech-to-speech (STS) models.
 
-### Start the Server
+### Usage
+
+Start the inference server with `launch.py`:
+
 ```bash
 cd vox-serve
-python api_server.py
+python -m vox-serve.launch --model <model-name> --port <port-number>
 ```
 
-The API server automatically starts the scheduler process, so you only need to run one command.
+And call the server like this:
 
-### Generate Speech
-
-#### Non-streaming (complete audio file)
 ```bash
-# Generate audio from text (returns complete audio file)
-curl -X POST "http://localhost:8000/generate" \
-  -H "Content-Type: application/json" \
-  -d '{"text": "Hello world", "voice": "tara"}' \
-  -o output.wav
+# Generate audio from text
+curl -X POST "http://localhost:<port-number>/generate" -F "text=Hello world" -F "streaming=true" -o output.wav
 ```
 
-#### Streaming (real-time audio chunks)
-```bash
-# Stream audio chunks as they are generated
-curl -X POST "http://localhost:8000/generate-stream" \
-  -H "Content-Type: application/json" \
-  -d '{"text": "Hello world", "voice": "tara"}' \
-  -o stream_output.wav
-```
+We currently support following TTS and STS models:
 
-### Available Voices
-`zoe`, `zac`, `jess`, `leo`, `mia`, `julia`, `leah`
+- `csm`: [CSM-1B](https://huggingface.co/sesame/csm-1b)
+- `orpheus`: [Orpheus-3B](https://huggingface.co/canopylabs/orpheus-3b-0.1-ft)
+- `zonos`: [Zonos-v0.1](https://huggingface.co/Zyphra/Zonos-v0.1-transformer)
+- `glm`: [GLM-4-Voice-9B](https://huggingface.co/zai-org/glm-4-voice-9b)
 
-### API Endpoints
-- `POST /generate` - Generate speech from text and return complete audio file
-- `POST /generate-stream` - Generate speech from text with real-time streaming
-- `GET /health` - Health check
+And we are actively working on expanding the support.
+
+`./examples` folder has more example usage.
