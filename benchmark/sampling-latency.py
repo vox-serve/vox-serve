@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List
 
 import torch
+from torch.cuda import nvtx
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'vox-serve'))
 
@@ -42,7 +43,6 @@ class SamplingBenchmarkConfig:
     n_codebooks: int = 8  # Number of codebooks for multi-codebook models
     hidden_size: int = 2048  # Hidden size for input features
     repetition_window: int = 10  # Repetition penalty window size
-    device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 @dataclass
@@ -69,7 +69,7 @@ class SamplingLatencyBenchmark:
 
     def __init__(self, config: SamplingBenchmarkConfig):
         self.config = config
-        self.device = torch.device(config.device)
+        self.device = torch.device("cuda")
 
         # Pre-generate synthetic logits for consistent benchmarking
         torch.manual_seed(42)
@@ -175,8 +175,7 @@ class SamplingLatencyBenchmark:
                         )
 
             # Synchronize after warmup iteration
-            if self.device.type == "cuda":
-                torch.cuda.synchronize()
+            torch.cuda.synchronize()
 
         latencies = []
         rep_penalty_times = []
@@ -190,76 +189,75 @@ class SamplingLatencyBenchmark:
             logits = self.logits.clone()
 
             # Synchronize before starting benchmark
-            if self.device.type == "cuda":
-                torch.cuda.synchronize()
+            torch.cuda.synchronize()
 
             start_time = time.perf_counter()
 
             with torch.no_grad():
                 # 1. Apply repetition penalty
-                rep_start = time.perf_counter()
-                for j, req in enumerate(requests):
-                    if req.repetition_cache is not None and sampling_config.repetition_penalty:
-                        logits[j] = Sampler.apply_repetition_penalty(
-                            logits[j], req.repetition_cache, sampling_config.repetition_penalty
-                        )
-                if self.device.type == "cuda":
+                with nvtx.range("repetition_penalty"):
+                    rep_start = time.perf_counter()
+                    for j, req in enumerate(requests):
+                        if req.repetition_cache is not None and sampling_config.repetition_penalty:
+                            logits[j] = Sampler.apply_repetition_penalty(
+                                logits[j], req.repetition_cache, sampling_config.repetition_penalty
+                            )
                     torch.cuda.synchronize()
-                rep_end = time.perf_counter()
+                    rep_end = time.perf_counter()
 
                 # 2. Run sampling
-                sampling_start = time.perf_counter()
-                output_ids = Sampler.run_sampling(
-                    logits.view(-1, self.config.vocab_size),
-                    config=sampling_config
-                )
-                output_ids = output_ids.view(logits.shape[0], logits.shape[1])
-                if self.device.type == "cuda":
+                with nvtx.range("sampling"):
+                    sampling_start = time.perf_counter()
+                    output_ids = Sampler.run_sampling(
+                        logits.view(-1, self.config.vocab_size),
+                        config=sampling_config
+                    )
+                    output_ids = output_ids.view(logits.shape[0], logits.shape[1])
                     torch.cuda.synchronize()
-                sampling_end = time.perf_counter()
+                    sampling_end = time.perf_counter()
 
                 # 3. Update repetition cache
-                cache_start = time.perf_counter()
-                for j, req in enumerate(requests):
-                    if req.repetition_cache is not None and sampling_config.repetition_window:
-                        Sampler.update_repetition_penalty_cache(
-                            req.repetition_cache,
-                            output_ids[j],
-                            sampling_config.repetition_window,
-                        )
-                if self.device.type == "cuda":
+                with nvtx.range("cache_update"):
+                    cache_start = time.perf_counter()
+                    for j, req in enumerate(requests):
+                        if req.repetition_cache is not None and sampling_config.repetition_window:
+                            Sampler.update_repetition_penalty_cache(
+                                req.repetition_cache,
+                                output_ids[j],
+                                sampling_config.repetition_window,
+                            )
                     torch.cuda.synchronize()
-                cache_end = time.perf_counter()
+                    cache_end = time.perf_counter()
 
                 # 4. Update request state (masking, features, tokens)
-                state_start = time.perf_counter()
-                for j, req in enumerate(requests):
-                    # Mask tokens for multi-codebook models
-                    if len(req.lm_output_tokens) + 1 < self.config.n_codebooks:
-                        for k in range(len(req.lm_output_tokens) + 1, self.config.n_codebooks):
-                            output_ids[j, k] = self.masked_token_id
+                with nvtx.range("state_update"):
+                    state_start = time.perf_counter()
+                    for j, req in enumerate(requests):
+                        # Mask tokens for multi-codebook models
+                        if len(req.lm_output_tokens) + 1 < self.config.n_codebooks:
+                            for k in range(len(req.lm_output_tokens) + 1, self.config.n_codebooks):
+                                output_ids[j, k] = self.masked_token_id
 
-                    # Update input features and masks (decode phase)
-                    req.input_features = torch.zeros(
-                        1, self.config.hidden_size,
-                        device=self.device,
-                        dtype=torch.bfloat16
-                    )
-                    req.input_masks = torch.zeros(
-                        1, self.config.n_codebooks,
-                        dtype=torch.bool,
-                        device=self.device
-                    )
+                        # Update input features and masks (decode phase)
+                        req.input_features = torch.zeros(
+                            1, self.config.hidden_size,
+                            device=self.device,
+                            dtype=torch.bfloat16
+                        )
+                        req.input_masks = torch.zeros(
+                            1, self.config.n_codebooks,
+                            dtype=torch.bool,
+                            device=self.device
+                        )
 
-                    # Append output tokens
-                    req.lm_output_tokens.append(output_ids[j].tolist())
-                    # Simulate stop condition check (not adding EOS to audio tokens)
-                    if not self._is_stop_token(output_ids[j].tolist()):
-                        req.lm_output_audio_tokens.append(output_ids[j].tolist())
+                        # Append output tokens
+                        req.lm_output_tokens.append(output_ids[j].tolist())
+                        # Simulate stop condition check (not adding EOS to audio tokens)
+                        if not self._is_stop_token(output_ids[j].tolist()):
+                            req.lm_output_audio_tokens.append(output_ids[j].tolist())
 
-                if self.device.type == "cuda":
                     torch.cuda.synchronize()
-                state_end = time.perf_counter()
+                    state_end = time.perf_counter()
 
             end_time = time.perf_counter()
 
@@ -427,21 +425,8 @@ def main():
                        help="Hidden size for input features (default: 2048)")
     parser.add_argument("--repetition-window", type=int, default=10,
                        help="Repetition penalty window size (default: 10)")
-    parser.add_argument("--device", type=str, default="auto",
-                       choices=["auto", "cuda", "cpu"],
-                       help="Device to use (default: auto)")
 
     args = parser.parse_args()
-
-    # Determine device
-    if args.device == "auto":
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-    else:
-        device = args.device
-
-    if device == "cuda" and not torch.cuda.is_available():
-        print("CUDA requested but not available, falling back to CPU")
-        device = "cpu"
 
     # Create benchmark configuration
     config = SamplingBenchmarkConfig(
@@ -450,8 +435,7 @@ def main():
         num_iterations=args.num_iterations,
         n_codebooks=args.n_codebooks,
         hidden_size=args.hidden_size,
-        repetition_window=args.repetition_window,
-        device=device
+        repetition_window=args.repetition_window
     )
 
     # Run benchmark
