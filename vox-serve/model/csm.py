@@ -585,7 +585,25 @@ class CSMModel(BaseLMWithDepth):
             prompt_tokens = torch.cat(self.default_context["tokens"] + [prompt_tokens], dim=0)
             prompt_tokens_mask = torch.cat(self.default_context["tokens_mask"] + [prompt_tokens_mask], dim=0)
 
-        return PreprocessOutput(input_tokens=prompt_tokens.tolist(), input_masks=prompt_tokens_mask)
+        # Create repetition cache if repetition penalty is enabled
+        repetition_cache = None
+        config = self.default_sampling_config
+        if (config.repetition_penalty is not None and
+            config.repetition_window is not None and
+            config.repetition_penalty != 1.0):
+            repetition_cache = torch.zeros(
+                config.repetition_window if config.repetition_window > 0 else 1,
+                self.n_codebooks,
+                self.vocab_size,
+                dtype=torch.bool,
+                device=self.device,
+            )
+
+        return PreprocessOutput(
+            input_tokens=prompt_tokens.tolist(),
+            input_masks=prompt_tokens_mask,
+            repetition_cache=repetition_cache
+        )
 
     def forward(
         self,
@@ -621,6 +639,7 @@ class CSMModel(BaseLMWithDepth):
         hidden_states: torch.Tensor,
         requests: List[Request],
         sampling_params: SamplingConfig | None = None,
+        repetition_cache: torch.Tensor | None = None,
         cfg_scale: float | None = None,
         **kwargs: Any,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -634,11 +653,23 @@ class CSMModel(BaseLMWithDepth):
 
         assert logits.shape[1] == 1, "Logits should have shape [bs, 1, vocab_size]"
 
+        if repetition_cache is not None:
+            logits = Sampler.apply_repetition_penalty(
+                logits, repetition_cache, sampling_params.repetition_penalty
+            )
+
         # there are 33 codebooks (32 audio + 1 text), but the output from backbone transformer is single codebook
         # so here we allocate output_ids for all codebooks but do sampling only for the first one
         output_ids = Sampler.run_sampling(logits.view(-1, self.vocab_size), config=sampling_params)
         output_ids = output_ids.view(logits.shape[0], logits.shape[1])
         output_ids = output_ids.expand(-1, self.n_codebooks)  # [bs, 33]
+
+        if repetition_cache is not None:
+            Sampler.update_repetition_penalty_cache(
+                repetition_cache,
+                output_ids,
+                sampling_params.repetition_window,
+            )
 
         c0_embed = self.embed_audio_tokens_single(output_ids[:, 0], 0)
         hidden_for_depth = torch.cat([hidden_states[:, None, :], c0_embed[:, None, :]], dim=1) # (bs, 2, hidden_size)

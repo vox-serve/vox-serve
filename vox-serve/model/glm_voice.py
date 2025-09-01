@@ -491,7 +491,21 @@ class GLMVoiceModel(BaseLM):
         input_ids = self.text_tokenizer(text_input, return_tensors="pt").input_ids
         input_ids = input_ids.view(-1, 1)  # add codebook dimension
 
-        return PreprocessOutput(input_tokens=input_ids.tolist())
+        # Create repetition cache if repetition penalty is enabled
+        repetition_cache = None
+        config = self.default_sampling_config
+        if (config.repetition_penalty is not None and
+            config.repetition_window is not None and
+            config.repetition_penalty != 1.0):
+            repetition_cache = torch.zeros(
+                config.repetition_window if config.repetition_window > 0 else 1,
+                self.n_codebooks,
+                self.vocab_size,
+                dtype=torch.bool,
+                device=self.device,
+            )
+
+        return PreprocessOutput(input_tokens=input_ids.tolist(), repetition_cache=repetition_cache)
 
     def forward(
         self,
@@ -519,14 +533,27 @@ class GLMVoiceModel(BaseLM):
         logits: torch.Tensor,
         requests: List[Request],
         sampling_params: SamplingConfig | None = None,
+        repetition_cache: torch.Tensor | None = None,
         cfg_scale: float | None = None,
         **kwargs,
     ) -> torch.Tensor:
         if sampling_params is None:
             sampling_params = self.default_sampling_config
 
+        if repetition_cache is not None:
+            logits = Sampler.apply_repetition_penalty(
+                logits, repetition_cache, sampling_params.repetition_penalty
+            )
+
         output_ids = Sampler.run_sampling(logits.view(-1, self.vocab_size), config=sampling_params)
         output_ids = output_ids.view(logits.shape[0], logits.shape[1])
+
+        if repetition_cache is not None:
+            Sampler.update_repetition_penalty_cache(
+                repetition_cache,
+                output_ids,
+                sampling_params.repetition_window,
+            )
 
         for i, req in enumerate(requests):
             # filter out the non-audio tokens

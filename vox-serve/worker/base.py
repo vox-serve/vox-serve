@@ -258,6 +258,7 @@ class ModelWorker:
             "position_ids": position_ids,
             "input_features": input_features,
             "input_masks": input_masks,
+            "repetition_cache": repetition_cache,
         }
 
     def run_lm_prefill(self, requests: List[Request]):
@@ -271,6 +272,7 @@ class ModelWorker:
         position_ids = lm_inputs["position_ids"]
         input_features = lm_inputs["input_features"]
         input_masks = lm_inputs["input_masks"]
+        repetition_cache = lm_inputs["repetition_cache"]
 
         input_ids = torch.tensor(input_ids, device=self.device, dtype=torch.int32)
         position_ids = torch.tensor(position_ids, device=self.device, dtype=torch.int32)
@@ -285,6 +287,12 @@ class ModelWorker:
             input_features = torch.cat(input_features, dim=0)
         else:
             input_features = None
+
+        # Prepare repetition cache as stacked tensor if model uses repetition penalty
+        if self.model.use_repetition_penalty:
+            repetition_cache_tensor = torch.stack(repetition_cache, dim=0)
+        else:
+            repetition_cache_tensor = None
 
         qo_indptr_tensor = torch.tensor(qo_indptr, device=self.device, dtype=torch.int32)
         paged_kv_indptr_tensor = torch.tensor(paged_kv_indptr, device=self.device, dtype=torch.int32)
@@ -320,7 +328,13 @@ class ModelWorker:
                 logits=logits,
                 hidden_states=backbone_hidden_states,
                 requests=requests,
+                repetition_cache=repetition_cache_tensor,
             )
+
+            # Update repetition cache in requests after sampling if model uses repetition penalty
+            if self.model.use_repetition_penalty:
+                for i, req in enumerate(requests):
+                    req.repetition_cache = repetition_cache_tensor[i]
 
             # assuming that the sequence length is 2 for the initial iteration of depth transformer.
             # may need to change here for other models.
@@ -375,7 +389,13 @@ class ModelWorker:
             output_ids = self.model.sampling(
                 logits=logits,
                 requests=requests,
+                repetition_cache=repetition_cache_tensor,
             )
+
+            # Update repetition cache in requests after sampling if model uses repetition penalty
+            if self.model.use_repetition_penalty:
+                for i, req in enumerate(requests):
+                    req.repetition_cache = repetition_cache_tensor[i]
 
 
     def run_lm_decode(self, requests: List[Request]):
@@ -392,6 +412,7 @@ class ModelWorker:
         position_ids = lm_inputs["position_ids"]
         input_features = lm_inputs["input_features"]
         input_masks = lm_inputs["input_masks"]
+        repetition_cache = lm_inputs["repetition_cache"]
 
         # Convert to tensors
         input_ids = torch.tensor(input_ids, device=self.device, dtype=torch.int32)
@@ -407,6 +428,12 @@ class ModelWorker:
             input_features = torch.cat(input_features, dim=0)
         else:
             input_features = None
+
+        # Prepare repetition cache as stacked tensor if model uses repetition penalty
+        if self.model.use_repetition_penalty:
+            repetition_cache_tensor = torch.stack(repetition_cache, dim=0)
+        else:
+            repetition_cache_tensor = None
 
         paged_kv_indptr_tensor = torch.tensor(paged_kv_indptr, device=self.device, dtype=torch.int32)
         paged_kv_indices_tensor = torch.tensor(paged_kv_indices, device=self.device, dtype=torch.int32)
@@ -446,7 +473,13 @@ class ModelWorker:
                 logits=logits,
                 hidden_states=backbone_hidden_states,
                 requests=requests,
+                repetition_cache=repetition_cache_tensor,
             )
+
+            # Update repetition cache in requests after sampling if model uses repetition penalty
+            if self.model.use_repetition_penalty:
+                for i, req in enumerate(requests):
+                    req.repetition_cache = repetition_cache_tensor[i]
 
             depth_position_ids = torch.tensor([0, 1] * output_ids.shape[0], device=self.device, dtype=torch.int32)
             depth_qo_indptr = torch.arange(output_ids.shape[0] + 1, device=self.device, dtype=torch.int32) * 2
@@ -486,7 +519,13 @@ class ModelWorker:
             output_ids = self.model.sampling(
                 logits=logits,
                 requests=requests,
+                repetition_cache=repetition_cache_tensor,
             )
+
+            # Update repetition cache in requests after sampling if model uses repetition penalty
+            if self.model.use_repetition_penalty:
+                for i, req in enumerate(requests):
+                    req.repetition_cache = repetition_cache_tensor[i]
 
 
     def run_detokenize(self, requests: List[Request]):

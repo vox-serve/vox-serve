@@ -27,6 +27,7 @@ class Scheduler:
         repetition_penalty: float = None,
         repetition_window: int = None,
         cfg_scale: float = None,
+        greedy: bool = False,
         enable_cuda_graph: bool = True,
         enable_nvtx: bool = False,
     ):
@@ -47,6 +48,7 @@ class Scheduler:
                 repetition_penalty=repetition_penalty,
                 repetition_window=repetition_window,
                 cfg_scale=cfg_scale,
+                greedy=greedy,
                 max_num_pages=max_num_pages,
                 page_size=page_size,
                 enable_nvtx=enable_nvtx,
@@ -63,6 +65,7 @@ class Scheduler:
                 repetition_penalty=repetition_penalty,
                 repetition_window=repetition_window,
                 cfg_scale=cfg_scale,
+                greedy=greedy,
                 max_num_pages=max_num_pages,
                 page_size=page_size,
                 enable_nvtx=enable_nvtx,

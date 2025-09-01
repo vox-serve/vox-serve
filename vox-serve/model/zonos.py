@@ -797,13 +797,19 @@ class ZonosModel(BaseLM):
         input_mask[-1] = False  # Last position should not be filled with features
         input_mask = input_mask[:, None].expand(-1, self.n_codebooks) # Expand for n_codebooks
 
-        repetition_cache = torch.zeros(
-            self.default_sampling_config.repetition_window if self.default_sampling_config.repetition_window > 0 else 1,
-            self.n_codebooks,
-            self.vocab_size,
-            dtype=torch.bool,
-            device=self.device,
-        )
+        # Create repetition cache if repetition penalty is enabled
+        repetition_cache = None
+        config = self.default_sampling_config
+        if (config.repetition_penalty is not None and
+            config.repetition_window is not None and
+            config.repetition_penalty != 1.0):
+            repetition_cache = torch.zeros(
+                config.repetition_window if config.repetition_window > 0 else 1,
+                self.n_codebooks,
+                self.vocab_size,
+                dtype=torch.bool,
+                device=self.device,
+            )
 
         return PreprocessOutput(
             input_tokens=prefix_tokens.tolist(),
@@ -843,48 +849,47 @@ class ZonosModel(BaseLM):
         logits: torch.Tensor,
         requests: List[Request],
         sampling_params: SamplingConfig | None = None,
+        repetition_cache: torch.Tensor | None = None,
         cfg_scale: float | None = None,
     ) -> torch.Tensor:
         if sampling_params is None:
             sampling_params = self.default_sampling_config
 
-        # apply repetition penalty
-        for i, req in enumerate(requests):
-            if req.repetition_cache is None:
-                continue
-
-            logits[i] = Sampler.apply_repetition_penalty(
-                logits[i], req.repetition_cache, sampling_params.repetition_penalty
+        if repetition_cache is not None:
+            logits = Sampler.apply_repetition_penalty(
+                logits, repetition_cache, sampling_params.repetition_penalty
             )
 
         output_ids = Sampler.run_sampling(logits.view(-1, self.vocab_size), config=sampling_params)
         output_ids = output_ids.view(logits.shape[0], logits.shape[1])
 
+        if repetition_cache is not None:
+            Sampler.update_repetition_penalty_cache(
+                repetition_cache,
+                output_ids,
+                sampling_params.repetition_window,
+            )
+
         # update repetition cache
         for i, req in enumerate(requests):
-            if req.repetition_cache is not None:
-                Sampler.update_repetition_penalty_cache(
-                    req.repetition_cache,
-                    output_ids[i],
-                    sampling_params.repetition_window,
-                )
-
             # mask part of the output tokens for the first n_codebooks - 1 tokens
             # use len(req.lm_output_tokens) + 1 since the output is not yet appended
             if len(req.lm_output_tokens) + 1 < self.n_codebooks:
-                for j in range(len(req.lm_output_tokens) + 1, self.n_codebooks):
-                    output_ids[i, j] = self.masked_token_id
+                # for j in range(len(req.lm_output_tokens) + 1, self.n_codebooks):
+                #     output_ids[i, j] = self.masked_token_id
+                output_ids[i, len(req.lm_output_tokens) + 1 :] = self.masked_token_id
 
             # for decode phase, input_features are not used
             req.input_features = torch.zeros(1, self.hidden_size, device=self.device, dtype=torch.bfloat16)
             req.input_masks = torch.zeros(1, self.n_codebooks, dtype=torch.bool, device=self.device)
 
-            # no additional logic for CSM model for now. TODO: revert delay patterns here?
-            req.lm_output_tokens.append(output_ids[i].tolist())
+            # no additional logic for Zonos model for now. TODO: revert delay patterns here?
+            output_ids_list = output_ids[i].tolist()
+            req.lm_output_tokens.append(output_ids_list)
 
-            if not self.is_stop_id(output_ids[i].tolist()):
+            if not self.is_stop_id(output_ids_list):
                 # Don't add the EOS token to lm_output_audio_tokens
-                req.lm_output_audio_tokens.append(output_ids[i].tolist())
+                req.lm_output_audio_tokens.append(output_ids_list)
 
         return output_ids
 

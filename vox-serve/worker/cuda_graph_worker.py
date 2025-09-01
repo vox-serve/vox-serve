@@ -39,6 +39,9 @@ class CudaGraphWorker(ModelWorker):
         if self.has_depth_transformer:
             self.depth_kv_cache.zero_()
 
+        _memory_reservoir = torch.cuda.ByteTensor(16 * 1024 ** 3)
+        del _memory_reservoir
+
     @property
     def available_batch_sizes(self) -> List[int]:
         return self.cuda_graph_batch_sizes
@@ -737,6 +740,7 @@ class CudaGraphWorker(ModelWorker):
         position_ids = lm_inputs["position_ids"]
         input_features = lm_inputs["input_features"]
         input_masks = lm_inputs["input_masks"]
+        repetition_cache = lm_inputs["repetition_cache"]
 
         actual_batch_size = len(requests)
         actual_seq_len = len(input_ids)
@@ -778,6 +782,12 @@ class CudaGraphWorker(ModelWorker):
             paged_kv_indptr.append(paged_kv_indptr[-1] + 1)
             paged_kv_indices.append(temporaly_pages_to_allocate[i])
             paged_kv_last_page_len.append(1)
+
+        # Prepare repetition cache as stacked tensor if model uses repetition penalty
+        if self.model.use_repetition_penalty:
+            repetition_cache_tensor = torch.stack(repetition_cache, dim=0)
+        else:
+            repetition_cache_tensor = None
 
         # Plan attention wrapper
         qo_indptr_tensor = torch.tensor(qo_indptr, dtype=torch.int32)
@@ -835,6 +845,7 @@ class CudaGraphWorker(ModelWorker):
                 logits=logits,
                 hidden_states=backbone_hidden_states,
                 requests=requests,
+                repetition_cache=repetition_cache_tensor,
             )
 
             self.nvtx_range_pop() # sampling
@@ -851,8 +862,14 @@ class CudaGraphWorker(ModelWorker):
             output_ids = self.model.sampling(
                 logits=logits,
                 requests=requests,
+                repetition_cache=repetition_cache_tensor,
             )
             self.nvtx_range_pop() # sampling
+
+        # Update repetition cache in requests after sampling if model uses repetition penalty
+        if self.model.use_repetition_penalty:
+            for i, req in enumerate(requests):
+                req.repetition_cache = repetition_cache_tensor[i]
 
         self.nvtx_range_pop() # lm_prefill_cuda_graph
 
@@ -866,6 +883,7 @@ class CudaGraphWorker(ModelWorker):
         position_ids = lm_inputs["position_ids"]
         input_features = lm_inputs["input_features"]
         input_masks = lm_inputs["input_masks"]
+        repetition_cache = lm_inputs["repetition_cache"]
 
         input_ids = torch.tensor(input_ids, device=self.device, dtype=torch.int32)
         position_ids = torch.tensor(position_ids, device=self.device, dtype=torch.int32)
@@ -884,6 +902,12 @@ class CudaGraphWorker(ModelWorker):
             input_features = torch.cat(input_features, dim=0)
         else:
             input_features = None
+
+        # Prepare repetition cache as stacked tensor if model uses repetition penalty
+        if self.model.use_repetition_penalty:
+            repetition_cache_tensor = torch.stack(repetition_cache, dim=0)
+        else:
+            repetition_cache_tensor = None
 
         qo_indptr_tensor = torch.tensor(qo_indptr, dtype=torch.int32)
         paged_kv_indptr_tensor = torch.tensor(paged_kv_indptr, dtype=torch.int32)
@@ -919,6 +943,7 @@ class CudaGraphWorker(ModelWorker):
                 logits=logits,
                 hidden_states=backbone_hidden_states,
                 requests=requests,
+                repetition_cache=repetition_cache_tensor,
             )
 
             # Always use CUDA graphs with padding
@@ -944,7 +969,13 @@ class CudaGraphWorker(ModelWorker):
             output_ids = self.model.sampling(
                 logits=logits,
                 requests=requests,
+                repetition_cache=repetition_cache_tensor,
             )
+
+        # Update repetition cache in requests if model uses repetition penalty
+        if self.model.use_repetition_penalty:
+            for i, req in enumerate(requests):
+                req.repetition_cache = repetition_cache_tensor[i]
 
         self.nvtx_range_pop() # prefill_fallback
 
@@ -963,6 +994,7 @@ class CudaGraphWorker(ModelWorker):
         position_ids = lm_inputs["position_ids"]
         input_features = lm_inputs["input_features"]
         input_masks = lm_inputs["input_masks"]
+        repetition_cache = lm_inputs["repetition_cache"]
 
         actual_batch_size = len(requests)
         padded_batch_size = self._get_cuda_graph_batch_size(actual_batch_size)
@@ -990,6 +1022,12 @@ class CudaGraphWorker(ModelWorker):
                 paged_kv_indptr.append(paged_kv_indptr[-1] + 1)
 
         self.logger.debug(f"Using CUDA graph with padded batch size {padded_batch_size} (actual: {actual_batch_size})")
+
+        # Prepare repetition cache as stacked tensor if model uses repetition penalty
+        if self.model.use_repetition_penalty:
+            repetition_cache_tensor = torch.stack(repetition_cache, dim=0)
+        else:
+            repetition_cache_tensor = None
 
         # Plan attention wrapper before CUDA graph
         paged_kv_indptr_tensor = torch.tensor(paged_kv_indptr, dtype=torch.int32)
@@ -1037,6 +1075,7 @@ class CudaGraphWorker(ModelWorker):
                 logits=logits,
                 hidden_states=backbone_hidden_states,
                 requests=requests,
+                repetition_cache=repetition_cache_tensor,
             )
 
             self.nvtx_range_pop() # sampling
@@ -1052,8 +1091,14 @@ class CudaGraphWorker(ModelWorker):
             output_ids = self.model.sampling(
                 logits=logits,
                 requests=requests,
+                repetition_cache=repetition_cache_tensor,
             )
             self.nvtx_range_pop() # sampling
+
+        # Update repetition cache in requests if model uses repetition penalty
+        if self.model.use_repetition_penalty:
+            for i, req in enumerate(requests):
+                req.repetition_cache = repetition_cache_tensor[i]
 
         self.nvtx_range_pop() # lm_decode
 
