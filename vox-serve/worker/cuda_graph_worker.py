@@ -723,15 +723,10 @@ class CudaGraphWorker(ModelWorker):
         actual_seq_len = len(lm_inputs["input_ids"])
 
         # Check if we can use CUDA graphs for this batch
-        if self._get_prefill_cuda_graph_key(actual_batch_size, actual_seq_len) is not None:
-            self._run_lm_prefill_with_cuda_graph(requests, lm_inputs)
-        else:
-            self._run_lm_prefill_fallback(requests, lm_inputs)
+        if self._get_prefill_cuda_graph_key(actual_batch_size, actual_seq_len) is None:
+            # fallback to prefill implementation of parent class
+            super().run_lm_prefill(requests)
 
-        self.nvtx_range_pop() # lm_prefill
-
-    def _run_lm_prefill_with_cuda_graph(self, requests: List[Request], lm_inputs: Dict):
-        """Run prefill using CUDA graphs with padding."""
         qo_indptr = lm_inputs["qo_indptr"]
         paged_kv_indptr = lm_inputs["paged_kv_indptr"]
         paged_kv_indices = lm_inputs["paged_kv_indices"]
@@ -744,8 +739,6 @@ class CudaGraphWorker(ModelWorker):
 
         actual_batch_size = len(requests)
         actual_seq_len = len(input_ids)
-
-        self.nvtx_range_push(f"lm_prefill_cuda_graph_{actual_batch_size}x{actual_seq_len}")
 
         # Get the best matching CUDA graph key
         graph_key = self._get_prefill_cuda_graph_key(actual_batch_size, actual_seq_len)
@@ -871,113 +864,7 @@ class CudaGraphWorker(ModelWorker):
             for i, req in enumerate(requests):
                 req.repetition_cache = repetition_cache_tensor[i]
 
-        self.nvtx_range_pop() # lm_prefill_cuda_graph
-
-    def _run_lm_prefill_fallback(self, requests: List[Request], lm_inputs: Dict):
-        """Fallback to regular prefill when CUDA graphs cannot be used."""
-        qo_indptr = lm_inputs["qo_indptr"]
-        paged_kv_indptr = lm_inputs["paged_kv_indptr"]
-        paged_kv_indices = lm_inputs["paged_kv_indices"]
-        paged_kv_last_page_len = lm_inputs["paged_kv_last_page_len"]
-        input_ids = lm_inputs["input_ids"]
-        position_ids = lm_inputs["position_ids"]
-        input_features = lm_inputs["input_features"]
-        input_masks = lm_inputs["input_masks"]
-        repetition_cache = lm_inputs["repetition_cache"]
-
-        input_ids = torch.tensor(input_ids, device=self.device, dtype=torch.int32)
-        position_ids = torch.tensor(position_ids, device=self.device, dtype=torch.int32)
-
-        batch_size = len(requests)
-
-        self.nvtx_range_push(f"prefill_fallback_{batch_size}x{len(input_ids)}")
-
-        # Prepare input_masks and input_features as single tensors
-        if self.model.needs_input_masks:
-            input_masks = torch.cat(input_masks, dim=0)
-        else:
-            input_masks = None
-
-        if self.model.needs_input_features:
-            input_features = torch.cat(input_features, dim=0)
-        else:
-            input_features = None
-
-        # Prepare repetition cache as stacked tensor if model uses repetition penalty
-        if self.model.use_repetition_penalty:
-            repetition_cache_tensor = torch.stack(repetition_cache, dim=0)
-        else:
-            repetition_cache_tensor = None
-
-        qo_indptr_tensor = torch.tensor(qo_indptr, dtype=torch.int32)
-        paged_kv_indptr_tensor = torch.tensor(paged_kv_indptr, dtype=torch.int32)
-        paged_kv_indices_tensor = torch.tensor(paged_kv_indices, dtype=torch.int32)
-        paged_kv_last_page_len_tensor = torch.tensor(paged_kv_last_page_len, dtype=torch.int32)
-
-        self.prefill_wrapper_no_cudagraph.plan(
-            qo_indptr_tensor,
-            paged_kv_indptr_tensor,
-            paged_kv_indices_tensor,
-            paged_kv_last_page_len_tensor,
-            torch.bfloat16,
-        )
-        torch.cuda.synchronize()
-
-        # prefill run
-        self.nvtx_range_push("backbone_forward")
-        if self.has_depth_transformer:
-            logits, backbone_hidden_states = self.model.forward(
-                input_ids=input_ids,
-                position_ids=position_ids,
-                attn_wrapper=self.prefill_wrapper_no_cudagraph,
-                kv_cache=self.kv_cache,
-                input_features=input_features,
-                input_masks=input_masks,
-            )
-
-            # select last token for each request for prefill
-            logits = logits[qo_indptr_tensor[1:] - 1]
-            backbone_hidden_states = backbone_hidden_states[qo_indptr_tensor[1:] - 1]
-
-            output_ids, hidden_for_depth = self.model.sampling(
-                logits=logits,
-                hidden_states=backbone_hidden_states,
-                requests=requests,
-                repetition_cache=repetition_cache_tensor,
-            )
-
-            # Always use CUDA graphs with padding
-            padded_batch_size = self._get_cuda_graph_batch_size(batch_size)
-
-            self.nvtx_range_pop() # backbone_forward
-            output_ids = self.run_lm_depth(output_ids, hidden_for_depth, requests, batch_size, padded_batch_size)
-
-        else:
-            logits = self.model.forward(
-                input_ids=input_ids,
-                position_ids=position_ids,
-                attn_wrapper=self.prefill_wrapper_no_cudagraph,
-                kv_cache=self.kv_cache,
-                input_features=input_features,
-                input_masks=input_masks,
-            )
-
-            # select last token for each request for prefill
-            logits = logits[qo_indptr_tensor[1:] - 1]
-
-            self.nvtx_range_pop() # backbone_forward
-            output_ids = self.model.sampling(
-                logits=logits,
-                requests=requests,
-                repetition_cache=repetition_cache_tensor,
-            )
-
-        # Update repetition cache in requests if model uses repetition penalty
-        if self.model.use_repetition_penalty:
-            for i, req in enumerate(requests):
-                req.repetition_cache = repetition_cache_tensor[i]
-
-        self.nvtx_range_pop() # prefill_fallback
+        self.nvtx_range_pop() # lm_prefill
 
     def run_lm_decode(self, requests: List[Request]):
         """
