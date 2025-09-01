@@ -570,7 +570,9 @@ class ModelWorker:
 
             req.next_audio_decode_idx += self.detokenize_interval - self.detokenize_overlap
 
-            if req.done_lm_generation and req.next_audio_decode_idx >= len(req.lm_output_audio_tokens):
+            if req.done_lm_generation and (
+                req.next_audio_decode_idx + self.detokenize_interval >= len(req.lm_output_audio_tokens)
+            ):
                 req.done_all = True
 
         return
