@@ -1182,11 +1182,6 @@ class CudaGraphWorker(ModelWorker):
                 req.next_audio_decode_idx : req.next_audio_decode_idx + self.detokenize_interval
             ]
 
-            if req.done_lm_generation:
-                # exclude the last token since it is a stop token
-                if len(new_tokens) > 1:
-                    new_tokens = new_tokens[:-1]
-
             if len(new_tokens) < self.detokenize_interval:
                 new_tokens.extend([new_tokens[-1]] * (self.detokenize_interval - len(new_tokens)))
 
