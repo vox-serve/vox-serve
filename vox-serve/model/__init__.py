@@ -62,6 +62,7 @@ def load_model(
     repetition_penalty: float = None,
     repetition_window: int = None,
     cfg_scale: float = None,
+    greedy: bool = False,
     **kwargs: Any
 ) -> BaseLM | BaseLMWithDepth:
     """
@@ -78,6 +79,7 @@ def load_model(
         repetition_penalty: Repetition penalty (overrides model default if provided)
         repetition_window: Repetition window size (overrides model default if provided)
         cfg_scale: CFG scale for guidance (overrides model default if provided)
+        greedy: Enable greedy sampling (ignores other sampling parameters if True)
         **kwargs: Additional arguments to pass to the model constructor
 
     Returns:
@@ -92,7 +94,7 @@ def load_model(
     # Override default sampling config if CLI parameters are provided
     if any(param is not None for param in [
         top_p, top_k, min_p, temperature, repetition_penalty, repetition_window, cfg_scale
-    ]):
+    ]) or greedy:
         # Get current default config
         current_config = model.default_sampling_config
 
@@ -111,6 +113,7 @@ def load_model(
                 else current_config.repetition_window
             ),
             cfg_scale=cfg_scale if cfg_scale is not None else current_config.cfg_scale,
+            greedy=greedy,
         )
 
     return model

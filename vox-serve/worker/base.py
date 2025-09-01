@@ -26,6 +26,7 @@ class ModelWorker:
         repetition_penalty: float = None,
         repetition_window: int = None,
         cfg_scale: float = None,
+        greedy: bool = False,
         enable_nvtx: bool = False,
     ):
         # Load model with sampling parameters
@@ -39,6 +40,7 @@ class ModelWorker:
             repetition_penalty=repetition_penalty,
             repetition_window=repetition_window,
             cfg_scale=cfg_scale,
+            greedy=greedy,
         )
         self.device = "cuda:0"
         self.max_batch_size = max_batch_size

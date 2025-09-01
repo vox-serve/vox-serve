@@ -37,6 +37,7 @@ def run_scheduler_daemon(
     repetition_penalty: Optional[float],
     repetition_window: Optional[int],
     cfg_scale: Optional[float],
+    greedy: bool,
     enable_cuda_graph: bool,
     enable_nvtx: bool,
     log_level: str,
@@ -60,6 +61,7 @@ def run_scheduler_daemon(
         repetition_penalty=repetition_penalty,
         repetition_window=repetition_window,
         cfg_scale=cfg_scale,
+        greedy=greedy,
         enable_cuda_graph=enable_cuda_graph,
         enable_nvtx=enable_nvtx,
     )
@@ -84,6 +86,7 @@ class APIServer:
         repetition_penalty: float = None,
         repetition_window: int = None,
         cfg_scale: float = None,
+        greedy: bool = False,
         enable_cuda_graph: bool = True,
         enable_nvtx: bool = False,
         max_num_pages: int = None,
@@ -105,6 +108,7 @@ class APIServer:
         self.repetition_penalty = repetition_penalty
         self.repetition_window = repetition_window
         self.cfg_scale = cfg_scale
+        self.greedy = greedy
         self.enable_cuda_graph = enable_cuda_graph
         self.enable_nvtx = enable_nvtx
         self.max_num_pages = max_num_pages
@@ -166,6 +170,7 @@ class APIServer:
                     'repetition_penalty': self.repetition_penalty,
                     'repetition_window': self.repetition_window,
                     'cfg_scale': self.cfg_scale,
+                    'greedy': self.greedy,
                     'enable_cuda_graph': self.enable_cuda_graph,
                     'enable_nvtx': self.enable_nvtx,
                     'log_level': get_global_log_level(),
@@ -624,6 +629,11 @@ if __name__ == "__main__":
         help="CFG scale for guidance (default: None)"
     )
     parser.add_argument(
+        "--greedy",
+        action="store_true",
+        help="Enable greedy sampling (ignores top-k, top-p, min-p, and temperature parameters)"
+    )
+    parser.add_argument(
         "--enable-cuda-graph",
         action="store_true",
         default=True,
@@ -682,6 +692,7 @@ if __name__ == "__main__":
         repetition_penalty=args.repetition_penalty,
         repetition_window=args.repetition_window,
         cfg_scale=args.cfg_scale,
+        greedy=args.greedy,
         enable_cuda_graph=enable_cuda_graph,
         enable_nvtx=args.enable_nvtx,
     )

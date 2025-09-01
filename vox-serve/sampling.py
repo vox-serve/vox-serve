@@ -14,6 +14,7 @@ class SamplingConfig:
     repetition_penalty: Optional[float] = None
     repetition_window: Optional[int] = None  # -1 for global window
     cfg_scale: Optional[float] = None
+    greedy: bool = False
 
 
 def greedy_sampling(logits):
@@ -93,8 +94,11 @@ class Sampler:
             Sampled token indices
         """
         # Determine sampling strategy based on config
-        if config.temperature == 0.0:
-            # Greedy sampling
+        if config.greedy:
+            # Greedy sampling when explicitly enabled
+            return greedy_sampling(logits)
+        elif config.temperature == 0.0:
+            # Greedy sampling (backward compatibility)
             return greedy_sampling(logits)
         elif config.top_k is not None and config.top_p is not None:
             # Combined top-k and top-p sampling
