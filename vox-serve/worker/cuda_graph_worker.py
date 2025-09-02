@@ -39,7 +39,7 @@ class CudaGraphWorker(ModelWorker):
         if self.has_depth_transformer:
             self.depth_kv_cache.zero_()
 
-        _memory_reservoir = torch.cuda.ByteTensor(16 * 1024 ** 3)
+        _memory_reservoir = torch.cuda.empty(16 * 1024 ** 3, dtype=torch.uint8, device=self.device)
         del _memory_reservoir
 
     @property
@@ -241,6 +241,14 @@ class CudaGraphWorker(ModelWorker):
             key = (batch_size, seq_len)
             self.logger.info(f"Capturing prefill CUDA graph for batch_size={batch_size}, seq_len={seq_len}")
 
+            # Log GPU memory usage before capturing the CUDA graph
+            gpu_memory_allocated = torch.cuda.memory_allocated(self.device) / (1024 ** 2)
+            gpu_memory_reserved = torch.cuda.memory_reserved(self.device) / (1024 ** 2)
+            self.logger.debug(
+                f"GPU memory usage before capturing CUDA graph: "
+                f"allocated={gpu_memory_allocated:.2f} MB, reserved={gpu_memory_reserved:.2f} MB"
+            )
+
             seq_len_per_batch = seq_len // batch_size
 
             # Create buffers for flashinfer planning
@@ -374,6 +382,14 @@ class CudaGraphWorker(ModelWorker):
 
             self.logger.info(f"Capturing CUDA graph for batch size {batch_size}")
 
+            # Log GPU memory usage before capturing the CUDA graph
+            gpu_memory_allocated = torch.cuda.memory_allocated(self.device) / (1024 ** 2)
+            gpu_memory_reserved = torch.cuda.memory_reserved(self.device) / (1024 ** 2)
+            self.logger.debug(
+                f"GPU memory usage before capturing CUDA graph: "
+                f"allocated={gpu_memory_allocated:.2f} MB, reserved={gpu_memory_reserved:.2f} MB"
+            )
+
             # Create buffers for flashinfer inputs
             paged_kv_indptr = torch.zeros(batch_size + 1, dtype=torch.int32)
             paged_kv_indices = torch.zeros(batch_size, dtype=torch.int32)
@@ -485,6 +501,14 @@ class CudaGraphWorker(ModelWorker):
 
             self.logger.info(f"Capturing detokenization CUDA graph for batch size {batch_size}")
 
+            # Log GPU memory usage before capturing the CUDA graph
+            gpu_memory_allocated = torch.cuda.memory_allocated(self.device) / (1024 ** 2)
+            gpu_memory_reserved = torch.cuda.memory_reserved(self.device) / (1024 ** 2)
+            self.logger.debug(
+                f"GPU memory usage before capturing CUDA graph: "
+                f"allocated={gpu_memory_allocated:.2f} MB, reserved={gpu_memory_reserved:.2f} MB"
+            )
+
             # Warmup runs for detokenization
             for _ in range(5):
                 audio_output = self.model.postprocess(self.cuda_graph_buffers["detokenize_input"][:batch_size])
@@ -545,6 +569,14 @@ class CudaGraphWorker(ModelWorker):
                 continue
 
             self.logger.info(f"Capturing depth CUDA graph for batch size {batch_size}")
+
+            # Log GPU memory usage before capturing the CUDA graph
+            gpu_memory_allocated = torch.cuda.memory_allocated(self.device) / (1024 ** 2)
+            gpu_memory_reserved = torch.cuda.memory_reserved(self.device) / (1024 ** 2)
+            self.logger.debug(
+                f"GPU memory usage before capturing CUDA graph: "
+                f"allocated={gpu_memory_allocated:.2f} MB, reserved={gpu_memory_reserved:.2f} MB"
+            )
 
             # Create buffers for flashinfer inputs for depth transformer
             depth_qo_indptr = torch.arange(batch_size + 1, dtype=torch.int32) * 2
