@@ -117,6 +117,7 @@ class FlashInferPrefillWrapper:
             self.token_to_cache = off_in_page.to(self.device)
 
 
+    @torch.compiler.disable
     def run(self, q, kv_cache):
         if not self.use_cuda_graph:
             if q.isnan().any() or kv_cache.isnan().any():
@@ -217,6 +218,7 @@ class FlashInferDecodeWrapper:
             self.kv_cache_locations = torch.stack([page_idx, pos_idx], dim=1).to(self.device)
 
 
+    @torch.compiler.disable
     def run(self, q, kv_cache):
         return self.attn_wrapper.run(q, kv_cache)
 
@@ -237,3 +239,79 @@ class FlashInferDecodeWrapper:
 
 
 FlashInferWrapper = Union[FlashInferPrefillWrapper, FlashInferDecodeWrapper]
+
+
+def rms_norm(hidden_states: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    """
+    Wrapper for FlashInfer RMSNorm operation.
+
+    Args:
+        hidden_states: Input tensor of shape (..., hidden_size)
+        weight: Weight tensor of shape (hidden_size,)
+        eps: Epsilon value for numerical stability
+
+    Returns:
+        Normalized tensor of the same shape as hidden_states
+    """
+    return flashinfer.norm.rmsnorm(
+        input=hidden_states,
+        weight=weight,
+        eps=eps,
+    )
+
+
+def apply_rope_pos_ids(
+    query_states: torch.Tensor,
+    key_states: torch.Tensor,
+    position_ids: torch.Tensor,
+    rope_scale: float = 1.0,
+    rope_theta: float = 10000.0,
+    interleave: bool = False,
+    **kwargs
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Wrapper for FlashInfer RoPE application with position IDs.
+
+    Args:
+        query_states: Query states tensor
+        key_states: Key states tensor
+        position_ids: Position IDs tensor
+        rope_scale: Rope scaling factor
+        rope_theta: Rope theta parameter
+        interleave: Whether to interleave the RoPE
+        **kwargs: Additional parameters for specific RoPE variants
+
+    Returns:
+        Tuple of (rotated_query_states, rotated_key_states)
+    """
+    # Filter out kwargs that are meant for specific RoPE variants
+    llama31_params = {}
+    other_params = {}
+
+    for key, value in kwargs.items():
+        if key in ['low_freq_factor', 'high_freq_factor', 'old_context_len']:
+            llama31_params[key] = value
+        else:
+            other_params[key] = value
+
+    # Use LLaMA 3.1 variant if specific parameters are provided
+    if llama31_params:
+        return flashinfer.rope.apply_llama31_rope_pos_ids(
+            query_states,
+            key_states,
+            pos_ids=position_ids,
+            rope_scale=rope_scale,
+            rope_theta=rope_theta,
+            interleave=interleave,
+            **llama31_params
+        )
+    else:
+        return flashinfer.rope.apply_rope_pos_ids(
+            query_states,
+            key_states,
+            pos_ids=position_ids,
+            rope_scale=rope_scale,
+            rope_theta=rope_theta,
+            interleave=interleave,
+            **other_params
+        )

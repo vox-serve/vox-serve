@@ -1,12 +1,11 @@
 from typing import Any, List
 
-import flashinfer
 import torch
 from torch import nn
 from transformers import LlamaConfig, LlamaPreTrainedModel
 from transformers.activations import ACT2FN
 
-from ..flashinfer_utils import FlashInferWrapper
+from ..flashinfer_utils import FlashInferWrapper, apply_rope_pos_ids, rms_norm
 from ..requests import Request
 from ..sampling import Sampler, SamplingConfig
 from ..tokenizer.snac import SNAC
@@ -23,11 +22,11 @@ class OrpheusRMSNorm(nn.Module):
         self.variance_epsilon = eps
 
     def forward(self, hidden_states):
-        input_dtype = hidden_states.dtype
-        hidden_states = hidden_states.to(torch.float32)
-        variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
-        return self.weight * hidden_states.to(input_dtype)
+        return rms_norm(
+            hidden_states=hidden_states,
+            weight=self.weight,
+            eps=self.variance_epsilon,
+        )
 
     def extra_repr(self):
         return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
@@ -93,10 +92,10 @@ class OrpheusAttention(nn.Module):
         key_states = self.k_proj(hidden_states).view(hidden_shape)  # .transpose(0, 1)
         value_states = self.v_proj(hidden_states).view(hidden_shape)  # .transpose(0, 1)
 
-        query_states, key_states = flashinfer.rope.apply_llama31_rope_pos_ids(
-            query_states,
-            key_states,
-            pos_ids=position_ids,
+        query_states, key_states = apply_rope_pos_ids(
+            query_states=query_states,
+            key_states=key_states,
+            position_ids=position_ids,
             rope_scale=self.rope_scale,
             rope_theta=self.rope_theta,
             low_freq_factor=self.low_freq_factor,

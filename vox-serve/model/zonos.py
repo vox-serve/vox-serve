@@ -4,7 +4,6 @@ from dataclasses import dataclass, field
 from functools import cache
 from typing import Any, Iterable, List, Literal
 
-import flashinfer
 import inflect
 import safetensors
 import torch
@@ -15,7 +14,7 @@ from torch import nn
 from torch.nn import functional as F
 
 from ..encoder.zonos import ZonosSpeakerEmbeddingLDA
-from ..flashinfer_utils import FlashInferWrapper
+from ..flashinfer_utils import FlashInferWrapper, apply_rope_pos_ids
 from ..requests import Request
 from ..sampling import Sampler, SamplingConfig
 from ..tokenizer.dac import DAC
@@ -109,10 +108,10 @@ class ZonosAttention(nn.Module):
         key_states = key_states.view(-1, self.num_heads_kv, self.head_dim)  # .transpose(0, 1)
         value_states = value_states.view(-1, self.num_heads_kv, self.head_dim)  # .transpose(0, 1)
 
-        query_states, key_states = flashinfer.rope.apply_rope_pos_ids(
-            query_states,
-            key_states,
-            pos_ids=position_ids,
+        query_states, key_states = apply_rope_pos_ids(
+            query_states=query_states,
+            key_states=key_states,
+            position_ids=position_ids,
             rope_theta=10000,
             interleave=True,
         )

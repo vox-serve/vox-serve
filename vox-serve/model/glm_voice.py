@@ -3,7 +3,6 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
 # from hyperpyyaml import load_hyperpyyaml
-import flashinfer
 import torch
 import torchaudio
 from huggingface_hub import hf_hub_download
@@ -11,7 +10,7 @@ from torch import nn
 from torch.nn import functional as F
 
 from ..encoder.glm import GLMVoiceEncoder
-from ..flashinfer_utils import FlashInferWrapper
+from ..flashinfer_utils import FlashInferWrapper, apply_rope_pos_ids, rms_norm
 from ..requests import Request
 from ..sampling import Sampler, SamplingConfig
 from ..tokenizer.glm import GLMAudioDecoder
@@ -73,11 +72,11 @@ class GLMVoiceRMSNorm(nn.Module):
         self.variance_epsilon = eps
 
     def forward(self, hidden_states):
-        input_dtype = hidden_states.dtype
-        hidden_states = hidden_states.to(torch.float32)
-        variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
-        return self.weight * hidden_states.to(input_dtype)
+        return rms_norm(
+            hidden_states=hidden_states,
+            weight=self.weight,
+            eps=self.variance_epsilon,
+        )
 
     def extra_repr(self):
         return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
@@ -146,10 +145,10 @@ class GLMVoiceAttention(nn.Module):
         key_states = key_layer.view(hidden_shape)  # .transpose(0, 1)
         value_states = value_layer.view(hidden_shape)  # .transpose(0, 1)
 
-        query_states, key_states = flashinfer.rope.apply_rope_pos_ids(
-            query_states,
-            key_states,
-            pos_ids=position_ids,
+        query_states, key_states = apply_rope_pos_ids(
+            query_states=query_states,
+            key_states=key_states,
+            position_ids=position_ids,
             rotary_dim=self.head_dim // 2,
             interleave=True,
             rope_scale=self.rope_scale,
