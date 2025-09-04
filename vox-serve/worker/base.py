@@ -202,6 +202,9 @@ class ModelWorker:
                 if preprocess_output.repetition_cache is not None:
                     req.repetition_cache = preprocess_output.repetition_cache
 
+                # input_ids.append(req.input_tokens.to(self.device, non_blocking=True)) # (seq, codebook)
+                input_ids.append(req.input_tokens.to(self.device, non_blocking=True)) # (seq, codebook)
+                position_ids.extend([i for i in range(len(req.input_tokens))])
                 input_features.append(req.input_features)
                 input_masks.append(req.input_masks)
                 repetition_cache.append(req.repetition_cache)
@@ -218,9 +221,6 @@ class ModelWorker:
                 paged_kv_indptr.append(paged_kv_indptr[-1] + len(req.kv_pages))
                 paged_kv_indices.extend(req.kv_pages)
                 paged_kv_last_page_len.append(req.kv_last_page_len)
-
-                input_ids.append(req.input_tokens.to(self.device)) # (seq, codebook)
-                position_ids.extend([i for i in range(len(req.input_tokens))])
 
                 req.next_position_id = len(req.input_tokens) + 1
                 req.done_lm_prefill = True
