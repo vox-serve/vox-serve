@@ -1,3 +1,4 @@
+import asyncio
 import json
 import time
 from typing import List
@@ -110,9 +111,13 @@ class Scheduler:
         # Prepare LM inputs outside the worker and run either prefill or decode
         lm_inputs = self.model_worker.prepare_lm_inputs(lm_requests)
         if is_prefill:
-            self.model_worker.run_lm_prefill(lm_requests, lm_inputs)
+            task = self.model_worker.run_lm_prefill(lm_requests, lm_inputs)
         else:
-            self.model_worker.run_lm_decode(lm_requests, lm_inputs)
+            task = self.model_worker.run_lm_decode(lm_requests, lm_inputs)
+
+        # Execute the sampling task right away for synchronous scheduling
+        if task is not None:
+            asyncio.run(task)
 
         detokenize_requests = []
 

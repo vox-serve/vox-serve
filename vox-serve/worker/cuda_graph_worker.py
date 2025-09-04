@@ -1,5 +1,4 @@
-import asyncio
-from typing import Dict, List
+from typing import Coroutine, Dict, List
 
 import numpy as np
 import torch
@@ -746,7 +745,7 @@ class CudaGraphWorker(ModelWorker):
         self.logger.debug(f"No suitable prefill CUDA graph for batch_size {batch_size}, seq_len {seq_len}")
         return None
 
-    def run_lm_prefill(self, requests: List[Request], lm_inputs: LMInputs) -> None:
+    def run_lm_prefill(self, requests: List[Request], lm_inputs: LMInputs) -> Coroutine:
         """
         Override parent's run_lm_prefill to add CUDA graph optimization for prefill phase.
         """
@@ -852,6 +851,8 @@ class CudaGraphWorker(ModelWorker):
             backbone_hidden_states = self.cuda_graph_buffers["prefill_backbone_hidden_states"][:padded_seq_len]
             backbone_hidden_states = backbone_hidden_states[actual_qo_indptr[1:] - 1]
 
+        task = None
+
         self.nvtx_range_push("sampling")
         if self.has_depth_transformer:
             output_ids, hidden_for_depth = self.model.sampling(
@@ -860,6 +861,7 @@ class CudaGraphWorker(ModelWorker):
                 requests=requests,
                 repetition_cache=repetition_cache_tensor,
             )
+            # TODO: define task for models with depth transformer
 
             self.nvtx_range_pop() # sampling
             depth_padded_batch_size = self._get_cuda_graph_batch_size(actual_batch_size)
@@ -879,8 +881,6 @@ class CudaGraphWorker(ModelWorker):
             )
             self.nvtx_range_pop() # sampling
 
-            asyncio.run(task)
-
         # Update repetition cache in requests after sampling if model uses repetition penalty
         if self.model.use_repetition_penalty:
             for i, req in enumerate(requests):
@@ -888,7 +888,9 @@ class CudaGraphWorker(ModelWorker):
 
         self.nvtx_range_pop() # lm_prefill
 
-    def run_lm_decode(self, requests: List[Request], lm_inputs: LMInputs) -> None:
+        return task
+
+    def run_lm_decode(self, requests: List[Request], lm_inputs: LMInputs) -> Coroutine:
         """
         Override parent's run_lm_decode to add CUDA graph optimization with padding.
         """
@@ -976,7 +978,8 @@ class CudaGraphWorker(ModelWorker):
         if self.has_depth_transformer:
             backbone_hidden_states = self.cuda_graph_buffers["backbone_hidden_states"][:actual_batch_size]
 
-        # Sampling is not part of CUDA graph
+        task = None
+
         self.nvtx_range_push("sampling")
         if self.has_depth_transformer:
             output_ids, hidden_for_depth = self.model.sampling(
@@ -985,6 +988,7 @@ class CudaGraphWorker(ModelWorker):
                 requests=requests,
                 repetition_cache=repetition_cache_tensor,
             )
+            # TODO: define task for models with depth transformer
 
             self.nvtx_range_pop() # sampling
             output_ids = self.run_lm_depth(
@@ -1003,9 +1007,9 @@ class CudaGraphWorker(ModelWorker):
             )
             self.nvtx_range_pop() # sampling
 
-            asyncio.run(task)
-
         self.nvtx_range_pop() # lm_decode
+
+        return task
 
     def run_lm_depth(self, output_ids, hidden_for_depth, requests, actual_batch_size, padded_batch_size):
         """

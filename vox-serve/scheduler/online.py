@@ -1,3 +1,4 @@
+import asyncio
 import json
 import time
 from typing import List
@@ -36,9 +37,13 @@ class OnlineScheduler(Scheduler):
             # Prepare inputs and run LM inference (prefill or decode)
             lm_inputs = self.model_worker.prepare_lm_inputs(lm_requests)
             if is_prefill:
-                self.model_worker.run_lm_prefill(lm_requests, lm_inputs)
+                task = self.model_worker.run_lm_prefill(lm_requests, lm_inputs)
             else:
-                self.model_worker.run_lm_decode(lm_requests, lm_inputs)
+                task = self.model_worker.run_lm_decode(lm_requests, lm_inputs)
+
+            # Execute the sampling task if it exists (non-depth models return a task, depth models return None)
+            if task is not None:
+                asyncio.run(task)
 
         # Select requests for detokenization with priority-aware batching
         detokenize_requests = self._select_detokenize_requests()

@@ -1,5 +1,5 @@
 import queue
-from typing import List
+from typing import Coroutine, List
 
 import numpy as np
 import torch
@@ -258,7 +258,7 @@ class ModelWorker:
             "repetition_cache": repetition_cache,
         }
 
-    def run_lm_prefill(self, requests: List[Request], lm_inputs: LMInputs) -> None:
+    def run_lm_prefill(self, requests: List[Request], lm_inputs: LMInputs) -> Coroutine:
 
         qo_indptr = lm_inputs["qo_indptr"]
         paged_kv_indptr = lm_inputs["paged_kv_indptr"]
@@ -382,7 +382,7 @@ class ModelWorker:
             if getattr(self.prefill_wrapper, "qo_indptr", None) is not None:
                 logits = logits[self.prefill_wrapper.qo_indptr[:-1] - 1]
 
-            output_ids = self.model.sampling(
+            output_ids, task = self.model.sampling(
                 logits=logits,
                 requests=requests,
                 repetition_cache=repetition_cache_tensor,
@@ -393,8 +393,10 @@ class ModelWorker:
                 for i, req in enumerate(requests):
                     req.repetition_cache = repetition_cache_tensor[i]
 
+            return task
 
-    def run_lm_decode(self, requests: List[Request], lm_inputs: LMInputs) -> None:
+
+    def run_lm_decode(self, requests: List[Request], lm_inputs: LMInputs) -> Coroutine:
         """
         Run LM decode step for the given requests.
         Base implementation without CUDA graph optimization.
@@ -510,7 +512,7 @@ class ModelWorker:
                 depth_kv_last_page_len += 1
 
         else:
-            output_ids = self.model.sampling(
+            output_ids, task = self.model.sampling(
                 logits=logits,
                 requests=requests,
                 repetition_cache=repetition_cache_tensor,
@@ -521,6 +523,7 @@ class ModelWorker:
                 for i, req in enumerate(requests):
                     req.repetition_cache = repetition_cache_tensor[i]
 
+            return task
 
     def run_detokenize(self, requests: List[Request]):
         if len(requests) == 0:
