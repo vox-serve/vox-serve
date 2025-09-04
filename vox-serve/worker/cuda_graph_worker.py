@@ -5,7 +5,7 @@ import numpy as np
 import torch
 
 from ..flashinfer_utils import FlashInferDecodeWrapper, FlashInferPrefillWrapper
-from ..requests import Request
+from ..requests import LMInputs, Request
 from .base import ModelWorker
 
 
@@ -745,12 +745,11 @@ class CudaGraphWorker(ModelWorker):
         self.logger.debug(f"No suitable prefill CUDA graph for batch_size {batch_size}, seq_len {seq_len}")
         return None
 
-    def run_lm_prefill(self, requests: List[Request]):
+    def run_lm_prefill(self, requests: List[Request], lm_inputs: LMInputs) -> None:
         """
         Override parent's run_lm_prefill to add CUDA graph optimization for prefill phase.
         """
         self.nvtx_range_push(f"lm_prefill_bs{len(requests)}")
-        lm_inputs = self._prepare_lm_inputs(requests)
 
         actual_batch_size = len(requests)
         actual_seq_len = len(lm_inputs["input_ids"])
@@ -759,7 +758,7 @@ class CudaGraphWorker(ModelWorker):
         if self._get_prefill_cuda_graph_key(actual_batch_size, actual_seq_len) is None:
             # fallback to prefill implementation of parent class
             raise RuntimeError("No suitable prefill CUDA graph found")
-            super().run_lm_prefill(requests)
+            super().run_lm_prefill(requests, lm_inputs)
             return
 
         qo_indptr = lm_inputs["qo_indptr"]
@@ -853,9 +852,7 @@ class CudaGraphWorker(ModelWorker):
         self.nvtx_range_pop()
 
         # Extract logits for the actual batch size - need to get last token for each actual request
-        actual_qo_indptr = torch.tensor(
-            [qo_indptr[i] for i in range(actual_batch_size + 1)], dtype=torch.int32, device=self.device
-        )
+        actual_qo_indptr = qo_indptr_tensor[:actual_batch_size + 1].to(self.device)
         logits = self.cuda_graph_buffers["prefill_logits"][:padded_seq_len]
         logits = logits[actual_qo_indptr[1:] - 1]
 
@@ -903,12 +900,11 @@ class CudaGraphWorker(ModelWorker):
 
         self.nvtx_range_pop() # lm_prefill
 
-    def run_lm_decode(self, requests: List[Request]):
+    def run_lm_decode(self, requests: List[Request], lm_inputs: LMInputs) -> None:
         """
         Override parent's run_lm_decode to add CUDA graph optimization with padding.
         """
         self.nvtx_range_push(f"lm_decode_bs{len(requests)}")
-        lm_inputs = self._prepare_lm_inputs(requests)
 
         qo_indptr = lm_inputs["qo_indptr"]
         paged_kv_indptr = lm_inputs["paged_kv_indptr"]

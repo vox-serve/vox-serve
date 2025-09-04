@@ -33,11 +33,12 @@ class OnlineScheduler(Scheduler):
             # Check if any request needs prefill
             is_prefill = any(not req.done_lm_prefill for req in lm_requests)
 
-            # Run LM inference (prefill or decode)
+            # Prepare inputs and run LM inference (prefill or decode)
+            lm_inputs = self.model_worker.prepare_lm_inputs(lm_requests)
             if is_prefill:
-                self.model_worker.run_lm_prefill(lm_requests)
+                self.model_worker.run_lm_prefill(lm_requests, lm_inputs)
             else:
-                self.model_worker.run_lm_decode(lm_requests)
+                self.model_worker.run_lm_decode(lm_requests, lm_inputs)
 
         # Select requests for detokenization with priority-aware batching
         detokenize_requests = self._select_detokenize_requests()

@@ -7,7 +7,7 @@ import torchaudio
 
 from ..flashinfer_utils import FlashInferDecodeWrapper, FlashInferPrefillWrapper
 from ..model import load_model
-from ..requests import Request
+from ..requests import LMInputs, Request
 from ..utils import get_logger
 from ..watermarker import silentcipher
 
@@ -166,7 +166,7 @@ class ModelWorker:
             self.depth_attn_wrapper = None
             self.depth_kv_cache = None
 
-    def _prepare_lm_inputs(self, requests: List[Request]):
+    def prepare_lm_inputs(self, requests: List[Request]) -> LMInputs:
         """Prepare inputs for the LM step."""
         # flashinfer inputs
         qo_indptr = [0]
@@ -259,8 +259,7 @@ class ModelWorker:
             "repetition_cache": repetition_cache,
         }
 
-    def run_lm_prefill(self, requests: List[Request]):
-        lm_inputs = self._prepare_lm_inputs(requests)
+    def run_lm_prefill(self, requests: List[Request], lm_inputs: LMInputs) -> None:
 
         qo_indptr = lm_inputs["qo_indptr"]
         paged_kv_indptr = lm_inputs["paged_kv_indptr"]
@@ -396,13 +395,11 @@ class ModelWorker:
                     req.repetition_cache = repetition_cache_tensor[i]
 
 
-    def run_lm_decode(self, requests: List[Request]):
+    def run_lm_decode(self, requests: List[Request], lm_inputs: LMInputs) -> None:
         """
         Run LM decode step for the given requests.
         Base implementation without CUDA graph optimization.
         """
-        lm_inputs = self._prepare_lm_inputs(requests)
-
         paged_kv_indptr = lm_inputs["paged_kv_indptr"]
         paged_kv_indices = lm_inputs["paged_kv_indices"]
         paged_kv_last_page_len = lm_inputs["paged_kv_last_page_len"]
@@ -669,7 +666,8 @@ class ModelWorker:
         try:
             # Warmup prefill (includes forward pass and sampling)
             self.logger.info("Warming up prefill...")
-            self.run_lm_prefill(dummy_requests)
+            lm_inputs = self.prepare_lm_inputs(dummy_requests)
+            self.run_lm_prefill(dummy_requests, lm_inputs)
 
             # Warmup decode (run a few decode steps, includes forward pass and sampling)
             self.logger.info("Warming up decode and sampling...")
@@ -677,8 +675,8 @@ class ModelWorker:
                 # # Add dummy output tokens for decode
                 # for req in dummy_requests:
                 #     req.lm_output_tokens.append(torch.randint(0, 1000, (self.model.n_codebooks,)).tolist())
-
-                self.run_lm_decode(dummy_requests)
+                lm_inputs = self.prepare_lm_inputs(dummy_requests)
+                self.run_lm_decode(dummy_requests, lm_inputs)
 
             # Warmup detokenization if we have enough tokens
             self.logger.info("Warming up detokenization...")

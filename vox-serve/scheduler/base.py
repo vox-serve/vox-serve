@@ -107,11 +107,12 @@ class Scheduler:
             time.sleep(0.1)
             return
 
-        # run either prefill or decode of LM
+        # Prepare LM inputs outside the worker and run either prefill or decode
+        lm_inputs = self.model_worker.prepare_lm_inputs(lm_requests)
         if is_prefill:
-            self.model_worker.run_lm_prefill(lm_requests)
+            self.model_worker.run_lm_prefill(lm_requests, lm_inputs)
         else:
-            self.model_worker.run_lm_decode(lm_requests)
+            self.model_worker.run_lm_decode(lm_requests, lm_inputs)
 
         detokenize_requests = []
 
