@@ -380,7 +380,7 @@ class OrpheusModel(BaseLM):
                 device=self.device,
             )
 
-        return PreprocessOutput(input_tokens=input_ids.tolist(), repetition_cache=repetition_cache)
+        return PreprocessOutput(input_tokens=input_ids, repetition_cache=repetition_cache)
 
     def forward(
         self,
@@ -431,13 +431,31 @@ class OrpheusModel(BaseLM):
             )
 
         for i, req in enumerate(requests):
-            # no additional logic for Orpheus model for now
-            req.lm_output_tokens.append(output_ids[i].tolist())
-            if not self.is_stop_id(output_ids[i].tolist()):
-                # Don't add the EOS token to lm_output_audio_tokens
-                req.lm_output_audio_tokens.append(output_ids[i].tolist())
+            req.input_tokens = output_ids[i : i + 1]
 
-        return output_ids
+        async def update_req_states():
+            stop_mask = output_ids[:, 0] == self.stop_token_id
+            stop_indices = torch.nonzero(stop_mask, as_tuple=True)[0]
+
+            for i, req in enumerate(requests):
+                req.lm_output_tokens.append(output_ids[i : i + 1])
+                req.lm_output_audio_tokens.append(output_ids[i : i + 1])
+
+            # Remove from stop requests
+            for idx in stop_indices:
+                req = requests[idx.item()]
+                # Remove the EOS token from lm_output_audio_tokens
+                req.lm_output_audio_tokens.pop()
+                req.done_lm_generation = True
+
+            if repetition_cache is not None:
+                # Update repetition cache in requests
+                for i, req in enumerate(requests):
+                    req.repetition_cache = repetition_cache[i]
+
+        task = update_req_states()
+
+        return output_ids, task
 
     def _turn_token_into_id(self, output_ids):
         """Modoel's output ids to audio ids"""

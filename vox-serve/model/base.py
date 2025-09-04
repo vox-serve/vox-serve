@@ -186,7 +186,7 @@ class BaseLM(ABC):
         repetition_cache: torch.Tensor | None,
         cfg_scale: float | None,
         **kwargs,
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, Optional[torch.coroutine]]:
         """
         Sampling and other model-specific logics for generating output tokens.
         `requests` will be updated with the sampled tokens.
@@ -201,7 +201,9 @@ class BaseLM(ABC):
             **kwargs: Additional model-specific parameters
 
         Returns:
-            Output token IDs from sampling
+            Tuple containing:
+                - Output token IDs from sampling. Shape: (batch_size, n_codebooks)
+                - Optional coroutine for additional asynchronous processing
         """
         pass
 

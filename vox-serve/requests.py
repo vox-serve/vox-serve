@@ -28,12 +28,12 @@ class Request:
     # kv_token_len == (len(kv_pages) - 1) * page_size + kv_last_page_len
 
     # input prompt tokens. shape: (seq_len, n_codebooks)
-    input_tokens: List[List[int]] = None
+    input_tokens: torch.Tensor = None
     # raw output tokens from LM to be given to the next step of LM inference. shape: (seq_len, n_codebooks)
-    lm_output_tokens: List[List[int]] = field(default_factory=list)
+    lm_output_tokens: List[torch.Tensor] = field(default_factory=list)
     # audio tokens to be given to the detokenizer, after filtering or reverting delay patterns.
     # shape: (seq_len, n_codebooks)
-    lm_output_audio_tokens: List[List[int]] = field(default_factory=list)
+    lm_output_audio_tokens: List[torch.Tensor] = field(default_factory=list)
     output_audio: Queue = field(default_factory=Queue)
 
     # progress status

@@ -555,14 +555,27 @@ class GLMVoiceModel(BaseLM):
             )
 
         for i, req in enumerate(requests):
-            # filter out the non-audio tokens
-            req.lm_output_tokens.append(output_ids[i].tolist())
-            if output_ids[i, 0] >= self.audio_offset:
-                # if the first token is an audio token, append it to the audio tokens
-                req.lm_output_audio_tokens.append(output_ids[i].tolist())
+            req.input_tokens = output_ids[i : i + 1]
 
-        self.logger.debug(f"Sampling output: {output_ids.tolist()}")
-        return output_ids
+        async def update_req_states():
+            stop_mask = (output_ids[:, 0] == self.stop_token_ids[0]) | \
+                        (output_ids[:, 0] == self.stop_token_ids[1]) | \
+                        (output_ids[:, 0] == self.stop_token_ids[2])
+            audio_mask = output_ids[:, 0] >= self.audio_offset
+
+            for i, req in enumerate(requests):
+                req.lm_output_tokens.append(output_ids[i : i + 1])
+                if audio_mask[i] and not stop_mask[i]:
+                    req.lm_output_audio_tokens.append(output_ids[i : i + 1])
+
+            if repetition_cache is not None:
+                # Update repetition cache in requests
+                for i, req in enumerate(requests):
+                    req.repetition_cache = repetition_cache[i]
+
+        task = update_req_states()
+
+        return output_ids, task
 
     def postprocess(self, token_ids: torch.Tensor):
         audio_tensor = self.audio_decoder(token_ids[:, :, 0] - self.audio_offset, self.detokenize_token_len)

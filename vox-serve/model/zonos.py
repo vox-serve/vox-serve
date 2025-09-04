@@ -869,7 +869,6 @@ class ZonosModel(BaseLM):
                 sampling_params.repetition_window,
             )
 
-        # update repetition cache
         for i, req in enumerate(requests):
             # mask part of the output tokens for the first n_codebooks - 1 tokens
             # use len(req.lm_output_tokens) + 1 since the output is not yet appended
@@ -878,19 +877,34 @@ class ZonosModel(BaseLM):
                 #     output_ids[i, j] = self.masked_token_id
                 output_ids[i, len(req.lm_output_tokens) + 1 :] = self.masked_token_id
 
+            req.input_tokens = output_ids[i : i + 1]
             # for decode phase, input_features are not used
-            req.input_features = torch.zeros(1, self.hidden_size, device=self.device, dtype=torch.bfloat16)
-            req.input_masks = torch.zeros(1, self.n_codebooks, dtype=torch.bool, device=self.device)
+            req.input_features = req.input_features[:1].zero_()
+            req.input_masks = req.input_masks[:1].zero_()
 
-            # no additional logic for Zonos model for now. TODO: revert delay patterns here?
-            output_ids_list = output_ids[i].tolist()
-            req.lm_output_tokens.append(output_ids_list)
+        async def update_req_states():
+            stop_mask = output_ids[:, 0] == self.eos_token_id
+            stop_indices = torch.nonzero(stop_mask, as_tuple=True)[0]
 
-            if not self.is_stop_id(output_ids_list):
-                # Don't add the EOS token to lm_output_audio_tokens
-                req.lm_output_audio_tokens.append(output_ids_list)
+            for i, req in enumerate(requests):
+                req.lm_output_tokens.append(output_ids[i : i + 1])
+                req.lm_output_audio_tokens.append(output_ids[i : i + 1])
 
-        return output_ids
+            # Remove from stop requests
+            for idx in stop_indices:
+                req = requests[idx.item()]
+                # Remove the EOS token from lm_output_audio_tokens
+                req.lm_output_audio_tokens.pop()
+                req.done_lm_generation = True
+
+            if repetition_cache is not None:
+                # Update repetition cache in requests
+                for i, req in enumerate(requests):
+                    req.repetition_cache = repetition_cache[i]
+
+        task = update_req_states()
+
+        return output_ids, task
 
     def postprocess(self, token_ids: torch.Tensor):
         interval = token_ids.shape[1]

@@ -219,7 +219,7 @@ class ModelWorker:
                 paged_kv_indices.extend(req.kv_pages)
                 paged_kv_last_page_len.append(req.kv_last_page_len)
 
-                input_ids.extend(req.input_tokens)
+                input_ids.append(req.input_tokens.to(self.device)) # (seq, codebook)
                 position_ids.extend([i for i in range(len(req.input_tokens))])
 
                 req.next_position_id = len(req.input_tokens) + 1
@@ -227,8 +227,7 @@ class ModelWorker:
 
             else:
                 # decode request
-                next_input_token = req.lm_output_tokens[-1]
-
+                input_ids.append(req.input_tokens) # (1, codebook)
                 input_features.append(req.input_features)
                 input_masks.append(req.input_masks)
                 repetition_cache.append(req.repetition_cache)
@@ -244,7 +243,6 @@ class ModelWorker:
                 paged_kv_indices.extend(req.kv_pages)
                 paged_kv_last_page_len.append(req.kv_last_page_len)
 
-                input_ids.append(next_input_token)
                 position_ids.append(req.next_position_id)
 
                 req.next_position_id += 1
