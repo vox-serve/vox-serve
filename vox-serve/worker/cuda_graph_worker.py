@@ -52,6 +52,7 @@ class CudaGraphWorker(ModelWorker):
         # shapes can reuse the memory
         self.cuda_graph_batch_sizes = [2**i for i in range(int(np.log2(self.max_batch_size)) + 1)][::-1]
         self.cuda_graph_seq_len_buckets = [1024][::-1]
+        self.prefill_graph_batch_size = 8
         self.cuda_graph_pool = torch.cuda.graph_pool_handle()
 
         self.flashinfer_buffer = torch.empty(256 * 1024 * 1024, dtype=torch.uint8, device=self.device)
@@ -238,7 +239,7 @@ class CudaGraphWorker(ModelWorker):
 
         # Capture CUDA graphs for different batch size and sequence length combinations
         for seq_len in self.cuda_graph_seq_len_buckets:
-            batch_size = self.max_batch_size
+            batch_size = self.prefill_graph_batch_size
             key = (batch_size, seq_len)
             self.logger.info(f"Capturing prefill CUDA graph for batch_size={batch_size}, seq_len={seq_len}")
 
@@ -722,7 +723,7 @@ class CudaGraphWorker(ModelWorker):
         Returns None if no suitable graph exists.
         """
         # Get the padded batch size and seq len
-        padded_batch_size = 32 # self.max_batch_size # For prefill, we always use max batch size
+        padded_batch_size = self.prefill_graph_batch_size
         # considering the padding tokens to match max batch size
         padded_seq_len = self._get_cuda_graph_seq_len(seq_len + (padded_batch_size - batch_size))
 
