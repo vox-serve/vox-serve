@@ -31,10 +31,13 @@ class Scheduler:
         greedy: bool = False,
         enable_cuda_graph: bool = True,
         enable_nvtx: bool = False,
+        async_scheduling: bool = False,
     ):
         self.device = device
         self.max_batch_size = max_batch_size
+        self.async_scheduling = async_scheduling
         self.logger = get_logger(__name__)
+        self.logger.info(f"Using {'async' if async_scheduling else 'sync'} scheduling mode")
 
         # Switch between CudaGraphWorker and ModelWorker based on user input
         if enable_cuda_graph:
@@ -92,33 +95,6 @@ class Scheduler:
         self._prepare_requests()
 
         # Naive scheduling: take up to max_batch_size requests
-        lm_requests = []
-
-        for req in self.active_requests:
-            if len(lm_requests) > self.max_batch_size:
-                break
-            if not req.done_lm_generation:
-                lm_requests.append(req)
-
-        is_prefill = False
-        for req in lm_requests:
-            is_prefill = is_prefill or (not req.done_lm_prefill)
-
-        if len(lm_requests) == 0:
-            time.sleep(0.1)
-            return
-
-        # Prepare LM inputs outside the worker and run either prefill or decode
-        lm_inputs = self.model_worker.prepare_lm_inputs(lm_requests)
-        if is_prefill:
-            task = self.model_worker.run_lm_prefill(lm_requests, lm_inputs)
-        else:
-            task = self.model_worker.run_lm_decode(lm_requests, lm_inputs)
-
-        # Execute the sampling task right away for synchronous scheduling
-        if task is not None:
-            asyncio.run(task)
-
         detokenize_requests = []
 
         for req in self.active_requests:
@@ -148,6 +124,33 @@ class Scheduler:
                 self.logger.debug(f"Sending completion for request {req.request_id}")
                 self.result_socket.send(completion_payload)
 
+        lm_requests = []
+
+        for req in self.active_requests:
+            if len(lm_requests) > self.max_batch_size:
+                break
+            if not req.done_lm_generation:
+                lm_requests.append(req)
+
+        is_prefill = False
+        for req in lm_requests:
+            is_prefill = is_prefill or (not req.done_lm_prefill)
+
+        if len(lm_requests) == 0:
+            time.sleep(0.1)
+            return
+
+        # Prepare LM inputs outside the worker and run either prefill or decode
+        lm_inputs = self.model_worker.prepare_lm_inputs(lm_requests)
+        if is_prefill:
+            task = self.model_worker.run_lm_prefill(lm_requests, lm_inputs)
+        else:
+            task = self.model_worker.run_lm_decode(lm_requests, lm_inputs)
+
+        # Execute the sampling task right away for synchronous scheduling
+        if task is not None:
+            asyncio.run(task)
+
         return
 
     def _step_async(self):
@@ -162,7 +165,10 @@ class Scheduler:
         Run the scheduler indefinitely.
         """
         while True:
-            self._step()
+            if self.async_scheduling:
+                self._step_async()
+            else:
+                self._step()
             # Optionally, sleep or yield to avoid busy-waiting
             torch.cuda.synchronize()
 
