@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Coroutine
 
 import torch
 
@@ -186,7 +186,7 @@ class BaseLM(ABC):
         repetition_cache: torch.Tensor | None,
         cfg_scale: float | None,
         **kwargs,
-    ) -> Tuple[torch.Tensor, Optional[torch.coroutine]]:
+    ) -> Tuple[torch.Tensor, Coroutine]:
         """
         Sampling and other model-specific logics for generating output tokens.
         `requests` will be updated with the sampled tokens.
@@ -203,7 +203,7 @@ class BaseLM(ABC):
         Returns:
             Tuple containing:
                 - Output token IDs from sampling. Shape: (batch_size, n_codebooks)
-                - Optional coroutine for additional asynchronous processing
+                - Coroutine for request state update, for asynchronous scheduling
         """
         pass
 

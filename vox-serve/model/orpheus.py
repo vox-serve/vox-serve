@@ -343,15 +343,15 @@ class OrpheusModel(BaseLM):
             start_token = torch.tensor([[128259]], dtype=torch.int64)
             end_tokens = torch.tensor([[128009, 128260, 128261, 128257]], dtype=torch.int64)
             all_input_ids = torch.cat([start_token, prompt_tokens.input_ids, end_tokens], dim=1)
-            prompt_string = self.text_tokenizer.decode(all_input_ids[0])
-            return all_input_ids, prompt_string
+            # prompt_string = self.text_tokenizer.decode(all_input_ids[0])
+            return all_input_ids
         else:
             prompt_tokens = self.text_tokenizer(prompt, return_tensors="pt")
             start_token = torch.tensor([[128259]], dtype=torch.int64)
             end_tokens = torch.tensor([[128009, 128260, 128261, 128257]], dtype=torch.int64)
             all_input_ids = torch.cat([start_token, prompt_tokens.input_ids, end_tokens], dim=1)
-            prompt_string = self.text_tokenizer.decode(all_input_ids[0])
-            return all_input_ids, prompt_string
+            # prompt_string = self.text_tokenizer.decode(all_input_ids[0])
+            return prompt_tokens
 
     def preprocess(
         self,
@@ -363,7 +363,7 @@ class OrpheusModel(BaseLM):
         """Prepare the prompt for the model, formatting it according to Orpheus specifications."""
         assert audio_path is None
         self._validate_voice(voice)
-        input_ids, _ = self._orpheus_format_prompt(prompt, voice, model_type)
+        input_ids = self._orpheus_format_prompt(prompt, voice, model_type)
         input_ids = input_ids.view(-1, 1)  # add codebook dimension
 
         # Create repetition cache if repetition penalty is enabled
