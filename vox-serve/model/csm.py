@@ -682,6 +682,8 @@ class CSMModel(BaseLMWithDepth):
             if not self.is_stop_id(output_ids[i].tolist()):
                 # Don't add the EOS token to lm_output_audio_tokens
                 req.lm_output_audio_tokens.append(output_ids[i].tolist())
+            else:
+                req.done_lm_generation = True
 
         return output_ids, hidden_for_depth
 

@@ -113,11 +113,6 @@ class Scheduler:
         else:
             self.model_worker.run_lm_decode(lm_requests)
 
-        # check for request completion and mark as done
-        for req in lm_requests:
-            if self.model_worker.is_finished(req):
-                req.done_lm_generation = True
-
         detokenize_requests = []
 
         for req in self.active_requests:

@@ -567,6 +567,8 @@ class GLMVoiceModel(BaseLM):
                 req.lm_output_tokens.append(output_ids[i : i + 1])
                 if audio_mask[i] and not stop_mask[i]:
                     req.lm_output_audio_tokens.append(output_ids[i : i + 1])
+                if stop_mask[i]:
+                    req.done_lm_generation = True
 
             if repetition_cache is not None:
                 # Update repetition cache in requests

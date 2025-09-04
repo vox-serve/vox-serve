@@ -39,11 +39,6 @@ class OnlineScheduler(Scheduler):
             else:
                 self.model_worker.run_lm_decode(lm_requests)
 
-            # Check for request completion and mark as done
-            for req in lm_requests:
-                if self.model_worker.is_finished(req):
-                    req.done_lm_generation = True
-
         # Select requests for detokenization with priority-aware batching
         detokenize_requests = self._select_detokenize_requests()
 
