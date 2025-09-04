@@ -788,19 +788,6 @@ class CudaGraphWorker(ModelWorker):
             f"(actual: {actual_seq_len})"
         )
 
-        # # Pad sequence length if needed
-        # if actual_seq_len < padded_seq_len:
-        #     seq_padding_size = padded_seq_len - actual_seq_len
-
-        #     # Pad input tensors by repeating the last element
-        #     input_ids.extend([input_ids[-1]] * seq_padding_size)
-        #     position_ids.extend([position_ids[-1]] * seq_padding_size)
-
-        #     if self.model.needs_input_features:
-        #         input_features.extend([input_features[-1][-1:]] * seq_padding_size)
-        #     if self.model.needs_input_masks:
-        #         input_masks.extend([input_masks[-1][-1:]] * seq_padding_size)
-
         # Pad batch size if needed
         # We need to temporally allocate new pages for the padded requests, to be released soon after the graph replay
         temporaly_pages_to_allocate = [
@@ -1148,12 +1135,6 @@ class CudaGraphWorker(ModelWorker):
                 new_tokens.extend([new_tokens[-1]] * (self.detokenize_interval - len(new_tokens)))
 
             token_ids.append(torch.cat(new_tokens, dim=0))
-
-        # Pad token_ids to match CUDA graph batch size
-        # if actual_batch_size < padded_batch_size:
-        #     padding_size = padded_batch_size - actual_batch_size
-        #     # Pad by repeating the last token sequence
-        #     token_ids.extend([token_ids[-1]] * padding_size)
 
         # token_ids_tensor = torch.tensor(token_ids, device=self.device, dtype=torch.int32)
 
