@@ -145,6 +145,13 @@ class Scheduler:
 
         return
 
+    def _step_async(self):
+        """
+        Process the next batch of requests asynchronously.
+        For now, just calls _step method.
+        """
+        return self._step()
+
     def run_forever(self):
         """
         Run the scheduler indefinitely.

@@ -663,6 +663,11 @@ if __name__ == "__main__":
         action="store_true",
         help="Enable NVTX profiling for performance analysis (default: False)"
     )
+    parser.add_argument(
+        "--async-scheduling",
+        action="store_true",
+        help="Enable async scheduling mode (default: False)"
+    )
     args = parser.parse_args()
 
     # Set global log level for the entire application

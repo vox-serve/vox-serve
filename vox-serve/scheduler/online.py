@@ -76,6 +76,13 @@ class OnlineScheduler(Scheduler):
 
         return
 
+    def _step_async(self):
+        """
+        Process the next batch of requests asynchronously.
+        For now, just calls _step method.
+        """
+        return self._step()
+
     def _select_lm_requests(self) -> List[Request]:
         """
         Select requests for LM forward processing with priority-aware batching.
