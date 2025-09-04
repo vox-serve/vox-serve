@@ -36,6 +36,11 @@ class Request:
     lm_output_audio_tokens: List[torch.Tensor] = field(default_factory=list)
     output_audio: Queue = field(default_factory=Queue)
 
+    # optional inputs for inference or sampling
+    input_features: torch.Tensor = None
+    input_masks: torch.Tensor = None
+    repetition_cache: torch.Tensor = None  # Shape: (window_size, n_codebooks, vocab_size)
+
     # progress status
     done_lm_prefill: bool = False
     next_audio_decode_idx: int = 0
@@ -49,8 +54,3 @@ class Request:
     # timestamp tracking for online scheduling
     chunk_send_timestamps: List[float] = field(default_factory=list)  # when each chunk was sent
     chunk_durations: List[float] = field(default_factory=list)  # duration of each chunk in seconds
-
-    # optional inputs for inference or sampling
-    input_features: torch.Tensor = None
-    input_masks: torch.Tensor = None
-    repetition_cache: torch.Tensor = None  # Shape: (window_size, n_codebooks, vocab_size)
