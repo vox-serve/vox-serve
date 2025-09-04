@@ -557,6 +557,18 @@ if __name__ == "__main__":
         help="Model name or path to use for text-to-speech synthesis (default: canopylabs/orpheus-3b-0.1-ft)",
     )
     parser.add_argument(
+        "--scheduler-type",
+        type=str,
+        default="base",
+        choices=["base", "online", "offline"],
+        help="Type of scheduler to use (default: base)"
+    )
+    parser.add_argument(
+        "--async-scheduling",
+        action="store_true",
+        help="Enable async scheduling mode (default: False)"
+    )
+    parser.add_argument(
         "--host",
         type=str,
         default="0.0.0.0",
@@ -652,21 +664,9 @@ if __name__ == "__main__":
         help="Set the logging level (default: INFO)"
     )
     parser.add_argument(
-        "--scheduler-type",
-        type=str,
-        default="base",
-        choices=["base", "online", "offline"],
-        help="Type of scheduler to use (default: base)"
-    )
-    parser.add_argument(
         "--enable-nvtx",
         action="store_true",
         help="Enable NVTX profiling for performance analysis (default: False)"
-    )
-    parser.add_argument(
-        "--async-scheduling",
-        action="store_true",
-        help="Enable async scheduling mode (default: False)"
     )
     args = parser.parse_args()
 
