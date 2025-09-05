@@ -108,7 +108,7 @@ class Scheduler:
         # Prepare LM inputs outside the worker and run either prefill or decode
         lm_inputs = self.model_worker.prepare_lm_inputs(lm_requests)
 
-        if lm_inputs["is_prefill"]:
+        if lm_inputs is not None and lm_inputs["is_prefill"]:
             task = self.model_worker.run_lm_prefill(lm_requests, lm_inputs)
         else:
             task = self.model_worker.run_lm_decode(lm_requests, lm_inputs)
@@ -118,12 +118,54 @@ class Scheduler:
             asyncio.run(task)
 
 
-    def _step_async(self):
+    async def _step_async(self, task, lm_requests, detokenize_requests):
         """
         Process the next batch of requests asynchronously.
-        For now, just calls _step method.
         """
-        return self._step()
+
+        # insert/remove requests to self.active_requests
+        self._prepare_requests()
+
+        # Prepare LM inputs outside the worker and run either prefill or decode
+        lm_inputs = self.model_worker.prepare_lm_inputs(lm_requests)
+
+        async def run_model():
+            # run detokenization if needed
+            self.model_worker.run_detokenize(detokenize_requests)
+
+            # return results to clients
+            self._send_responses(detokenize_requests)
+
+            if lm_inputs is not None and lm_inputs["is_prefill"]:
+                next_task = self.model_worker.run_lm_prefill(lm_requests, lm_inputs)
+            else:
+                next_task = self.model_worker.run_lm_decode(lm_requests, lm_inputs)
+
+            return next_task
+
+        async def run_scheduling():
+            if task is not None:
+                await task
+
+            # Select requests for detokenization
+            next_detokenize_requests = self._select_detokenize_requests()
+
+            # Select requests for LM processing
+            next_lm_requests = self._select_lm_requests()
+
+            return next_lm_requests, next_detokenize_requests
+
+        model_result, scheduling_result = await asyncio.gather(
+            run_model(),
+            run_scheduling()
+        )
+
+        # Unpack the results from the completed tasks
+        next_task = model_result
+        next_lm_requests, next_detokenize_requests = scheduling_result
+
+        return next_task, next_lm_requests, next_detokenize_requests
+
 
     def _select_lm_requests(self):
         """
@@ -178,9 +220,12 @@ class Scheduler:
         """
         Run the scheduler indefinitely.
         """
+        task, lm_requests, detokenize_requests = None, [], []
         while True:
             if self.async_scheduling:
-                self._step_async()
+                task, lm_requests, detokenize_requests = asyncio.run(
+                    self._step_async(task, lm_requests, detokenize_requests)
+                )
             else:
                 self._step()
             # Optionally, sleep or yield to avoid busy-waiting

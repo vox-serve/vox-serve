@@ -40,6 +40,7 @@ def run_scheduler_daemon(
     greedy: bool,
     enable_cuda_graph: bool,
     enable_nvtx: bool,
+    async_scheduling: bool,
     log_level: str,
 ) -> None:
     """Function to run scheduler in daemon subprocess"""
@@ -64,6 +65,7 @@ def run_scheduler_daemon(
         greedy=greedy,
         enable_cuda_graph=enable_cuda_graph,
         enable_nvtx=enable_nvtx,
+        async_scheduling=async_scheduling,
     )
     logger.info(f"Scheduler started successfully with model: {model_name}")
     scheduler.run_forever()
@@ -91,6 +93,7 @@ class APIServer:
         enable_nvtx: bool = False,
         max_num_pages: int = None,
         page_size: int = 2048,
+        async_scheduling: bool = False,
     ):
         self.model_name = model_name
         self.request_socket_path = request_socket_path
@@ -114,6 +117,7 @@ class APIServer:
         self.max_num_pages = max_num_pages
         self.page_size = page_size
         self.scheduler_type = scheduler_type
+        self.async_scheduling = async_scheduling
         self.scheduler_process = None
         self.logger = get_logger(__name__)
 
@@ -173,6 +177,7 @@ class APIServer:
                     'greedy': self.greedy,
                     'enable_cuda_graph': self.enable_cuda_graph,
                     'enable_nvtx': self.enable_nvtx,
+                    'async_scheduling': self.async_scheduling,
                     'log_level': get_global_log_level(),
                 },
                 daemon=True,
@@ -700,6 +705,7 @@ if __name__ == "__main__":
         greedy=args.greedy,
         enable_cuda_graph=enable_cuda_graph,
         enable_nvtx=args.enable_nvtx,
+        async_scheduling=args.async_scheduling,
     )
 
     # Register signal handlers for graceful shutdown
