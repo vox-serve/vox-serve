@@ -263,6 +263,8 @@ class ModelWorker:
         }
 
     def run_lm_prefill(self, requests: List[Request], lm_inputs: LMInputs) -> Coroutine:
+        if len(requests) == 0:
+            return
 
         qo_indptr = lm_inputs["qo_indptr"]
         paged_kv_indptr = lm_inputs["paged_kv_indptr"]
@@ -405,6 +407,9 @@ class ModelWorker:
         Run LM decode step for the given requests.
         Base implementation without CUDA graph optimization.
         """
+        if len(requests) == 0:
+            return
+
         paged_kv_indptr = lm_inputs["paged_kv_indptr"]
         paged_kv_indices = lm_inputs["paged_kv_indices"]
         paged_kv_last_page_len = lm_inputs["paged_kv_last_page_len"]

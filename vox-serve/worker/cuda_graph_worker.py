@@ -749,6 +749,9 @@ class CudaGraphWorker(ModelWorker):
         """
         Override parent's run_lm_prefill to add CUDA graph optimization for prefill phase.
         """
+        if len(requests) == 0:
+            return
+
         self.nvtx_range_push(f"lm_prefill_bs{len(requests)}")
 
         actual_batch_size = len(requests)
@@ -894,6 +897,9 @@ class CudaGraphWorker(ModelWorker):
         """
         Override parent's run_lm_decode to add CUDA graph optimization with padding.
         """
+        if len(requests) == 0:
+            return
+
         self.nvtx_range_push(f"lm_decode_bs{len(requests)}")
 
         qo_indptr = lm_inputs["qo_indptr"]
