@@ -876,11 +876,6 @@ class CudaGraphWorker(ModelWorker):
             )
             self.nvtx_range_pop() # sampling
 
-        # Update repetition cache in requests after sampling if model uses repetition penalty
-        if self.model.use_repetition_penalty:
-            for i, req in enumerate(requests):
-                req.repetition_cache = repetition_cache[i]
-
         self.nvtx_range_pop() # lm_prefill
 
         return task

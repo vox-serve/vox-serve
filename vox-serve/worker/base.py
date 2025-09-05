@@ -335,11 +335,6 @@ class ModelWorker:
                 repetition_cache=repetition_cache,
             )
 
-            # Update repetition cache in requests after sampling if model uses repetition penalty
-            if self.model.use_repetition_penalty:
-                for i, req in enumerate(requests):
-                    req.repetition_cache = repetition_cache[i]
-
             # assuming that the sequence length is 2 for the initial iteration of depth transformer.
             # may need to change here for other models.
             depth_position_ids = torch.tensor([0, 1] * output_ids.shape[0], device=self.device, dtype=torch.int32)
@@ -395,11 +390,6 @@ class ModelWorker:
                 requests=requests,
                 repetition_cache=repetition_cache,
             )
-
-            # Update repetition cache in requests after sampling if model uses repetition penalty
-            if self.model.use_repetition_penalty:
-                for i, req in enumerate(requests):
-                    req.repetition_cache = repetition_cache[i]
 
             return task
 
@@ -461,11 +451,6 @@ class ModelWorker:
                 repetition_cache=repetition_cache,
             )
 
-            # Update repetition cache in requests after sampling if model uses repetition penalty
-            if self.model.use_repetition_penalty:
-                for i, req in enumerate(requests):
-                    req.repetition_cache = repetition_cache[i]
-
             depth_position_ids = torch.tensor([0, 1] * output_ids.shape[0], device=self.device, dtype=torch.int32)
             depth_qo_indptr = torch.arange(output_ids.shape[0] + 1, device=self.device, dtype=torch.int32) * 2
             depth_kv_indptr = torch.arange(output_ids.shape[0] + 1, device=self.device, dtype=torch.int32)
@@ -506,11 +491,6 @@ class ModelWorker:
                 requests=requests,
                 repetition_cache=repetition_cache,
             )
-
-            # Update repetition cache in requests after sampling if model uses repetition penalty
-            if self.model.use_repetition_penalty:
-                for i, req in enumerate(requests):
-                    req.repetition_cache = repetition_cache[i]
 
             return task
 
