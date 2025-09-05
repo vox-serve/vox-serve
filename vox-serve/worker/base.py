@@ -186,6 +186,9 @@ class ModelWorker:
         # TODO: sampling params, cfg scale
         repetition_cache = []
 
+        # Determine if any request needs prefill
+        is_prefill = any(not req.done_lm_prefill for req in requests)
+
         for req in requests:
             if not req.done_lm_prefill:
                 # prefill request
@@ -256,6 +259,7 @@ class ModelWorker:
             "input_features": input_features,
             "input_masks": input_masks,
             "repetition_cache": repetition_cache,
+            "is_prefill": is_prefill,
         }
 
     def run_lm_prefill(self, requests: List[Request], lm_inputs: LMInputs) -> Coroutine:

@@ -1,6 +1,5 @@
 import asyncio
 import json
-import time
 from typing import List
 
 import torch
@@ -94,7 +93,56 @@ class Scheduler:
         # insert/remove requests to self.active_requests
         self._prepare_requests()
 
-        # Naive scheduling: take up to max_batch_size requests
+        # Select requests for detokenization
+        detokenize_requests = self._select_detokenize_requests()
+
+        # run detokenization if needed
+        self.model_worker.run_detokenize(detokenize_requests)
+
+        # return results to clients
+        self._send_responses(detokenize_requests)
+
+        # Select requests for LM processing
+        lm_requests = self._select_lm_requests()
+
+        # Prepare LM inputs outside the worker and run either prefill or decode
+        lm_inputs = self.model_worker.prepare_lm_inputs(lm_requests)
+
+        if lm_inputs["is_prefill"]:
+            task = self.model_worker.run_lm_prefill(lm_requests, lm_inputs)
+        else:
+            task = self.model_worker.run_lm_decode(lm_requests, lm_inputs)
+
+        # Execute the sampling task right away for synchronous scheduling
+        if task is not None:
+            asyncio.run(task)
+
+
+    def _step_async(self):
+        """
+        Process the next batch of requests asynchronously.
+        For now, just calls _step method.
+        """
+        return self._step()
+
+    def _select_lm_requests(self):
+        """
+        Select requests that need LM processing.
+        """
+        lm_requests = []
+
+        for req in self.active_requests:
+            if len(lm_requests) > self.max_batch_size:
+                break
+            if not req.done_lm_generation:
+                lm_requests.append(req)
+
+        return lm_requests
+
+    def _select_detokenize_requests(self):
+        """
+        Select requests that need detokenization.
+        """
         detokenize_requests = []
 
         for req in self.active_requests:
@@ -103,10 +151,12 @@ class Scheduler:
             if req.done_lm_generation or self.model_worker.do_detokenize(req):
                 detokenize_requests.append(req)
 
-        # run detokenization if needed
-        self.model_worker.run_detokenize(detokenize_requests)
+        return detokenize_requests
 
-        # return results to clients
+    def _send_responses(self, detokenize_requests):
+        """
+        Send responses back to clients for detokenized requests.
+        """
         for req in detokenize_requests:
             while not req.output_audio.empty():
                 # Send audio chunk message: request_id|AUDIO|audio_data
@@ -123,42 +173,6 @@ class Scheduler:
                 )
                 self.logger.debug(f"Sending completion for request {req.request_id}")
                 self.result_socket.send(completion_payload)
-
-        lm_requests = []
-
-        for req in self.active_requests:
-            if len(lm_requests) > self.max_batch_size:
-                break
-            if not req.done_lm_generation:
-                lm_requests.append(req)
-
-        is_prefill = False
-        for req in lm_requests:
-            is_prefill = is_prefill or (not req.done_lm_prefill)
-
-        if len(lm_requests) == 0:
-            time.sleep(0.1)
-            return
-
-        # Prepare LM inputs outside the worker and run either prefill or decode
-        lm_inputs = self.model_worker.prepare_lm_inputs(lm_requests)
-        if is_prefill:
-            task = self.model_worker.run_lm_prefill(lm_requests, lm_inputs)
-        else:
-            task = self.model_worker.run_lm_decode(lm_requests, lm_inputs)
-
-        # Execute the sampling task right away for synchronous scheduling
-        if task is not None:
-            asyncio.run(task)
-
-        return
-
-    def _step_async(self):
-        """
-        Process the next batch of requests asynchronously.
-        For now, just calls _step method.
-        """
-        return self._step()
 
     def run_forever(self):
         """

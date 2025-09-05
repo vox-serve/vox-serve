@@ -68,3 +68,4 @@ class LMInputs(TypedDict):
     input_features: Optional[List[torch.Tensor]]
     input_masks: Optional[List[torch.Tensor]]
     repetition_cache: Optional[List[torch.Tensor]]
+    is_prefill: bool
