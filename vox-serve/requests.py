@@ -62,10 +62,10 @@ class LMInputs(TypedDict):
     paged_kv_indptr: List[int]
     paged_kv_indices: List[int]
     paged_kv_last_page_len: List[int]
-    # Accept both flattened ids or per-request tensors; callers convert as needed.
-    input_ids: List
-    position_ids: List[int]
-    input_features: Optional[List[torch.Tensor]]
-    input_masks: Optional[List[torch.Tensor]]
-    repetition_cache: Optional[List[torch.Tensor]]
+    # Pre-allocated tensors for GPU computation
+    input_ids: torch.Tensor
+    position_ids: torch.Tensor
+    input_features: Optional[torch.Tensor]
+    input_masks: Optional[torch.Tensor]
+    repetition_cache: Optional[torch.Tensor]
     is_prefill: bool

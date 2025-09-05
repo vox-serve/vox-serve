@@ -1,4 +1,4 @@
-from typing import Coroutine, Dict, List
+from typing import Coroutine, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -705,7 +705,7 @@ class CudaGraphWorker(ModelWorker):
         # If actual batch size exceeds all captured sizes, use the largest one
         return max(self.cuda_graph_batch_sizes)
 
-    def _get_cuda_graph_seq_len(self, actual_seq_len: int) -> int:
+    def _get_cuda_graph_seq_len(self, actual_seq_len: int) -> Optional[int]:
         """
         Find the next valid CUDA graph sequence length bucket for padding.
         Returns the smallest bucket that can accommodate the actual sequence length.
@@ -716,7 +716,7 @@ class CudaGraphWorker(ModelWorker):
         # If sequence length exceeds all buckets, return None to fall back to regular forward
         return None
 
-    def _get_prefill_cuda_graph_key(self, batch_size: int, seq_len: int) -> tuple:
+    def _get_prefill_cuda_graph_key(self, batch_size: int, seq_len: int) -> Optional[Tuple[int, int]]:
         """
         Find the best matching (batch_size, seq_len) key for the prefill CUDA graph.
         Returns None if no suitable graph exists.
@@ -745,12 +745,12 @@ class CudaGraphWorker(ModelWorker):
         self.logger.debug(f"No suitable prefill CUDA graph for batch_size {batch_size}, seq_len {seq_len}")
         return None
 
-    def run_lm_prefill(self, requests: List[Request], lm_inputs: LMInputs) -> Coroutine:
+    def run_lm_prefill(self, requests: List[Request], lm_inputs: LMInputs) -> Optional[Coroutine]:
         """
         Override parent's run_lm_prefill to add CUDA graph optimization for prefill phase.
         """
         if len(requests) == 0:
-            return
+            return None
 
         self.nvtx_range_push(f"lm_prefill_bs{len(requests)}")
 
@@ -774,10 +774,8 @@ class CudaGraphWorker(ModelWorker):
         input_masks = lm_inputs["input_masks"]
         repetition_cache = lm_inputs["repetition_cache"]
 
-        input_ids_tensor = torch.cat(input_ids, dim=0)
-
         actual_batch_size = len(requests)
-        actual_seq_len = input_ids_tensor.shape[0]
+        actual_seq_len = input_ids.shape[0]
 
         # Get the best matching CUDA graph key
         graph_key = self._get_prefill_cuda_graph_key(actual_batch_size, actual_seq_len)
@@ -802,11 +800,7 @@ class CudaGraphWorker(ModelWorker):
             paged_kv_indices.append(temporaly_pages_to_allocate[i])
             paged_kv_last_page_len.append(1)
 
-        # Prepare repetition cache as stacked tensor if model uses repetition penalty
-        if self.model.use_repetition_penalty:
-            repetition_cache_tensor = torch.stack(repetition_cache, dim=0)
-        else:
-            repetition_cache_tensor = None
+        # Repetition cache is now pre-allocated in prepare_lm_inputs
 
         # Plan attention wrapper
         qo_indptr_tensor = torch.tensor(qo_indptr, dtype=torch.int32)
@@ -826,15 +820,13 @@ class CudaGraphWorker(ModelWorker):
         graph = self.cuda_graphs_lm_prefill[graph_key]
 
         # Copy inputs to CUDA graph buffers
-        self.cuda_graph_buffers["prefill_input_ids"][:actual_seq_len].copy_(input_ids_tensor)
-        self.cuda_graph_buffers["prefill_position_ids"][:actual_seq_len].copy_(
-            torch.tensor(position_ids, device=self.device, dtype=torch.int32)
-        )
+        self.cuda_graph_buffers["prefill_input_ids"][:actual_seq_len].copy_(input_ids)
+        self.cuda_graph_buffers["prefill_position_ids"][:actual_seq_len].copy_(position_ids)
 
         if self.model.needs_input_features:
-            self.cuda_graph_buffers["prefill_input_features"][:actual_seq_len].copy_(torch.cat(input_features, dim=0))
+            self.cuda_graph_buffers["prefill_input_features"][:actual_seq_len].copy_(input_features)
         if self.model.needs_input_masks:
-            self.cuda_graph_buffers["prefill_input_masks"][:actual_seq_len].copy_(torch.cat(input_masks, dim=0))
+            self.cuda_graph_buffers["prefill_input_masks"][:actual_seq_len].copy_(input_masks)
 
         # Replay the CUDA graph
         self.nvtx_range_push("cuda_graph_replay")
@@ -862,7 +854,7 @@ class CudaGraphWorker(ModelWorker):
                 logits=logits,
                 hidden_states=backbone_hidden_states,
                 requests=requests,
-                repetition_cache=repetition_cache_tensor,
+                repetition_cache=repetition_cache,
             )
             # TODO: define task for models with depth transformer
 
@@ -880,25 +872,25 @@ class CudaGraphWorker(ModelWorker):
             output_ids, task = self.model.sampling(
                 logits=logits,
                 requests=requests,
-                repetition_cache=repetition_cache_tensor,
+                repetition_cache=repetition_cache,
             )
             self.nvtx_range_pop() # sampling
 
         # Update repetition cache in requests after sampling if model uses repetition penalty
         if self.model.use_repetition_penalty:
             for i, req in enumerate(requests):
-                req.repetition_cache = repetition_cache_tensor[i]
+                req.repetition_cache = repetition_cache[i]
 
         self.nvtx_range_pop() # lm_prefill
 
         return task
 
-    def run_lm_decode(self, requests: List[Request], lm_inputs: LMInputs) -> Coroutine:
+    def run_lm_decode(self, requests: List[Request], lm_inputs: LMInputs) -> Optional[Coroutine]:
         """
         Override parent's run_lm_decode to add CUDA graph optimization with padding.
         """
         if len(requests) == 0:
-            return
+            return None
 
         self.nvtx_range_push(f"lm_decode_bs{len(requests)}")
 
@@ -912,23 +904,12 @@ class CudaGraphWorker(ModelWorker):
         input_masks = lm_inputs["input_masks"]
         repetition_cache = lm_inputs["repetition_cache"]
 
-        input_ids_tensor = torch.cat(input_ids, dim=0)
-
         actual_batch_size = len(requests)
         padded_batch_size = self._get_cuda_graph_batch_size(actual_batch_size)
 
         # Pad inputs to match CUDA graph batch size
         if actual_batch_size < padded_batch_size:
             padding_size = padded_batch_size - actual_batch_size
-
-            # # Pad input tensors by repeating the last element
-            # input_ids.extend([input_ids[-1]] * padding_size)
-            # position_ids.extend([position_ids[-1]] * padding_size)
-
-            # if self.model.needs_input_features:
-            #     input_features.extend([input_features[-1]] * padding_size)
-            # if self.model.needs_input_masks:
-            #     input_masks.extend([input_masks[-1]] * padding_size)
 
             # Pad paged KV cache indices
             last_page_idx = paged_kv_indices[-1] if paged_kv_indices else 0
@@ -941,11 +922,7 @@ class CudaGraphWorker(ModelWorker):
 
         self.logger.debug(f"Using CUDA graph with padded batch size {padded_batch_size} (actual: {actual_batch_size})")
 
-        # Prepare repetition cache as stacked tensor if model uses repetition penalty
-        if self.model.use_repetition_penalty:
-            repetition_cache_tensor = torch.stack(repetition_cache, dim=0)
-        else:
-            repetition_cache_tensor = None
+        # Repetition cache is now pre-allocated in prepare_lm_inputs
 
         # Plan attention wrapper before CUDA graph
         paged_kv_indptr_tensor = torch.tensor(paged_kv_indptr, dtype=torch.int32)
@@ -962,16 +939,14 @@ class CudaGraphWorker(ModelWorker):
 
         graph = self.cuda_graphs_lm_decode[padded_batch_size]
 
-        self.cuda_graph_buffers["input_ids"][:actual_batch_size].copy_(input_ids_tensor)
-        self.cuda_graph_buffers["position_ids"][:actual_batch_size].copy_(
-            torch.tensor(position_ids, device=self.device, dtype=torch.int32)
-        )
+        self.cuda_graph_buffers["input_ids"][:actual_batch_size].copy_(input_ids)
+        self.cuda_graph_buffers["position_ids"][:actual_batch_size].copy_(position_ids)
 
         # Copy input_masks and input_features as single tensors to CUDA graph buffers
         if self.model.needs_input_masks:
-            self.cuda_graph_buffers["input_masks"][:actual_batch_size].copy_(torch.cat(input_masks, dim=0))
+            self.cuda_graph_buffers["input_masks"][:actual_batch_size].copy_(input_masks)
         if self.model.needs_input_features:
-            self.cuda_graph_buffers["input_features"][:actual_batch_size].copy_(torch.cat(input_features, dim=0))
+            self.cuda_graph_buffers["input_features"][:actual_batch_size].copy_(input_features)
 
         # Replay the CUDA graph
         self.nvtx_range_push("cuda_graph_replay")
@@ -992,7 +967,7 @@ class CudaGraphWorker(ModelWorker):
                 logits=logits,
                 hidden_states=backbone_hidden_states,
                 requests=requests,
-                repetition_cache=repetition_cache_tensor,
+                repetition_cache=repetition_cache,
             )
             # TODO: define task for models with depth transformer
 
@@ -1009,7 +984,7 @@ class CudaGraphWorker(ModelWorker):
             output_ids, task = self.model.sampling(
                 logits=logits,
                 requests=requests,
-                repetition_cache=repetition_cache_tensor,
+                repetition_cache=repetition_cache,
             )
             self.nvtx_range_pop() # sampling
 
