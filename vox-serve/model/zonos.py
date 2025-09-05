@@ -896,6 +896,12 @@ class ZonosModel(BaseLM):
                 # Remove the EOS token from lm_output_audio_tokens
                 req.lm_output_audio_tokens.pop()
                 req.done_lm_generation = True
+                req.finish_reason = "stop_id_encountered"
+
+            for req in requests:
+                if req.next_position_id > self.max_tokens:
+                    req.done_lm_generation = True
+                    req.finish_reason = "max_tokens_reached"
 
             if repetition_cache is not None:
                 # Update repetition cache in requests
