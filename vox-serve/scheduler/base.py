@@ -170,14 +170,65 @@ class Scheduler:
     def _select_lm_requests(self):
         """
         Select requests that need LM processing.
+        For prefill requests, ensure batch size and sequence length don't exceed worker limitations.
+        Allocate prefill requests first, then decode requests in remaining slots.
         """
         lm_requests = []
 
+        # Get worker limitations
+        if isinstance(self.model_worker, CudaGraphWorker):
+            max_prefill_batch_size = self.model_worker.prefill_graph_batch_size
+            max_seq_len = max(self.model_worker.cuda_graph_seq_len_buckets)
+        else:
+            # Fallback for non-CUDA graph worker
+            max_prefill_batch_size = self.max_batch_size
+            max_seq_len = 1024  # Default assumption
+
+        # Separate prefill and decode requests
+        prefill_requests = []
+        decode_requests = []
+
         for req in self.active_requests:
-            if len(lm_requests) > self.max_batch_size:
+            if req.done_lm_generation:
+                continue
+
+            if not req.done_lm_prefill:
+                prefill_requests.append(req)
+            else:
+                decode_requests.append(req)
+
+        # First, allocate prefill requests with constraints
+        if prefill_requests:
+            current_batch_size = 0
+            current_seq_len = 0
+
+            for req in prefill_requests:
+                req_seq_len = req.input_length if req.input_length else 0
+
+                # Check if adding this request would exceed constraints
+                if (current_batch_size + 1 <= max_prefill_batch_size and
+                    current_seq_len + req_seq_len <= max_seq_len):
+
+                    lm_requests.append(req)
+                    current_batch_size += 1
+                    current_seq_len += req_seq_len
+
+                    if current_batch_size >= max_prefill_batch_size:
+                        break
+
+            remaining_slots = max_prefill_batch_size - len(lm_requests)
+
+        else:
+            remaining_slots = self.max_batch_size
+
+        for i in range(remaining_slots):
+            if len(lm_requests) >= self.max_batch_size:
                 break
-            if not req.done_lm_generation:
-                lm_requests.append(req)
+
+            if i >= len(decode_requests):
+                break
+
+            lm_requests.append(decode_requests[i])
 
         return lm_requests
 

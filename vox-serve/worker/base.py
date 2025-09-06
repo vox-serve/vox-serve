@@ -195,6 +195,9 @@ class ModelWorker:
                 # prefill request
                 preprocess_output = self.model.preprocess(prompt=req.prompt, audio_path=req.audio_path)
                 req.input_tokens = preprocess_output.input_tokens
+                # Set input length based on prepared input tokens
+                if req.input_tokens is not None:
+                    req.input_length = req.input_tokens.shape[0]
 
                 if preprocess_output.input_features is not None:
                     req.input_features = preprocess_output.input_features
@@ -600,4 +603,3 @@ class ModelWorker:
         Check if the request is ready for detokenization.
         """
         return len(request.lm_output_audio_tokens) - request.next_audio_decode_idx >= self.detokenize_interval
-

@@ -29,6 +29,8 @@ class Request:
 
     # input prompt tokens. shape: (seq_len, n_codebooks)
     input_tokens: torch.Tensor = None
+    # length of input prompt tokens
+    input_length: int = None
     # raw output tokens from LM to be given to the next step of LM inference. shape: (seq_len, n_codebooks)
     lm_output_tokens: List[torch.Tensor] = field(default_factory=list)
     # audio tokens to be given to the detokenizer, after filtering or reverting delay patterns.
