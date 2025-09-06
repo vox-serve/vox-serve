@@ -56,6 +56,7 @@ class CudaGraphWorker(ModelWorker):
 
         self.flashinfer_buffer = torch.empty(256 * 1024 * 1024, dtype=torch.uint8, device=self.device)
 
+        self.qo_indptr_buffer = torch.zeros(self.max_batch_size + 1).to(self.device).to(torch.int32)
         self.paged_kv_indptr_buffer = torch.zeros(self.max_batch_size + 1).to(self.device).to(torch.int32)
         self.paged_kv_indices_buffer = torch.zeros(self.max_num_pages).to(self.device).to(torch.int32)
         self.paged_kv_last_page_len_buffer = torch.zeros(self.max_batch_size).to(self.device).to(torch.int32)
@@ -84,7 +85,7 @@ class CudaGraphWorker(ModelWorker):
                 page_size=self.page_size,
                 batch_size=batch_size,
                 max_seq_len=seq_len,
-                qo_indptr_buffer=self.paged_kv_indptr_buffer[: batch_size + 1],
+                qo_indptr_buffer=self.qo_indptr_buffer[: batch_size + 1],
                 paged_kv_indptr_buffer=self.paged_kv_indptr_buffer[: batch_size + 1],
                 paged_kv_indices_buffer=self.paged_kv_indices_buffer,
                 paged_kv_last_page_len_buffer=self.paged_kv_last_page_len_buffer[:batch_size],
@@ -795,16 +796,16 @@ class CudaGraphWorker(ModelWorker):
 
         # Pad batch size if needed
         # We need to temporally allocate new pages for the padded requests, to be released soon after the graph replay
-        temporaly_pages_to_allocate = [
-            self.empty_pages.get_nowait() for _ in range(padded_batch_size - actual_batch_size)
-        ]
-        for i in range(padded_batch_size - actual_batch_size):
-            qo_indptr.append(qo_indptr[-1] + 1)
-            paged_kv_indptr.append(paged_kv_indptr[-1] + 1)
-            paged_kv_indices.append(temporaly_pages_to_allocate[i])
-            paged_kv_last_page_len.append(1)
+        tmp_page = None
+        if actual_batch_size < padded_batch_size:
+            tmp_page = self.empty_pages.get_nowait()
+            padding_size = padded_batch_size - actual_batch_size
 
-        # Repetition cache is now pre-allocated in prepare_lm_inputs
+            for _ in range(padding_size):
+                qo_indptr.append(qo_indptr[-1] + 1)
+                paged_kv_indptr.append(paged_kv_indptr[-1] + 1)
+                paged_kv_indices.append(tmp_page)
+                paged_kv_last_page_len.append(1)
 
         # Plan attention wrapper
         qo_indptr_tensor = torch.tensor(qo_indptr, dtype=torch.int32)
@@ -843,8 +844,8 @@ class CudaGraphWorker(ModelWorker):
         logits = logits[actual_qo_indptr[1:] - 1]
 
         # Release temporaly allocated pages
-        for temporaly_page in temporaly_pages_to_allocate:
-            self.empty_pages.put(temporaly_page)
+        if tmp_page is not None:
+            self.empty_pages.put(tmp_page)
 
         if self.has_depth_transformer:
             backbone_hidden_states = self.cuda_graph_buffers["prefill_backbone_hidden_states"][:padded_seq_len]
@@ -907,17 +908,15 @@ class CudaGraphWorker(ModelWorker):
         padded_batch_size = self._get_cuda_graph_batch_size(actual_batch_size)
 
         # Pad inputs to match CUDA graph batch size
+        tmp_page = None
         if actual_batch_size < padded_batch_size:
+            tmp_page = self.empty_pages.get_nowait()
             padding_size = padded_batch_size - actual_batch_size
 
-            # Pad paged KV cache indices
-            last_page_idx = paged_kv_indices[-1] if paged_kv_indices else 0
-            last_page_len = paged_kv_last_page_len[-1] if paged_kv_last_page_len else 1
-
             for _ in range(padding_size):
-                paged_kv_indices.append(last_page_idx)
-                paged_kv_last_page_len.append(last_page_len)
                 paged_kv_indptr.append(paged_kv_indptr[-1] + 1)
+                paged_kv_indices.append(tmp_page)
+                paged_kv_last_page_len.append(1)
 
         self.logger.debug(f"Using CUDA graph with padded batch size {padded_batch_size} (actual: {actual_batch_size})")
 
@@ -954,6 +953,9 @@ class CudaGraphWorker(ModelWorker):
 
         # Copy output from buffer - only take the actual batch size, not padded
         logits = self.cuda_graph_buffers["logits"][:actual_batch_size]
+
+        if tmp_page is not None:
+            self.empty_pages.put(tmp_page)
 
         if self.has_depth_transformer:
             backbone_hidden_states = self.cuda_graph_buffers["backbone_hidden_states"][:actual_batch_size]
