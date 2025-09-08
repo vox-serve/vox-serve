@@ -125,21 +125,19 @@ class BenchmarkClient:
         real_time_satisfied = 0
         total_chunks = 0
 
-        record = []
-
         # Start from the second chunk (i > 1, or index 1)
-        for i in range(1, len(metrics.chunk_arrival_times)):
-            if i < len(metrics.chunk_durations):
-                # Calculate arrival interval between (i-1)th and i-th chunks
-                arrival_interval = metrics.chunk_arrival_times[i] - metrics.chunk_arrival_times[i-1]
-                chunk_duration = metrics.chunk_durations[i]
+        for i in range(1, min(len(metrics.chunk_arrival_times), len(metrics.chunk_durations))):
+            # Calculate cumulative audio duration from 1st to i-th chunk
+            cumulative_audio_duration = sum(metrics.chunk_durations[:i])
+            
+            # Calculate latency from arrival of 1st chunk to i-th chunk
+            latency_to_chunk = metrics.chunk_arrival_times[i] - metrics.chunk_arrival_times[0]
 
-                # Check if arrival interval is shorter than chunk duration
-                if arrival_interval < chunk_duration:
-                    real_time_satisfied += 1
+            # Check if cumulative audio duration is longer than latency
+            if cumulative_audio_duration > latency_to_chunk:
+                real_time_satisfied += 1
 
-                total_chunks += 1
-                record.append(arrival_interval < chunk_duration)
+            total_chunks += 1
 
         if total_chunks == 0:
             return None
@@ -164,7 +162,7 @@ class BenchmarkClient:
 
             # Make streaming request
             async with session.post(
-                f"{self.base_url}/generate", data=form_data, timeout=aiohttp.ClientTimeout(total=30)
+                f"{self.base_url}/generate", data=form_data, timeout=aiohttp.ClientTimeout(total=None, sock_read=30)
             ) as response:
                 if response.status != 200:
                     metrics.error_message = f"HTTP {response.status}: {await response.text()}"
@@ -244,7 +242,7 @@ class BenchmarkClient:
 
         # Create HTTP session
         connector = aiohttp.TCPConnector(limit=100, limit_per_host=50)
-        timeout = aiohttp.ClientTimeout(total=30)
+        timeout = aiohttp.ClientTimeout(total=None, sock_read=30)
 
         async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
             tasks = []
