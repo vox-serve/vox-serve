@@ -12,12 +12,13 @@ Usage:
 import argparse
 import asyncio
 import io
+import os
 import random
 import statistics
 import time
 import wave
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 import aiohttp
 import numpy as np
@@ -35,9 +36,9 @@ class RequestMetrics:
     start_time: float
     ttfa: Optional[float] = None  # Time to first audio
     end_time: Optional[float] = None
-    total_latency: Optional[float] = None
     audio_duration: Optional[float] = None  # Duration of generated audio
     streaming_viability: Optional[float] = None  # Streaming viability percentage
+    streaming_viability_per_chunk: Optional[float] = None  # Per-chunk streaming viability percentage
     success: bool = False
     error_message: Optional[str] = None
 
@@ -56,6 +57,7 @@ class RequestMetrics:
 class BenchmarkResults:
     """Aggregated benchmark results."""
 
+    rate: float = 0.0  # Request rate for this benchmark
     total_requests: int = 0
     successful_requests: int = 0
     failed_requests: int = 0
@@ -71,27 +73,27 @@ class BenchmarkResults:
 
     # Streaming viability metrics (percentage)
     streaming_viability_mean: float = 0.0
-
-    # Total latency metrics (seconds)
-    latency_mean: float = 0.0
-    latency_p50: float = 0.0
-    latency_p90: float = 0.0
-    latency_p95: float = 0.0
-    latency_p99: float = 0.0
-    latency_min: float = 0.0
-    latency_max: float = 0.0
+    streaming_viability_per_chunk_mean: float = 0.0
+    streaming_viability_all_chunks_mean: float = 0.0
 
 
 class BenchmarkClient:
     """Client for benchmarking vox-serve TTS server."""
 
-    def __init__(self, host: str, port: int):
+    def __init__(self, host: str, port: int, save_audio: bool = False):
         self.base_url = f"http://{host}:{port}"
+        self.save_audio = save_audio
+        self.output_dir = "benchmark_output"
         self.metrics: List[RequestMetrics] = []
+        
+        if self.save_audio:
+            os.makedirs(self.output_dir, exist_ok=True)
 
         # Sample texts for generation
         self.sample_texts = [
-            "Hello world, this is a test message for benchmarking.",
+            "Hello world!",
+            # "Hello world, this is a test message for benchmarking the performance of the text-to-speech server. "
+            # "We want to measure the time it takes to receive the first audio and the overall latency.",
         ]
 
     def generate_random_text(self, min_words: int = 5, max_words: int = 20) -> str:
@@ -115,13 +117,15 @@ class BenchmarkClient:
             bytes_per_sample = 2  # 16-bit audio
             return audio_samples / (sample_rate * bytes_per_sample)
 
-    def calculate_streaming_viability(self, metrics: RequestMetrics) -> Optional[float]:
+    def calculate_streaming_viability(self, metrics: RequestMetrics) -> Optional[tuple[float, float]]:
         """Calculate streaming viability (percentage of chunks satisfying real-time requirement)."""
         if len(metrics.chunk_arrival_times) < 2 or len(metrics.chunk_durations) < 2:
             return None
 
         real_time_satisfied = 0
         total_chunks = 0
+
+        record = []
 
         # Start from the second chunk (i > 1, or index 1)
         for i in range(1, len(metrics.chunk_arrival_times)):
@@ -135,12 +139,16 @@ class BenchmarkClient:
                     real_time_satisfied += 1
 
                 total_chunks += 1
+                record.append(arrival_interval < chunk_duration)
 
         if total_chunks == 0:
             return None
 
-        # return (real_time_satisfied / total_chunks) * 100.0
-        return (real_time_satisfied == total_chunks) * 100.0 # All chunks satisfied real-time requirement
+        # Calculate both metrics
+        per_chunk_viability = (real_time_satisfied / total_chunks) * 100.0
+        all_chunks_viability = (real_time_satisfied == total_chunks) * 100.0 # All chunks satisfied real-time requirement
+        
+        return per_chunk_viability, all_chunks_viability
 
     async def make_request(self, session: aiohttp.ClientSession, request_id: str) -> RequestMetrics:
         """Make a single request and measure metrics."""
@@ -174,27 +182,40 @@ class BenchmarkClient:
                     current_time = time.time()
                     chunk_count += 1
 
-                    # Measure TTFA on the second chunk (first chunk is often just header)
-                    if chunk_count == 2:
-                        metrics.ttfa = current_time - metrics.start_time
-
-                    # Record chunk arrival time and calculate chunk duration
-                    metrics.chunk_arrival_times.append(current_time)
+                    # Calculate chunk duration first to detect header-only chunks (no audio)
                     chunk_duration = self.get_audio_duration(chunk)
-                    metrics.chunk_durations.append(chunk_duration)
+
+                    # Record timings only for audio-bearing chunks
+                    if chunk_duration > 0:
+                        # Set TTFA when the first audio chunk arrives
+                        if metrics.ttfa is None:
+                            metrics.ttfa = current_time - metrics.start_time
+
+                        metrics.chunk_arrival_times.append(current_time)
+                        metrics.chunk_durations.append(chunk_duration)
 
                     audio_chunks.append(chunk)
 
                 # Calculate final metrics
                 metrics.end_time = time.time()
-                metrics.total_latency = metrics.end_time - metrics.start_time
 
                 # Combine audio chunks and calculate duration
                 full_audio = b"".join(audio_chunks)
                 metrics.audio_duration = self.get_audio_duration(full_audio)
+                
+                # Save audio if enabled
+                if self.save_audio and full_audio:
+                    output_path = os.path.join(self.output_dir, f"{request_id}.wav")
+                    with open(output_path, "wb") as f:
+                        f.write(full_audio)
 
                 # Calculate streaming viability (real-time requirement satisfaction)
-                metrics.streaming_viability = self.calculate_streaming_viability(metrics)
+                viability_result = self.calculate_streaming_viability(metrics)
+                if viability_result:
+                    metrics.streaming_viability_per_chunk, metrics.streaming_viability = viability_result
+                else:
+                    metrics.streaming_viability_per_chunk = None
+                    metrics.streaming_viability = None
 
                 metrics.success = True
 
@@ -205,7 +226,6 @@ class BenchmarkClient:
         finally:
             if not metrics.end_time:
                 metrics.end_time = time.time()
-                metrics.total_latency = metrics.end_time - metrics.start_time
 
         return metrics
 
@@ -272,11 +292,11 @@ class BenchmarkClient:
                         f"Streaming_viability={streaming_viability_str}"
                     )
 
-        return self.calculate_results()
+        return self.calculate_results(rate)
 
-    def calculate_results(self) -> BenchmarkResults:
+    def calculate_results(self, rate: float) -> BenchmarkResults:
         """Calculate aggregated benchmark results."""
-        results = BenchmarkResults()
+        results = BenchmarkResults(rate=rate)
 
         if not self.metrics:
             return results
@@ -295,7 +315,14 @@ class BenchmarkClient:
             m.streaming_viability for m in successful_metrics
             if m.streaming_viability is not None
         ]
-        latency_values = [m.total_latency for m in successful_metrics if m.total_latency is not None]
+        streaming_viability_per_chunk_values = [
+            m.streaming_viability_per_chunk for m in successful_metrics
+            if m.streaming_viability_per_chunk is not None
+        ]
+        streaming_viability_all_chunks_values = [
+            m.streaming_viability for m in successful_metrics
+            if m.streaming_viability is not None
+        ]
 
         # Calculate TTFA statistics
         if ttfa_values:
@@ -311,17 +338,11 @@ class BenchmarkClient:
         # Calculate streaming viability statistics
         if streaming_viability_values:
             results.streaming_viability_mean = statistics.mean(streaming_viability_values)
+        if streaming_viability_per_chunk_values:
+            results.streaming_viability_per_chunk_mean = statistics.mean(streaming_viability_per_chunk_values)
+        if streaming_viability_all_chunks_values:
+            results.streaming_viability_all_chunks_mean = statistics.mean(streaming_viability_all_chunks_values)
 
-        # Calculate latency statistics
-        if latency_values:
-            latency_sorted = sorted(latency_values)
-            results.latency_mean = statistics.mean(latency_values)
-            results.latency_p50 = self._percentile(latency_sorted, 50)
-            results.latency_p90 = self._percentile(latency_sorted, 90)
-            results.latency_p95 = self._percentile(latency_sorted, 95)
-            results.latency_p99 = self._percentile(latency_sorted, 99)
-            results.latency_min = min(latency_values)
-            results.latency_max = max(latency_values)
 
         return results
 
@@ -341,56 +362,96 @@ class BenchmarkClient:
         weight = index - lower_index
         return sorted_values[lower_index] * (1 - weight) + sorted_values[upper_index] * weight
 
-    def print_results(self, results: BenchmarkResults):
-        """Print formatted benchmark results as markdown tables."""
-        print("\n# Benchmark Results\n")
 
-        # Request summary
-        success_rate = (results.successful_requests / results.total_requests * 100) if results.total_requests > 0 else 0
-        print("## Request Summary\n")
-        print("| Metric | Value |")
-        print("|--------|-------|")
-        print(f"| Total Requests | {results.total_requests} |")
-        print(f"| Successful | {results.successful_requests} |")
-        print(f"| Failed | {results.failed_requests} |")
-        print(f"| Success Rate | {success_rate:.1f}% |")
-        print()
-
-        if results.successful_requests == 0:
-            print("No successful requests to analyze.")
+  
+    def print_comparison_table(self, all_results: List[BenchmarkResults]):
+        """Print comparison table for multiple request rates."""
+        print("\n" + "="*80)
+        print("MULTIPLE RATE BENCHMARK COMPARISON")
+        print("="*80)
+        
+        if not all_results:
+            print("No results to display.")
             return
-
-        # TTFA metrics
-        print("## Time to First Audio (TTFA)\n")
-        print("| Statistic | Value (seconds) |")
-        print("|-----------|-----------------|")
-        print(f"| Mean | {results.ttfa_mean:.3f} |")
-        print(f"| P50 | {results.ttfa_p50:.3f} |")
-        print(f"| P90 | {results.ttfa_p90:.3f} |")
-        print(f"| P95 | {results.ttfa_p95:.3f} |")
-        print(f"| P99 | {results.ttfa_p99:.3f} |")
-        print(f"| Min | {results.ttfa_min:.3f} |")
-        print(f"| Max | {results.ttfa_max:.3f} |")
-        print()
-
-        # Streaming viability metrics
-        print("## Streaming Viability (Real-time Requirement)\n")
-        print("| Statistic | Value (%) |")
-        print("|-----------|-----------|")
-        print(f"| Mean | {results.streaming_viability_mean:.1f} |")
-        print()
-
-        # Total latency metrics
-        print("## Total Latency\n")
-        print("| Statistic | Value (seconds) |")
-        print("|-----------|-----------------|")
-        print(f"| Mean | {results.latency_mean:.3f} |")
-        print(f"| P50 | {results.latency_p50:.3f} |")
-        print(f"| P90 | {results.latency_p90:.3f} |")
-        print(f"| P95 | {results.latency_p95:.3f} |")
-        print(f"| P99 | {results.latency_p99:.3f} |")
-        print(f"| Min | {results.latency_min:.3f} |")
-        print(f"| Max | {results.latency_max:.3f} |")
+        
+        # Extract rates for column headers
+        rates = [result.rate for result in all_results]
+        
+        # Request Summary Table
+        print("\n## Request Summary\n")
+        print("| Metric | " + " | ".join([f"{rate:.1f} req/s" for rate in rates]) + " |")
+        print("|--------|" + "|".join(["-"*12 for _ in rates]) + "|")
+        
+        # Total requests row
+        total_row = "| Total | " + " | ".join([str(result.total_requests) for result in all_results]) + " |"
+        print(total_row)
+        
+        # Successful requests row
+        success_row = "| Successful | " + " | ".join([str(result.successful_requests) for result in all_results]) + " |"
+        print(success_row)
+        
+        # Failed requests row
+        failed_row = "| Failed | " + " | ".join([str(result.failed_requests) for result in all_results]) + " |"
+        print(failed_row)
+        
+        # Success rate row
+        success_rates = []
+        for result in all_results:
+            rate_pct = (result.successful_requests / result.total_requests * 100) if result.total_requests > 0 else 0
+            success_rates.append(f"{rate_pct:.1f}%")
+        success_rate_row = "| Success Rate | " + " | ".join(success_rates) + " |"
+        print(success_rate_row)
+        
+        # TTFA Metrics Table
+        print("\n## Time to First Audio (TTFA) - seconds\n")
+        print("| Statistic | " + " | ".join([f"{rate:.1f} req/s" for rate in rates]) + " |")
+        print("|-----------|" + "|".join(["-"*12 for _ in rates]) + "|")
+        
+        # Mean TTFA
+        mean_ttfa_row = "| Mean | " + " | ".join([f"{result.ttfa_mean:.3f}" for result in all_results]) + " |"
+        print(mean_ttfa_row)
+        
+        # P50 TTFA
+        p50_ttfa_row = "| P50 | " + " | ".join([f"{result.ttfa_p50:.3f}" for result in all_results]) + " |"
+        print(p50_ttfa_row)
+        
+        # P90 TTFA
+        p90_ttfa_row = "| P90 | " + " | ".join([f"{result.ttfa_p90:.3f}" for result in all_results]) + " |"
+        print(p90_ttfa_row)
+        
+        # P95 TTFA
+        p95_ttfa_row = "| P95 | " + " | ".join([f"{result.ttfa_p95:.3f}" for result in all_results]) + " |"
+        print(p95_ttfa_row)
+        
+        # P99 TTFA
+        p99_ttfa_row = "| P99 | " + " | ".join([f"{result.ttfa_p99:.3f}" for result in all_results]) + " |"
+        print(p99_ttfa_row)
+        
+        # Min TTFA
+        min_ttfa_row = "| Min | " + " | ".join([f"{result.ttfa_min:.3f}" for result in all_results]) + " |"
+        print(min_ttfa_row)
+        
+        # Max TTFA
+        max_ttfa_row = "| Max | " + " | ".join([f"{result.ttfa_max:.3f}" for result in all_results]) + " |"
+        print(max_ttfa_row)
+        
+        # Streaming Viability Table (Per-Chunk Metric)
+        print("\n## Streaming Viability (Per-Chunk Real-time Requirement) - percentage\n")
+        print("| Statistic | " + " | ".join([f"{rate:.1f} req/s" for rate in rates]) + " |")
+        print("|-----------|" + "|".join(["-"*12 for _ in rates]) + "|")
+        
+        # Mean streaming viability (per-chunk)
+        streaming_per_chunk_row = "| Mean | " + " | ".join([f"{result.streaming_viability_per_chunk_mean:.1f}" for result in all_results]) + " |"
+        print(streaming_per_chunk_row)
+        
+        # Streaming Viability Table (All-Chunks Metric)
+        print("\n## Streaming Viability (All-Chunks Real-time Requirement) - percentage\n")
+        print("| Statistic | " + " | ".join([f"{rate:.1f} req/s" for rate in rates]) + " |")
+        print("|-----------|" + "|".join(["-"*12 for _ in rates]) + "|")
+        
+        # Mean streaming viability (all-chunks)
+        streaming_all_chunks_row = "| Mean | " + " | ".join([f"{result.streaming_viability_all_chunks_mean:.1f}" for result in all_results]) + " |"
+        print(streaming_all_chunks_row)
         print()
 
 
@@ -398,37 +459,44 @@ async def main():
     parser = argparse.ArgumentParser(description="Benchmark vox-serve TTS server")
     parser.add_argument("--host", default="localhost", help="Server host (default: localhost)")
     parser.add_argument("--port", type=int, default=8000, help="Server port (default: 8000)")
-    parser.add_argument("--rate", type=float, default=1.0, help="Request rate (req/s, default: 1.0)")
+    parser.add_argument("--rate", type=float, nargs='+', default=[1.0], 
+                       help="Request rate(s) in req/s (single value or list, default: [1.0])")
     parser.add_argument("--duration", type=float, default=10.0, help="Test duration (seconds, default: 10.0)")
+    parser.add_argument("--save-audio", action="store_true", help="Save generated audio files to benchmark_output directory")
 
     args = parser.parse_args()
 
     # Validate arguments
-    if args.rate <= 0:
-        print("Error: Request rate must be positive")
-        return 1
+    for rate in args.rate:
+        if rate <= 0:
+            print(f"Error: Request rate must be positive, got {rate}")
+            return 1
 
     if args.duration <= 0:
         print("Error: Duration must be positive")
         return 1
 
     # Create and run benchmark
-    client = BenchmarkClient(args.host, args.port)
+    client = BenchmarkClient(args.host, args.port, args.save_audio)
 
-    try:
-        results = await client.run_benchmark(args.rate, args.duration)
-        client.print_results(results)
-        return 0
-    except KeyboardInterrupt:
-        print("\nBenchmark interrupted by user")
-        if client.metrics:
-            print("Calculating results for completed requests...")
-            results = client.calculate_results()
-            client.print_results(results)
-        return 1
-    except Exception as e:
-        print(f"Error running benchmark: {e}")
-        return 1
+    # Always use multiple benchmark approach
+    print(f"Running benchmarks at rates: {args.rate}")
+    all_results = []
+    
+    for rate in args.rate:
+        print(f"\n{'='*80}")
+        print(f"Running benchmark at {rate} req/s")
+        print(f"{'='*80}")
+        
+        # Clear previous metrics
+        client.metrics = []
+        
+        # Run benchmark for this rate
+        results = await client.run_benchmark(rate, args.duration)
+        all_results.append(results)
+    
+    client.print_comparison_table(all_results)
+    return 0
 
 
 if __name__ == "__main__":
