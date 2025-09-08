@@ -82,8 +82,7 @@ class Scheduler:
         self.result_socket = self.context.socket(zmq.PUSH)
         self.result_socket.bind(f"ipc://{result_socket_path}")
 
-        # self.available_batch_sizes = self.model_worker.available_batch_sizes
-        self.available_batch_sizes = [16, 32, 64, 128]
+        self.available_batch_sizes = self.model_worker.available_batch_sizes
 
     def _step(self):
         """

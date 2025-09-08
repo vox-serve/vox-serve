@@ -75,7 +75,7 @@ class CudaGraphWorker(ModelWorker):
         self.prefill_wrappers = {}
         for seq_len in self.cuda_graph_seq_len_buckets:
             # Use only the maximum batch size for prefill
-            batch_size = self.max_batch_size
+            batch_size = self.prefill_graph_batch_size
             key = (batch_size, seq_len)
             self.prefill_wrappers[key] = FlashInferPrefillWrapper(
                 attn_buffer=self.flashinfer_buffer,
@@ -802,9 +802,9 @@ class CudaGraphWorker(ModelWorker):
             padding_size = padded_batch_size - actual_batch_size
 
             for _ in range(padding_size):
-                qo_indptr.append(qo_indptr[-1] + 1)
+                qo_indptr.append(qo_indptr[-1])
                 paged_kv_indptr.append(paged_kv_indptr[-1] + 1)
-                paged_kv_indices.append(tmp_page)
+                # paged_kv_indices.append(tmp_page)
                 paged_kv_last_page_len.append(1)
 
         # Plan attention wrapper

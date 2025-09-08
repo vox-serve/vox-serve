@@ -1,9 +1,8 @@
-import asyncio
-import json
 import time
 from typing import List
 
 from ..requests import Request
+from ..worker import CudaGraphWorker
 from .base import Scheduler
 
 
@@ -16,115 +15,95 @@ class OnlineScheduler(Scheduler):
         self.bytes_per_sample = 2  # 16-bit = 2 bytes
         self.channels = 1  # mono
 
-    def _step(self):
-        """
-        Priority-aware scheduling step that considers request criticality (is_pressing).
-        Updates pressing status based on audio chunk playback timing.
-        """
-        # insert/remove requests to self.active_requests
-        self._prepare_requests()
+        self.detokenize_max_batch_size = 16
+        assert self.detokenize_max_batch_size <= self.max_batch_size, \
+            "Detokenize max batch size must be <= max batch size"
 
-        if len(self.active_requests) == 0:
-            return
+    def _prepare_requests(self):
+        super()._prepare_requests()
 
-        # Select requests for LM forward with priority-aware batching
-        lm_requests = self._select_lm_requests()
-
-        if lm_requests:
-            # Check if any request needs prefill
-            is_prefill = any(not req.done_lm_prefill for req in lm_requests)
-
-            # Prepare inputs and run LM inference (prefill or decode)
-            lm_inputs = self.model_worker.prepare_lm_inputs(lm_requests)
-            if is_prefill:
-                task = self.model_worker.run_lm_prefill(lm_requests, lm_inputs)
-            else:
-                task = self.model_worker.run_lm_decode(lm_requests, lm_inputs)
-
-            # Execute the sampling task if it exists (non-depth models return a task, depth models return None)
-            if task is not None:
-                asyncio.run(task)
-
-        # Select requests for detokenization with priority-aware batching
-        detokenize_requests = self._select_detokenize_requests()
-
-        # Run detokenization if needed
-        if detokenize_requests:
-            self.model_worker.run_detokenize(detokenize_requests)
-
-        # Return results to clients with timestamp tracking
-        for req in self.active_requests:
-            while not req.output_audio.empty():
-                audio_chunk = req.output_audio.get()
-
-                # Record timestamp and duration for streaming requests
-                if req.is_streaming:
-                    send_time = time.time()
-                    duration = self._calculate_chunk_duration(audio_chunk)
-                    req.chunk_send_timestamps.append(send_time)
-                    req.chunk_durations.append(duration)
-
-                # Send audio chunk message: request_id|AUDIO|audio_data
-                message = req.request_id.encode("utf-8") + b"|AUDIO|" + audio_chunk
-                self.result_socket.send(message)
-
-            # send completion notification for finished requests
-            if req.done_all:
-                self.model_worker.free_kv_cache(req)
-                completion_message = {"status": "completed", "reason": req.finish_reason or "unknown"}
-                # Send completion message: request_id|COMPLETION|json_data
-                completion_payload = (
-                    req.request_id.encode("utf-8") + b"|COMPLETION|" + json.dumps(completion_message).encode("utf-8")
-                )
-                self.logger.debug(f"Sending completion for request {req.request_id}")
-                self.result_socket.send(completion_payload)
-
-        return
-
-    def _step_async(self):
-        """
-        Process the next batch of requests asynchronously.
-        For now, just calls _step method.
-        """
-        return self._step()
+        # Update pressing status for all streaming requests
+        self._update_pressing_status()
 
     def _select_lm_requests(self) -> List[Request]:
         """
         Select requests for LM forward processing with priority-aware batching.
         First allocate critical requests, then piggyback non-critical ones to reach optimal batch size.
-
-        TODO: consider prefill vs. decode separately for better batching.
         """
-        # Update pressing status for all streaming requests
-        self._update_pressing_status()
 
-        lm_candidates = [req for req in self.active_requests if not req.done_lm_generation]
+        lm_requests = []
 
-        # Separate critical (pressing) and non-critical requests
-        critical_requests = [req for req in lm_candidates if req.is_pressing]
-        non_critical_requests = [req for req in lm_candidates if not req.is_pressing]
+        # Get worker limitations
+        if isinstance(self.model_worker, CudaGraphWorker):
+            max_prefill_batch_size = self.model_worker.prefill_graph_batch_size
+            max_seq_len = max(self.model_worker.cuda_graph_seq_len_buckets)
+        else:
+            # Fallback for non-CUDA graph worker
+            max_prefill_batch_size = self.max_batch_size
+            max_seq_len = 1024  # Default assumption
 
-        # First, take critical requests up to max_batch_size
-        selected_requests = critical_requests[: self.max_batch_size]
+        # Separate prefill and decode requests based on criticality
+        # (prefill requests are always critical)
+        prefill_requests = []
+        critical_decode_requests = []
+        non_critical_decode_requests = []
 
-        # If we don't have a full batch and the current size is not a CUDA graph size,
-        # try to piggyback non-critical requests to reach the next CUDA graph batch size
-        current_batch_size = len(selected_requests)
+        for req in self.active_requests:
+            if req.done_lm_generation:
+                continue
 
-        if current_batch_size < self.max_batch_size and current_batch_size not in self.available_batch_sizes:
-            # Find the next larger CUDA graph batch size
-            target_batch_size = None
-            for size in sorted(self.available_batch_sizes):
-                if size > current_batch_size:
-                    target_batch_size = min(size, self.max_batch_size)
-                    break
+            if not req.done_lm_prefill:
+                prefill_requests.append(req)
+            elif req.is_pressing:
+                critical_decode_requests.append(req)
+            else:
+                non_critical_decode_requests.append(req)
 
-            if target_batch_size:
-                # Piggyback non-critical requests to reach target batch size
-                available_slots = target_batch_size - current_batch_size
-                selected_requests.extend(non_critical_requests[:available_slots])
+        # First, allocate prefill requests with constraints
+        if prefill_requests:
+            current_batch_size = 0
+            current_seq_len = 0
 
-        return selected_requests
+            for req in prefill_requests:
+                req_seq_len = req.input_length if req.input_length else 0
+
+                # Check if adding this request would exceed constraints
+                if (current_batch_size + 1 <= max_prefill_batch_size and
+                    current_seq_len + req_seq_len <= max_seq_len):
+
+                    lm_requests.append(req)
+                    current_batch_size += 1
+                    current_seq_len += req_seq_len
+
+                    if current_batch_size >= max_prefill_batch_size:
+                        break
+
+            remaining_slots = max_prefill_batch_size - len(lm_requests)
+
+        else:
+            remaining_slots = self.max_batch_size
+
+        # Then, allocate decode requests that is critical
+        for i in range(remaining_slots):
+            if len(lm_requests) >= self.max_batch_size:
+                break
+
+            if i >= len(critical_decode_requests):
+                break
+
+            lm_requests.append(critical_decode_requests[i])
+
+        # Finally, piggyback non-critical decode requests, if any slots remain
+        for i in range(remaining_slots):
+            if len(lm_requests) >= self.max_batch_size:
+                break
+
+            if i >= len(non_critical_decode_requests):
+                break
+
+            lm_requests.append(non_critical_decode_requests[i])
+
+        return lm_requests
 
     def _select_detokenize_requests(self) -> List[Request]:
         """
@@ -150,22 +129,22 @@ class OnlineScheduler(Scheduler):
         # First, take critical requests up to max_batch_size
         selected_requests = critical_requests[: self.max_batch_size]
 
-        # If we don't have a full batch and the current size is not a CUDA graph size,
-        # try to piggyback non-critical requests to reach the next CUDA graph batch size
-        current_batch_size = len(selected_requests)
-
-        if current_batch_size < self.max_batch_size and current_batch_size not in self.available_batch_sizes:
-            # Find the next larger CUDA graph batch size
-            target_batch_size = None
-            for size in sorted(self.available_batch_sizes):
-                if size > current_batch_size:
-                    target_batch_size = min(size, self.max_batch_size)
+        # If we don't have a full batch, try to piggyback non-critical requests
+        if len(selected_requests) < self.detokenize_max_batch_size:
+            remaining_slots = self.detokenize_max_batch_size - len(selected_requests)
+            for i in range(remaining_slots):
+                if i >= len(non_critical_requests):
                     break
+                selected_requests.append(non_critical_requests[i])
 
-            if target_batch_size:
-                # Piggyback non-critical requests to reach target batch size
-                available_slots = target_batch_size - current_batch_size
-                selected_requests.extend(non_critical_requests[:available_slots])
+        else:
+            # find the next available batch size from available_batch_sizes
+            available_sizes = [size for size in self.available_batch_sizes if size >= len(selected_requests)]
+            remaining_slots = available_sizes[0] - len(selected_requests)
+            for i in range(remaining_slots):
+                if i >= len(non_critical_requests):
+                    break
+                selected_requests.append(non_critical_requests[i])
 
         return selected_requests
 
@@ -207,4 +186,4 @@ class OnlineScheduler(Scheduler):
             latest_chunk_start_time = first_chunk_send_time + total_playback_time - req.chunk_durations[-1]
 
             # If the latest chunk has already started playing, request is pressing
-            req.is_pressing = current_time >= latest_chunk_start_time - 2.0 # 1.0s buffer
+            req.is_pressing = current_time >= latest_chunk_start_time - 1.0 # 1.0s buffer
