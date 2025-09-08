@@ -409,6 +409,8 @@ class SNAC(nn.Module):
             attn_window_size=attn_window_size,
         )
 
+        self.decode = torch.compile(self.decode, mode="max-autotune-no-cudagraphs")
+
     def preprocess(self, audio_data):
         length = audio_data.shape[-1]
         lcm = math.lcm(self.vq_strides[0], self.attn_window_size or 1)
@@ -465,7 +467,6 @@ if __name__ == "__main__":
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = SNAC.from_pretrained("hubertsiuzdak/snac_24khz").eval().to(device).to(torch.bfloat16)
-    model.decode = torch.compile(model.decode, fullgraph=True, dynamic=False, mode="reduce-overhead")
     for bs in [1, 2, 4, 8, 16, 32, 64]:
         codes = [
             torch.zeros(bs, 4, device=device, dtype=torch.int32),  # Codebook 1
