@@ -645,6 +645,8 @@ class ZonosModel(BaseLM):
         """
         Maximum number of tokens the model generates in a single request.
         """
+        if self.default_sampling_config.max_tokens is not None:
+            return self.default_sampling_config.max_tokens
         return 2048
 
     @property

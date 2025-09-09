@@ -34,6 +34,7 @@ def run_scheduler_daemon(
     top_k: Optional[int],
     min_p: Optional[float],
     temperature: Optional[float],
+    max_tokens: Optional[int],
     repetition_penalty: Optional[float],
     repetition_window: Optional[int],
     cfg_scale: Optional[float],
@@ -59,6 +60,7 @@ def run_scheduler_daemon(
         top_k=top_k,
         min_p=min_p,
         temperature=temperature,
+        max_tokens=max_tokens,
         repetition_penalty=repetition_penalty,
         repetition_window=repetition_window,
         cfg_scale=cfg_scale,
@@ -85,6 +87,7 @@ class APIServer:
         top_k: int = None,
         min_p: float = None,
         temperature: float = None,
+        max_tokens: int = None,
         repetition_penalty: float = None,
         repetition_window: int = None,
         cfg_scale: float = None,
@@ -108,6 +111,7 @@ class APIServer:
         self.top_k = top_k
         self.min_p = min_p
         self.temperature = temperature
+        self.max_tokens = max_tokens
         self.repetition_penalty = repetition_penalty
         self.repetition_window = repetition_window
         self.cfg_scale = cfg_scale
@@ -171,6 +175,7 @@ class APIServer:
                     'top_k': self.top_k,
                     'min_p': self.min_p,
                     'temperature': self.temperature,
+                    'max_tokens': self.max_tokens,
                     'repetition_penalty': self.repetition_penalty,
                     'repetition_window': self.repetition_window,
                     'cfg_scale': self.cfg_scale,
@@ -628,6 +633,12 @@ if __name__ == "__main__":
         help="Temperature for sampling (default: None)"
     )
     parser.add_argument(
+        "--max-tokens",
+        type=int,
+        default=None,
+        help="Maximum number of tokens to generate (default: model-specific)"
+    )
+    parser.add_argument(
         "--repetition-penalty",
         type=float,
         default=None,
@@ -699,6 +710,7 @@ if __name__ == "__main__":
         top_k=args.top_k,
         min_p=args.min_p,
         temperature=args.temperature,
+        max_tokens=args.max_tokens,
         repetition_penalty=args.repetition_penalty,
         repetition_window=args.repetition_window,
         cfg_scale=args.cfg_scale,

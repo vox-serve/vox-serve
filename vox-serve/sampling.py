@@ -11,6 +11,7 @@ class SamplingConfig:
     top_k: Optional[int] = None
     min_p: Optional[float] = None
     temperature: float = 1.0
+    max_tokens: Optional[int] = None
     repetition_penalty: Optional[float] = None
     repetition_window: Optional[int] = None  # -1 for global window
     cfg_scale: Optional[float] = None
