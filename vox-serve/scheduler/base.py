@@ -316,6 +316,32 @@ class Scheduler:
                 self.logger.debug(f"Sending completion for request {req.request_id}")
                 await self.result_socket.send(completion_payload)
 
+    def _handle_request_payload(self, message_payload):
+        """
+        Handle request payload parsing and create Request object.
+        Returns a Request object if successful, None if malformed.
+        """
+        delimiter_pos = message_payload.find(b"|")
+        if delimiter_pos != -1:
+            # Parse JSON request data
+            json_data = message_payload[:delimiter_pos].decode("utf-8")
+            request_dict = json.loads(json_data)
+
+            # Create Request object from deserialized data
+            new_request = Request(
+                request_id=request_dict["request_id"],
+                prompt=request_dict["prompt"],
+                audio_path=request_dict.get("audio_path") if self.model_worker.supports_audio_input else None,
+                is_streaming=request_dict.get("is_streaming", False),
+                is_pressing=request_dict.get("is_streaming", False), # at first, streaming requests are pressing
+            )
+
+            self.logger.debug(f"{new_request=}")
+            return new_request
+        else:
+            self.logger.warning(f"Received malformed audio message: {message_payload[:50]}...")
+            return None
+
     def _prepare_requests(self):
         """
         Prepare requests for processing (sync version).
@@ -326,29 +352,9 @@ class Scheduler:
         while True:
             try:
                 message_payload = self.request_socket.recv(flags=zmq.NOBLOCK)
-                delimiter_pos = message_payload.find(b"|")
-                if delimiter_pos != -1:
-                    # Parse JSON request data
-                    json_data = message_payload[:delimiter_pos].decode("utf-8")
-                    request_dict = json.loads(json_data)
-
-                    # Create Request object from deserialized data
-                    new_request = Request(
-                        request_id=request_dict["request_id"],
-                        prompt=request_dict["prompt"],
-                        audio_path=request_dict.get("audio_path") if self.model_worker.supports_audio_input else None,
-                        is_streaming=request_dict.get("is_streaming", False),
-                        is_pressing=request_dict.get("is_streaming", False), # at first, streaming requests are pressing
-                    )
-
-                    self.logger.debug(f"{new_request=}")
-
-                    # Store voice information as attribute (not part of Request dataclass)
-                    # new_request.voice = request_dict.get('voice', 'tara')
-
+                new_request = self._handle_request_payload(message_payload)
+                if new_request:
                     self.active_requests.append(new_request)
-                else:
-                    self.logger.warning(f"Received malformed audio message: {message_payload[:50]}...")
             except zmq.Again:
                 break
             except Exception as e:
@@ -370,29 +376,9 @@ class Scheduler:
         while True:
             try:
                 message_payload = await self.request_socket.recv(flags=zmq.DONTWAIT)
-                delimiter_pos = message_payload.find(b"|")
-                if delimiter_pos != -1:
-                    # Parse JSON request data
-                    json_data = message_payload[:delimiter_pos].decode("utf-8")
-                    request_dict = json.loads(json_data)
-
-                    # Create Request object from deserialized data
-                    new_request = Request(
-                        request_id=request_dict["request_id"],
-                        prompt=request_dict["prompt"],
-                        audio_path=request_dict.get("audio_path") if self.model_worker.supports_audio_input else None,
-                        is_streaming=request_dict.get("is_streaming", False),
-                        is_pressing=request_dict.get("is_streaming", False), # at first, streaming requests are pressing
-                    )
-
-                    self.logger.debug(f"{new_request=}")
-
-                    # Store voice information as attribute (not part of Request dataclass)
-                    # new_request.voice = request_dict.get('voice', 'tara')
-
+                new_request = self._handle_request_payload(message_payload)
+                if new_request:
                     self.active_requests.append(new_request)
-                else:
-                    self.logger.warning(f"Received malformed audio message: {message_payload[:50]}...")
             except zmq.Again:
                 break
             except Exception as e:
