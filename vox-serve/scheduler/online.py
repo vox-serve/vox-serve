@@ -9,21 +9,10 @@ from .base import Scheduler
 class OnlineScheduler(Scheduler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # Audio parameters for duration calculation
-        # Assuming 24kHz mono 16-bit audio
-        self.sample_rate = 24000
-        self.bytes_per_sample = 2  # 16-bit = 2 bytes
-        self.channels = 1  # mono
 
         self.detokenize_max_batch_size = 16
         assert self.detokenize_max_batch_size <= self.max_batch_size, \
             "Detokenize max batch size must be <= max batch size"
-
-    def _prepare_requests(self):
-        super()._prepare_requests()
-
-        # Update pressing status for all streaming requests
-        self._update_pressing_status()
 
     def _select_lm_requests(self) -> List[Request]:
         """
@@ -78,27 +67,21 @@ class OnlineScheduler(Scheduler):
                     if current_batch_size >= max_prefill_batch_size:
                         break
 
-            remaining_slots = max_prefill_batch_size - len(lm_requests)
+            max_batch_size_this_cycle = max_prefill_batch_size - len(lm_requests)
 
         else:
-            remaining_slots = self.max_batch_size
+            max_batch_size_this_cycle = self.max_batch_size
 
         # Then, allocate decode requests that is critical
-        for i in range(remaining_slots):
-            if len(lm_requests) >= self.max_batch_size:
-                break
-
-            if i >= len(critical_decode_requests):
+        for i in range(len(critical_decode_requests)):
+            if len(lm_requests) >= max_batch_size_this_cycle:
                 break
 
             lm_requests.append(critical_decode_requests[i])
 
         # Finally, piggyback non-critical decode requests, if any slots remain
-        for i in range(remaining_slots):
-            if len(lm_requests) >= self.max_batch_size:
-                break
-
-            if i >= len(non_critical_decode_requests):
+        for i in range(len(non_critical_decode_requests)):
+            if len(lm_requests) >= max_batch_size_this_cycle:
                 break
 
             lm_requests.append(non_critical_decode_requests[i])
@@ -147,6 +130,18 @@ class OnlineScheduler(Scheduler):
                 selected_requests.append(non_critical_requests[i])
 
         return selected_requests
+
+    def _prepare_requests(self):
+        super()._prepare_requests()
+
+        # Update pressing status for all streaming requests
+        self._update_pressing_status()
+
+    async def _prepare_requests_async(self):
+        await super()._prepare_requests_async()
+
+        # Update pressing status for all streaming requests
+        self._update_pressing_status()
 
     def _calculate_chunk_duration(self, audio_chunk: bytes) -> float:
         """

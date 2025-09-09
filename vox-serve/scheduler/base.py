@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 from typing import List
 
 import torch
@@ -95,6 +96,12 @@ class Scheduler:
             self.result_socket.bind(f"ipc://{result_socket_path}")
 
         self.available_batch_sizes = self.model_worker.available_batch_sizes
+
+        # Audio parameters for duration calculation
+        # Assuming 24kHz mono 16-bit audio
+        self.sample_rate = 24000
+        self.bytes_per_sample = 2  # 16-bit = 2 bytes
+        self.channels = 1  # mono
 
     def _step(self):
         """
@@ -281,7 +288,16 @@ class Scheduler:
         for req in detokenize_requests:
             while not req.output_audio.empty():
                 # Send audio chunk message: request_id|AUDIO|audio_data
-                message = req.request_id.encode("utf-8") + b"|AUDIO|" + req.output_audio.get()
+                audio_chunk = req.output_audio.get()
+
+                # Record timestamp and duration for streaming requests
+                if req.is_streaming:
+                    send_time = time.time()
+                    duration = self._calculate_chunk_duration(audio_chunk)
+                    req.chunk_send_timestamps.append(send_time)
+                    req.chunk_durations.append(duration)
+
+                message = req.request_id.encode("utf-8") + b"|AUDIO|" + audio_chunk
                 self.result_socket.send(message)
 
             # send completion notification for finished requests
@@ -302,7 +318,16 @@ class Scheduler:
         for req in detokenize_requests:
             while not req.output_audio.empty():
                 # Send audio chunk message: request_id|AUDIO|audio_data
-                message = req.request_id.encode("utf-8") + b"|AUDIO|" + req.output_audio.get()
+                audio_chunk = req.output_audio.get()
+
+                # Record timestamp and duration for streaming requests
+                if req.is_streaming:
+                    send_time = time.time()
+                    duration = self._calculate_chunk_duration(audio_chunk)
+                    req.chunk_send_timestamps.append(send_time)
+                    req.chunk_durations.append(duration)
+
+                message = req.request_id.encode("utf-8") + b"|AUDIO|" + audio_chunk
                 await self.result_socket.send(message)
 
             # send completion notification for finished requests
@@ -315,6 +340,15 @@ class Scheduler:
                 )
                 self.logger.debug("Sending completion for request %s", req.request_id)
                 await self.result_socket.send(completion_payload)
+
+    def _calculate_chunk_duration(self, audio_chunk: bytes) -> float:
+        """
+        Calculate the duration of an audio chunk in seconds.
+        Assumes 24kHz mono 16-bit PCM audio.
+        """
+        num_samples = len(audio_chunk) // (self.channels * self.bytes_per_sample)
+        duration_seconds = num_samples / self.sample_rate
+        return duration_seconds
 
     def _handle_request_payload(self, message_payload):
         """
