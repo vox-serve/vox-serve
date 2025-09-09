@@ -4,6 +4,7 @@ from typing import List
 
 import torch
 import zmq
+import zmq.asyncio
 
 from ..requests import Request
 from ..utils import get_logger
@@ -79,11 +80,19 @@ class Scheduler:
 
         self.active_requests: List[Request] = []
 
-        self.context = zmq.Context()
-        self.request_socket = self.context.socket(zmq.PULL)
-        self.request_socket.bind(f"ipc://{request_socket_path}")
-        self.result_socket = self.context.socket(zmq.PUSH)
-        self.result_socket.bind(f"ipc://{result_socket_path}")
+        # Initialize ZMQ contexts based on scheduling mode
+        if self.async_scheduling:
+            self.context = zmq.asyncio.Context()
+            self.request_socket = self.context.socket(zmq.PULL)
+            self.request_socket.bind(f"ipc://{request_socket_path}")
+            self.result_socket = self.context.socket(zmq.PUSH)
+            self.result_socket.bind(f"ipc://{result_socket_path}")
+        else:
+            self.context = zmq.Context()
+            self.request_socket = self.context.socket(zmq.PULL)
+            self.request_socket.bind(f"ipc://{request_socket_path}")
+            self.result_socket = self.context.socket(zmq.PUSH)
+            self.result_socket.bind(f"ipc://{result_socket_path}")
 
         self.available_batch_sizes = self.model_worker.available_batch_sizes
 
@@ -126,7 +135,7 @@ class Scheduler:
         """
 
         # insert/remove requests to self.active_requests
-        self._prepare_requests()
+        await self._prepare_requests_async()
 
         # Prepare LM inputs outside the worker and run either prefill or decode
         lm_inputs = self.model_worker.prepare_lm_inputs(lm_requests)
@@ -136,13 +145,14 @@ class Scheduler:
             self.model_worker.run_detokenize(detokenize_requests)
 
             # return results to clients
-            self._send_responses(detokenize_requests)
+            await self._send_responses_async(detokenize_requests)
 
             if lm_inputs is not None and lm_inputs["is_prefill"]:
-                next_task = self.model_worker.run_lm_prefill(lm_requests, lm_inputs)
+                coro = self.model_worker.run_lm_prefill(lm_requests, lm_inputs)
             else:
-                next_task = self.model_worker.run_lm_decode(lm_requests, lm_inputs)
+                coro = self.model_worker.run_lm_decode(lm_requests, lm_inputs)
 
+            next_task = asyncio.create_task(coro) if coro else None
             return next_task
 
         async def run_scheduling():
@@ -168,6 +178,22 @@ class Scheduler:
 
         return next_task, next_lm_requests, next_detokenize_requests
 
+    async def _run_async_loop(self):
+        task, lm_requests, detokenize_requests = None, [], []
+        while True:
+            task, lm_requests, detokenize_requests = await self._step_async(task, lm_requests, detokenize_requests)
+            await asyncio.sleep(0)
+
+    def run_forever(self):
+        """
+        Run the scheduler indefinitely.
+        """
+        if self.async_scheduling:
+            asyncio.run(self._run_async_loop())
+        else:
+            while True:
+                self._step()
+                torch.cuda.synchronize()
 
     def _select_lm_requests(self):
         """
@@ -241,7 +267,7 @@ class Scheduler:
         detokenize_requests = []
 
         for req in self.active_requests:
-            if len(detokenize_requests) > self.max_batch_size:
+            if len(detokenize_requests) >= self.max_batch_size:
                 break
             if req.done_lm_generation or self.model_worker.do_detokenize(req):
                 detokenize_requests.append(req)
@@ -250,7 +276,7 @@ class Scheduler:
 
     def _send_responses(self, detokenize_requests):
         """
-        Send responses back to clients for detokenized requests.
+        Send responses back to clients for detokenized requests (sync version).
         """
         for req in detokenize_requests:
             while not req.output_audio.empty():
@@ -269,32 +295,81 @@ class Scheduler:
                 self.logger.debug(f"Sending completion for request {req.request_id}")
                 self.result_socket.send(completion_payload)
 
-    def run_forever(self):
+    async def _send_responses_async(self, detokenize_requests):
         """
-        Run the scheduler indefinitely.
+        Send responses back to clients for detokenized requests (async version).
         """
-        task, lm_requests, detokenize_requests = None, [], []
-        while True:
-            if self.async_scheduling:
-                task, lm_requests, detokenize_requests = asyncio.run(
-                    self._step_async(task, lm_requests, detokenize_requests)
+        for req in detokenize_requests:
+            while not req.output_audio.empty():
+                # Send audio chunk message: request_id|AUDIO|audio_data
+                message = req.request_id.encode("utf-8") + b"|AUDIO|" + req.output_audio.get()
+                await self.result_socket.send(message)
+
+            # send completion notification for finished requests
+            if req.done_all:
+                self.model_worker.free_kv_cache(req)
+                completion_message = {"status": "completed", "reason": req.finish_reason or "unknown"}
+                # Send completion message: request_id|COMPLETION|json_data
+                completion_payload = (
+                    req.request_id.encode("utf-8") + b"|COMPLETION|" + json.dumps(completion_message).encode("utf-8")
                 )
-            else:
-                self._step()
-            # Optionally, sleep or yield to avoid busy-waiting
-            torch.cuda.synchronize()
+                self.logger.debug(f"Sending completion for request {req.request_id}")
+                await self.result_socket.send(completion_payload)
 
     def _prepare_requests(self):
         """
-        Prepare requests for processing.
-        This method should be implemented to gather new requests from clients.
-        TODO: make it async with _step() function
+        Prepare requests for processing (sync version).
+        This method gathers new requests from clients.
         """
 
         # get new requests from ZMQ
         while True:
             try:
                 message_payload = self.request_socket.recv(flags=zmq.NOBLOCK)
+                delimiter_pos = message_payload.find(b"|")
+                if delimiter_pos != -1:
+                    # Parse JSON request data
+                    json_data = message_payload[:delimiter_pos].decode("utf-8")
+                    request_dict = json.loads(json_data)
+
+                    # Create Request object from deserialized data
+                    new_request = Request(
+                        request_id=request_dict["request_id"],
+                        prompt=request_dict["prompt"],
+                        audio_path=request_dict.get("audio_path") if self.model_worker.supports_audio_input else None,
+                        is_streaming=request_dict.get("is_streaming", False),
+                        is_pressing=request_dict.get("is_streaming", False), # at first, streaming requests are pressing
+                    )
+
+                    self.logger.debug(f"{new_request=}")
+
+                    # Store voice information as attribute (not part of Request dataclass)
+                    # new_request.voice = request_dict.get('voice', 'tara')
+
+                    self.active_requests.append(new_request)
+                else:
+                    self.logger.warning(f"Received malformed audio message: {message_payload[:50]}...")
+            except zmq.Again:
+                break
+            except Exception as e:
+                self.logger.error(f"Error receiving requests: {str(e)}")
+                import traceback
+
+                self.logger.error(f"Traceback: {traceback.format_exc()}")
+
+        # Filter out completed requests
+        self.active_requests = [req for req in self.active_requests if not req.done_all]
+
+    async def _prepare_requests_async(self):
+        """
+        Prepare requests for processing (async version).
+        This method gathers new requests from clients.
+        """
+
+        # get new requests from ZMQ
+        while True:
+            try:
+                message_payload = await self.request_socket.recv(flags=zmq.DONTWAIT)
                 delimiter_pos = message_payload.find(b"|")
                 if delimiter_pos != -1:
                     # Parse JSON request data
