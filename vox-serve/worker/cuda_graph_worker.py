@@ -247,8 +247,9 @@ class CudaGraphWorker(ModelWorker):
             gpu_memory_allocated = torch.cuda.memory_allocated(self.device) / (1024 ** 2)
             gpu_memory_reserved = torch.cuda.memory_reserved(self.device) / (1024 ** 2)
             self.logger.debug(
-                f"GPU memory usage before capturing CUDA graph: "
-                f"allocated={gpu_memory_allocated:.2f} MB, reserved={gpu_memory_reserved:.2f} MB"
+                "GPU memory usage before capturing CUDA graph: "
+                "allocated=%.2f MB, reserved=%.2f MB",
+                gpu_memory_allocated, gpu_memory_reserved
             )
 
             seq_len_per_batch = seq_len // batch_size
@@ -330,8 +331,9 @@ class CudaGraphWorker(ModelWorker):
                 torch.cuda.synchronize()
                 times.append(start.elapsed_time(end))
             self.logger.debug(
-                f"Prefill CUDA graph (batch={batch_size}, seq_len={seq_len}) avg replay:"
-                f" {sum(times)/len(times):.3f}ms"
+                "Prefill CUDA graph (batch=%d, seq_len=%d) avg replay:"
+                " %.3fms",
+                batch_size, seq_len, sum(times)/len(times)
             )
 
         self.logger.info(
@@ -388,8 +390,9 @@ class CudaGraphWorker(ModelWorker):
             gpu_memory_allocated = torch.cuda.memory_allocated(self.device) / (1024 ** 2)
             gpu_memory_reserved = torch.cuda.memory_reserved(self.device) / (1024 ** 2)
             self.logger.debug(
-                f"GPU memory usage before capturing CUDA graph: "
-                f"allocated={gpu_memory_allocated:.2f} MB, reserved={gpu_memory_reserved:.2f} MB"
+                "GPU memory usage before capturing CUDA graph: "
+                "allocated=%.2f MB, reserved=%.2f MB",
+                gpu_memory_allocated, gpu_memory_reserved
             )
 
             # Create buffers for flashinfer inputs
@@ -465,8 +468,9 @@ class CudaGraphWorker(ModelWorker):
                 torch.cuda.synchronize()
                 times.append(start.elapsed_time(end))
             self.logger.debug(
-                f"Decode CUDA graph (batch={batch_size}) avg replay:"
-                f" {sum(times)/len(times):.3f}ms"
+                "Decode CUDA graph (batch=%d) avg replay:"
+                " %.3fms",
+                batch_size, sum(times)/len(times)
             )
 
         self.logger.info("CUDA graphs for decode phase initialized.")
@@ -507,8 +511,9 @@ class CudaGraphWorker(ModelWorker):
             gpu_memory_allocated = torch.cuda.memory_allocated(self.device) / (1024 ** 2)
             gpu_memory_reserved = torch.cuda.memory_reserved(self.device) / (1024 ** 2)
             self.logger.debug(
-                f"GPU memory usage before capturing CUDA graph: "
-                f"allocated={gpu_memory_allocated:.2f} MB, reserved={gpu_memory_reserved:.2f} MB"
+                "GPU memory usage before capturing CUDA graph: "
+                "allocated=%.2f MB, reserved=%.2f MB",
+                gpu_memory_allocated, gpu_memory_reserved
             )
 
             # Warmup runs for detokenization
@@ -539,7 +544,8 @@ class CudaGraphWorker(ModelWorker):
                 torch.cuda.synchronize()
                 times.append(start.elapsed_time(end))
             self.logger.debug(
-                f"Detokenization CUDA graph (batch={batch_size}) avg replay: {sum(times)/len(times):.3f}ms"
+                "Detokenization CUDA graph (batch=%d) avg replay: %.3fms",
+                batch_size, sum(times)/len(times)
             )
 
         self.logger.info("CUDA graphs for detokenization phase initialized.")
@@ -576,8 +582,9 @@ class CudaGraphWorker(ModelWorker):
             gpu_memory_allocated = torch.cuda.memory_allocated(self.device) / (1024 ** 2)
             gpu_memory_reserved = torch.cuda.memory_reserved(self.device) / (1024 ** 2)
             self.logger.debug(
-                f"GPU memory usage before capturing CUDA graph: "
-                f"allocated={gpu_memory_allocated:.2f} MB, reserved={gpu_memory_reserved:.2f} MB"
+                "GPU memory usage before capturing CUDA graph: "
+                "allocated=%.2f MB, reserved=%.2f MB",
+                gpu_memory_allocated, gpu_memory_reserved
             )
 
             # Create buffers for flashinfer inputs for depth transformer
@@ -636,8 +643,9 @@ class CudaGraphWorker(ModelWorker):
                 torch.cuda.synchronize()
                 times.append(start.elapsed_time(end))
             self.logger.debug(
-                f"Depth prefill CUDA graph (batch={batch_size}) avg replay:"
-                f" {sum(times)/len(times):.3f}ms"
+                "Depth prefill CUDA graph (batch=%d) avg replay:"
+                " %.3fms",
+                batch_size, sum(times)/len(times)
             )
 
             # Decode graph capturing
@@ -689,8 +697,9 @@ class CudaGraphWorker(ModelWorker):
                 torch.cuda.synchronize()
                 times.append(start.elapsed_time(end))
             self.logger.debug(
-                f"Depth decode CUDA graph (batch={batch_size}) avg replay:"
-                f" {sum(times)/len(times):.3f}ms"
+                "Depth decode CUDA graph (batch=%d) avg replay:"
+                " %.3fms",
+                batch_size, sum(times)/len(times)
             )
 
         self.logger.info("CUDA graphs for depth transformer decode phase initialized.")
@@ -728,11 +737,11 @@ class CudaGraphWorker(ModelWorker):
         padded_seq_len = self._get_cuda_graph_seq_len(seq_len + (padded_batch_size - batch_size))
 
         if padded_batch_size < batch_size:
-            self.logger.debug(f"No suitable CUDA graph batch size for actual batch_size {batch_size}")
+            self.logger.debug("No suitable CUDA graph batch size for actual batch_size %d", batch_size)
             return None
 
         if padded_seq_len is None:
-            self.logger.debug(f"No suitable CUDA graph seq_len bucket for actual seq_len {seq_len}")
+            self.logger.debug("No suitable CUDA graph seq_len bucket for actual seq_len %d", seq_len)
             return None
 
         # Check if we have a graph for this combination
@@ -747,7 +756,7 @@ class CudaGraphWorker(ModelWorker):
                 if test_key in self.cuda_graphs_lm_prefill:
                     return test_key
 
-        self.logger.debug(f"No suitable prefill CUDA graph for batch_size {batch_size}, seq_len {seq_len}")
+        self.logger.debug("No suitable prefill CUDA graph for batch_size %d, seq_len %d", batch_size, seq_len)
         return None
 
     def run_lm_prefill(self, requests: List[Request], lm_inputs: LMInputs) -> Optional[Coroutine]:
@@ -789,9 +798,10 @@ class CudaGraphWorker(ModelWorker):
 
         padded_batch_size, padded_seq_len = graph_key
         self.logger.debug(
-            f"Using prefill CUDA graph: batch_size={padded_batch_size} "
-            f"(actual: {actual_batch_size}), seq_len={padded_seq_len} "
-            f"(actual: {actual_seq_len})"
+            "Using prefill CUDA graph: batch_size=%d "
+            "(actual: %d), seq_len=%d "
+            "(actual: %d)",
+            padded_batch_size, actual_batch_size, padded_seq_len, actual_seq_len
         )
 
         # Pad batch size if needed
@@ -918,7 +928,7 @@ class CudaGraphWorker(ModelWorker):
                 paged_kv_indices.append(tmp_page)
                 paged_kv_last_page_len.append(1)
 
-        self.logger.debug(f"Using CUDA graph with padded batch size {padded_batch_size} (actual: {actual_batch_size})")
+        self.logger.debug("Using CUDA graph with padded batch size %d (actual: %d)", padded_batch_size, actual_batch_size)
 
         # Repetition cache is now pre-allocated in prepare_lm_inputs
 
@@ -1108,7 +1118,8 @@ class CudaGraphWorker(ModelWorker):
         padded_batch_size = self._get_cuda_graph_batch_size(actual_batch_size)
 
         self.logger.debug(
-            f"Using detokenization CUDA graph with padded batch size {padded_batch_size} (actual: {actual_batch_size})"
+            "Using detokenization CUDA graph with padded batch size %d (actual: %d)",
+            padded_batch_size, actual_batch_size
         )
 
         # Prepare token_ids the same way as parent method
@@ -1166,7 +1177,8 @@ class CudaGraphWorker(ModelWorker):
             ):
                 req.done_all = True
                 self.logger.debug(
-                    f"{len(req.lm_output_audio_tokens)} tokens have been decoded for request {req.request_id}"
+                    "%d tokens have been decoded for request %s",
+                    len(req.lm_output_audio_tokens), req.request_id
                 )
 
         self.nvtx_range_pop() # detokenize

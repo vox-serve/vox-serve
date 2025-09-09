@@ -31,7 +31,7 @@ class LocalMHA(nn.Module):
         self.to_out = nn.Linear(dim, dim, bias=False)
 
     def forward(self, x):
-        logger.debug(f"LocalMHA input shape: {x.shape}")
+        logger.debug("LocalMHA input shape: %s", x.shape)
         B, C, T = x.shape
         residual = x
         x = self.norm(x.transpose(1, 2))

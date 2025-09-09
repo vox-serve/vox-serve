@@ -292,7 +292,7 @@ class Scheduler:
                 completion_payload = (
                     req.request_id.encode("utf-8") + b"|COMPLETION|" + json.dumps(completion_message).encode("utf-8")
                 )
-                self.logger.debug(f"Sending completion for request {req.request_id}")
+                self.logger.debug("Sending completion for request %s", req.request_id)
                 self.result_socket.send(completion_payload)
 
     async def _send_responses_async(self, detokenize_requests):
@@ -313,7 +313,7 @@ class Scheduler:
                 completion_payload = (
                     req.request_id.encode("utf-8") + b"|COMPLETION|" + json.dumps(completion_message).encode("utf-8")
                 )
-                self.logger.debug(f"Sending completion for request {req.request_id}")
+                self.logger.debug("Sending completion for request %s", req.request_id)
                 await self.result_socket.send(completion_payload)
 
     def _handle_request_payload(self, message_payload):
@@ -336,7 +336,7 @@ class Scheduler:
                 is_pressing=request_dict.get("is_streaming", False), # at first, streaming requests are pressing
             )
 
-            self.logger.debug(f"{new_request=}")
+            self.logger.debug("new_request=%s", new_request)
             return new_request
         else:
             self.logger.warning(f"Received malformed audio message: {message_payload[:50]}...")

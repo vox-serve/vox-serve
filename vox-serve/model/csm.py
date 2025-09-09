@@ -274,7 +274,7 @@ class CsmForConditionalGeneration(CsmPreTrainedModel):
     def __init__(self, config: CsmConfig):
         super().__init__(config)
         logger = get_logger(__name__)
-        logger.debug(f"CSM Config: {config}")
+        logger.debug("CSM Config: %s", config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.embed_text_tokens = nn.Embedding(config.text_vocab_size, config.hidden_size)
