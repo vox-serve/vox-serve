@@ -18,7 +18,7 @@ import statistics
 import time
 import wave
 from dataclasses import dataclass
-from typing import List, Optional, Dict
+from typing import List, Optional
 
 import aiohttp
 import numpy as np
@@ -85,7 +85,7 @@ class BenchmarkClient:
         self.save_audio = save_audio
         self.output_dir = "benchmark_output"
         self.metrics: List[RequestMetrics] = []
-        
+
         if self.save_audio:
             os.makedirs(self.output_dir, exist_ok=True)
 
@@ -116,7 +116,7 @@ class BenchmarkClient:
             sample_rate = 24000
             bytes_per_sample = 2  # 16-bit audio
             return audio_samples / (sample_rate * bytes_per_sample)
-    
+
     def pcm_duration_bytes(self, nbytes: int) -> float:
         # raw PCM duration in seconds
         sample_rate = 24000
@@ -136,7 +136,7 @@ class BenchmarkClient:
         for i in range(1, min(len(metrics.chunk_arrival_times), len(metrics.chunk_durations))):
             # Calculate cumulative audio duration from 1st to i-th chunk
             cumulative_audio_duration = sum(metrics.chunk_durations[:i])
-            
+
             # Calculate latency from arrival of 1st chunk to i-th chunk
             latency_to_chunk = metrics.chunk_arrival_times[i] - metrics.chunk_arrival_times[0]
 
@@ -151,8 +151,8 @@ class BenchmarkClient:
 
         # Calculate both metrics
         per_chunk_viability = (real_time_satisfied / total_chunks) * 100.0
-        all_chunks_viability = (real_time_satisfied == total_chunks) * 100.0 # All chunks satisfied real-time requirement
-        
+        all_chunks_viability = (real_time_satisfied == total_chunks) * 100.0
+
         return per_chunk_viability, all_chunks_viability
 
     async def make_request(self, session: aiohttp.ClientSession, request_id: str) -> RequestMetrics:
@@ -167,7 +167,7 @@ class BenchmarkClient:
             form_data.add_field("text", text)
             form_data.add_field("streaming", "true")
 
-            print(f"new request {request_id=}")
+            # print(f"new request {request_id=}")
             # Make streaming request
             async with session.post(
                 f"{self.base_url}/generate", data=form_data, timeout=aiohttp.ClientTimeout(total=None, sock_read=30)
@@ -213,7 +213,7 @@ class BenchmarkClient:
                 # Combine audio chunks and calculate duration
                 full_audio = b"".join(audio_chunks)
                 metrics.audio_duration = self.get_audio_duration(full_audio)
-                
+
                 # Save audio if enabled
                 if self.save_audio and full_audio:
                     output_path = os.path.join(self.output_dir, f"{request_id}.wav")
@@ -374,37 +374,37 @@ class BenchmarkClient:
         return sorted_values[lower_index] * (1 - weight) + sorted_values[upper_index] * weight
 
 
-  
+
     def print_comparison_table(self, all_results: List[BenchmarkResults]):
         """Print comparison table for multiple request rates."""
         print("\n" + "="*80)
         print("MULTIPLE RATE BENCHMARK COMPARISON")
         print("="*80)
-        
+
         if not all_results:
             print("No results to display.")
             return
-        
+
         # Extract rates for column headers
         rates = [result.rate for result in all_results]
-        
+
         # Request Summary Table
         print("\n## Request Summary\n")
         print("| Metric | " + " | ".join([f"{rate:.1f} req/s" for rate in rates]) + " |")
         print("|--------|" + "|".join(["-"*12 for _ in rates]) + "|")
-        
+
         # Total requests row
         total_row = "| Total | " + " | ".join([str(result.total_requests) for result in all_results]) + " |"
         print(total_row)
-        
+
         # Successful requests row
         success_row = "| Successful | " + " | ".join([str(result.successful_requests) for result in all_results]) + " |"
         print(success_row)
-        
+
         # Failed requests row
         failed_row = "| Failed | " + " | ".join([str(result.failed_requests) for result in all_results]) + " |"
         print(failed_row)
-        
+
         # Success rate row
         success_rates = []
         for result in all_results:
@@ -412,56 +412,60 @@ class BenchmarkClient:
             success_rates.append(f"{rate_pct:.1f}%")
         success_rate_row = "| Success Rate | " + " | ".join(success_rates) + " |"
         print(success_rate_row)
-        
+
         # TTFA Metrics Table
         print("\n## Time to First Audio (TTFA) - seconds\n")
         print("| Statistic | " + " | ".join([f"{rate:.1f} req/s" for rate in rates]) + " |")
         print("|-----------|" + "|".join(["-"*12 for _ in rates]) + "|")
-        
+
         # Mean TTFA
         mean_ttfa_row = "| Mean | " + " | ".join([f"{result.ttfa_mean:.3f}" for result in all_results]) + " |"
         print(mean_ttfa_row)
-        
+
         # P50 TTFA
         p50_ttfa_row = "| P50 | " + " | ".join([f"{result.ttfa_p50:.3f}" for result in all_results]) + " |"
         print(p50_ttfa_row)
-        
+
         # P90 TTFA
         p90_ttfa_row = "| P90 | " + " | ".join([f"{result.ttfa_p90:.3f}" for result in all_results]) + " |"
         print(p90_ttfa_row)
-        
+
         # P95 TTFA
         p95_ttfa_row = "| P95 | " + " | ".join([f"{result.ttfa_p95:.3f}" for result in all_results]) + " |"
         print(p95_ttfa_row)
-        
+
         # P99 TTFA
         p99_ttfa_row = "| P99 | " + " | ".join([f"{result.ttfa_p99:.3f}" for result in all_results]) + " |"
         print(p99_ttfa_row)
-        
+
         # Min TTFA
         min_ttfa_row = "| Min | " + " | ".join([f"{result.ttfa_min:.3f}" for result in all_results]) + " |"
         print(min_ttfa_row)
-        
+
         # Max TTFA
         max_ttfa_row = "| Max | " + " | ".join([f"{result.ttfa_max:.3f}" for result in all_results]) + " |"
         print(max_ttfa_row)
-        
+
         # Streaming Viability Table (Per-Chunk Metric)
         print("\n## Streaming Viability (Per-Chunk Real-time Requirement) - percentage\n")
         print("| Statistic | " + " | ".join([f"{rate:.1f} req/s" for rate in rates]) + " |")
         print("|-----------|" + "|".join(["-"*12 for _ in rates]) + "|")
-        
+
         # Mean streaming viability (per-chunk)
-        streaming_per_chunk_row = "| Mean | " + " | ".join([f"{result.streaming_viability_per_chunk_mean:.1f}" for result in all_results]) + " |"
+        streaming_per_chunk_row = "| Mean | " + " | ".join([
+            f"{result.streaming_viability_per_chunk_mean:.1f}" for result in all_results]
+        ) + " |"
         print(streaming_per_chunk_row)
-        
+
         # Streaming Viability Table (All-Chunks Metric)
         print("\n## Streaming Viability (All-Chunks Real-time Requirement) - percentage\n")
         print("| Statistic | " + " | ".join([f"{rate:.1f} req/s" for rate in rates]) + " |")
         print("|-----------|" + "|".join(["-"*12 for _ in rates]) + "|")
-        
+
         # Mean streaming viability (all-chunks)
-        streaming_all_chunks_row = "| Mean | " + " | ".join([f"{result.streaming_viability_all_chunks_mean:.1f}" for result in all_results]) + " |"
+        streaming_all_chunks_row = "| Mean | " + " | ".join(
+            [f"{result.streaming_viability_all_chunks_mean:.1f}" for result in all_results]
+        ) + " |"
         print(streaming_all_chunks_row)
         print()
 
@@ -470,10 +474,10 @@ async def main():
     parser = argparse.ArgumentParser(description="Benchmark vox-serve TTS server")
     parser.add_argument("--host", default="localhost", help="Server host (default: localhost)")
     parser.add_argument("--port", type=int, default=8000, help="Server port (default: 8000)")
-    parser.add_argument("--rate", type=float, nargs='+', default=[1.0], 
+    parser.add_argument("--rate", type=float, nargs='+', default=[1.0],
                        help="Request rate(s) in req/s (single value or list, default: [1.0])")
     parser.add_argument("--duration", type=float, default=10.0, help="Test duration (seconds, default: 10.0)")
-    parser.add_argument("--save-audio", action="store_true", help="Save generated audio files to benchmark_output directory")
+    parser.add_argument("--save-audio", action="store_true", help="Save generated audio files")
 
     args = parser.parse_args()
 
@@ -493,19 +497,19 @@ async def main():
     # Always use multiple benchmark approach
     print(f"Running benchmarks at rates: {args.rate}")
     all_results = []
-    
+
     for rate in args.rate:
         print(f"\n{'='*80}")
         print(f"Running benchmark at {rate} req/s")
         print(f"{'='*80}")
-        
+
         # Clear previous metrics
         client.metrics = []
-        
+
         # Run benchmark for this rate
         results = await client.run_benchmark(rate, args.duration)
         all_results.append(results)
-    
+
     client.print_comparison_table(all_results)
     return 0
 
