@@ -67,7 +67,7 @@ class OnlineScheduler(Scheduler):
                     if current_batch_size >= max_prefill_batch_size:
                         break
 
-            max_batch_size_this_cycle = max_prefill_batch_size - len(lm_requests)
+            max_batch_size_this_cycle = max_prefill_batch_size
 
         else:
             max_batch_size_this_cycle = self.max_batch_size

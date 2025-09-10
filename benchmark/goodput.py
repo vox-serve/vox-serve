@@ -113,9 +113,16 @@ class BenchmarkClient:
             # Fallback estimation: assume 16kHz sample rate
             # WAV header is typically 44 bytes
             audio_samples = len(audio_data) - 44
-            sample_rate = 16000
+            sample_rate = 24000
             bytes_per_sample = 2  # 16-bit audio
             return audio_samples / (sample_rate * bytes_per_sample)
+    
+    def pcm_duration_bytes(self, nbytes: int) -> float:
+        # raw PCM duration in seconds
+        sample_rate = 24000
+        bytes_per_sample = 2  # 16-bit audio
+        channels = 1  # Mono audio
+        return nbytes / (sample_rate * bytes_per_sample * channels)
 
     def calculate_streaming_viability(self, metrics: RequestMetrics) -> Optional[tuple[float, float]]:
         """Calculate streaming viability (percentage of chunks satisfying real-time requirement)."""
@@ -160,6 +167,7 @@ class BenchmarkClient:
             form_data.add_field("text", text)
             form_data.add_field("streaming", "true")
 
+            print(f"new request {request_id=}")
             # Make streaming request
             async with session.post(
                 f"{self.base_url}/generate", data=form_data, timeout=aiohttp.ClientTimeout(total=None, sock_read=30)
@@ -180,17 +188,22 @@ class BenchmarkClient:
                     current_time = time.time()
                     chunk_count += 1
 
+                    if chunk_count == 1:
+                        # first chunk is the WAV header; do not use it for TTFA or durations
+                        header = chunk
+                        audio_chunks.append(chunk)
+                        continue
+
                     # Calculate chunk duration first to detect header-only chunks (no audio)
-                    chunk_duration = self.get_audio_duration(chunk)
+                    # chunk_duration = self.get_audio_duration(chunk)
+                    chunk_duration = self.pcm_duration_bytes(len(chunk))
 
-                    # Record timings only for audio-bearing chunks
-                    if chunk_duration > 0:
-                        # Set TTFA when the first audio chunk arrives
-                        if metrics.ttfa is None:
-                            metrics.ttfa = current_time - metrics.start_time
+                    # Set TTFA when the first audio chunk arrives
+                    if metrics.ttfa is None:
+                        metrics.ttfa = current_time - metrics.start_time
 
-                        metrics.chunk_arrival_times.append(current_time)
-                        metrics.chunk_durations.append(chunk_duration)
+                    metrics.chunk_arrival_times.append(current_time)
+                    metrics.chunk_durations.append(chunk_duration)
 
                     audio_chunks.append(chunk)
 
@@ -241,7 +254,7 @@ class BenchmarkClient:
         next_request_time = time.time()
 
         # Create HTTP session
-        connector = aiohttp.TCPConnector(limit=100, limit_per_host=50)
+        connector = aiohttp.TCPConnector(limit=0, limit_per_host=0)
         timeout = aiohttp.ClientTimeout(total=None, sock_read=30)
 
         async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:

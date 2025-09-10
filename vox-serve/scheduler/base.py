@@ -95,6 +95,16 @@ class Scheduler:
             self.result_socket = self.context.socket(zmq.PUSH)
             self.result_socket.bind(f"ipc://{result_socket_path}")
 
+        # Set socket HWMs to reduce blocking under bursty load
+        try:
+            self.request_socket.setsockopt(zmq.RCVHWM, 256)
+            self.result_socket.setsockopt(zmq.SNDHWM, 1024)
+            # Fast shutdown behavior
+            self.request_socket.setsockopt(zmq.LINGER, 0)
+            self.result_socket.setsockopt(zmq.LINGER, 0)
+        except Exception:
+            pass
+
         self.available_batch_sizes = self.model_worker.available_batch_sizes
 
         # Audio parameters for duration calculation

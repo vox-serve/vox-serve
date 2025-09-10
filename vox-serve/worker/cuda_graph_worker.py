@@ -928,7 +928,10 @@ class CudaGraphWorker(ModelWorker):
                 paged_kv_indices.append(tmp_page)
                 paged_kv_last_page_len.append(1)
 
-        self.logger.debug("Using CUDA graph with padded batch size %d (actual: %d)", padded_batch_size, actual_batch_size)
+        self.logger.debug(
+            "Using CUDA graph with padded batch size %d (actual: %d)",
+            padded_batch_size, actual_batch_size,
+        )
 
         # Repetition cache is now pre-allocated in prepare_lm_inputs
 
