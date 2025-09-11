@@ -289,6 +289,11 @@ class Scheduler:
             if req.done_lm_generation or self.model_worker.do_detokenize(req):
                 detokenize_requests.append(req)
 
+        if detokenize_requests:
+            step = self.model_worker.detokenize_interval - self.model_worker.detokenize_overlap
+            for req in detokenize_requests:
+                req.next_audio_decode_idx += step
+
         return detokenize_requests
 
     def _send_responses(self, detokenize_requests):

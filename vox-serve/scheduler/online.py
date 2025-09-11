@@ -129,6 +129,11 @@ class OnlineScheduler(Scheduler):
                     break
                 selected_requests.append(non_critical_requests[i])
 
+        if selected_requests:
+            step = self.model_worker.detokenize_interval - self.model_worker.detokenize_overlap
+            for req in selected_requests:
+                req.next_audio_decode_idx += step
+
         return selected_requests
 
     def _prepare_requests(self):

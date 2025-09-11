@@ -506,7 +506,7 @@ class ModelWorker:
         token_ids = []
         for req in requests:
             new_tokens = req.lm_output_audio_tokens[
-                req.next_audio_decode_idx : req.next_audio_decode_idx + self.detokenize_interval
+                req.audio_decode_idx : req.audio_decode_idx + self.detokenize_interval
             ]
 
             if len(new_tokens) < self.detokenize_interval:
@@ -529,7 +529,7 @@ class ModelWorker:
 
             last_chunk_len = len(
                 req.lm_output_audio_tokens[
-                    req.next_audio_decode_idx : req.next_audio_decode_idx + self.detokenize_interval
+                    req.audio_decode_idx : req.audio_decode_idx + self.detokenize_interval
                 ]
             )
             if last_chunk_len < self.detokenize_interval:
@@ -539,10 +539,11 @@ class ModelWorker:
             audio_bytes = audio_int16.tobytes()
             req.output_audio.put(audio_bytes)
 
-            req.next_audio_decode_idx += self.detokenize_interval - self.detokenize_overlap
+            # Commit the audio decode progress after successful detokenization
+            req.audio_decode_idx += self.detokenize_interval - self.detokenize_overlap
 
             if req.done_lm_generation and (
-                req.next_audio_decode_idx + self.detokenize_interval >= len(req.lm_output_audio_tokens)
+                req.audio_decode_idx + self.detokenize_interval >= len(req.lm_output_audio_tokens)
             ):
                 req.done_all = True
 
