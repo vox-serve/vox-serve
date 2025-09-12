@@ -10,9 +10,7 @@ class OnlineScheduler(Scheduler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        self.detokenize_max_batch_size = 16
-        assert self.detokenize_max_batch_size <= self.max_batch_size, \
-            "Detokenize max batch size must be <= max batch size"
+        self.detokenize_max_batch_size = min(16, self.max_batch_size)
 
     def _select_lm_requests(self) -> List[Request]:
         """
@@ -47,6 +45,11 @@ class OnlineScheduler(Scheduler):
                 critical_decode_requests.append(req)
             else:
                 non_critical_decode_requests.append(req)
+
+        # if len(prefill_requests) + len(critical_decode_requests) + len(non_critical_decode_requests) > 0:
+        #     print(f"{len(prefill_requests)} prefill, "
+        #           f"{len(critical_decode_requests)} critical decode, "
+        #           f"{len(non_critical_decode_requests)} non-critical decode requests")
 
         # First, allocate prefill requests with constraints
         if prefill_requests:
@@ -100,9 +103,9 @@ class OnlineScheduler(Scheduler):
         # Get all requests that are ready for detokenization
         detokenize_candidates = [
             req for req in self.active_requests
-            if req.done_lm_generation or len(req.lm_output_audio_tokens) - (
+            if req.done_lm_generation or (
                 req.next_audio_decode_idx[-1] + step if req.next_audio_decode_idx else 0
-            ) >= detokenize_interval
+            ) + detokenize_interval <= len(req.lm_output_audio_tokens)
         ]
 
         if not detokenize_candidates:
@@ -112,21 +115,53 @@ class OnlineScheduler(Scheduler):
         critical_requests = [req for req in detokenize_candidates if req.is_pressing]
         non_critical_requests = [req for req in detokenize_candidates if not req.is_pressing]
 
+        # if len(critical_requests) > 0:
+        #     print(f"Critical detokenize requests: {len(critical_requests)}, "
+        #           f"Non-critical: {len(non_critical_requests)}")
+
         # If there are no pressing requests ready for detokenization, do nothing
         if not critical_requests:
             return []
 
         selected_requests = []
-        batch_used = 0
 
         # Build up selected_requests while keeping the cumulative number of indices <= detokenize_max_batch_size
+        # Calculate remaining chunks per request
+        remaining_chunks = []
         for req in critical_requests:
-            remaining = self.detokenize_max_batch_size - batch_used
+            next_decode_idx = req.next_audio_decode_idx[-1] + step if req.next_audio_decode_idx else 0
+            remaining_tokens = len(req.lm_output_audio_tokens) - next_decode_idx
+            count = max(0, remaining_tokens // step)
+            if req.done_lm_generation and remaining_tokens > 0:
+                count += 1  # Include final partial chunk
+            remaining_chunks.append(count)
+
+        total_chunks = sum(remaining_chunks)
+        if total_chunks <= self.detokenize_max_batch_size:
+            assigned_chunks = remaining_chunks
+        else:
+            # Proportional allocation
+            assigned_chunks = [
+                max(1, (count * self.detokenize_max_batch_size) // total_chunks) for count in remaining_chunks
+            ]
+
+            # Adjust in case of rounding issues
+            while sum(assigned_chunks) > self.detokenize_max_batch_size:
+                for i in range(len(assigned_chunks)):
+                    if assigned_chunks[i] > 1:
+                        assigned_chunks[i] -= 1
+                        if sum(assigned_chunks) <= self.detokenize_max_batch_size:
+                            break
+
+        batch_used = 0
+        for i, req in enumerate(critical_requests):
+            # remaining = self.detokenize_max_batch_size - batch_used
+            remaining = assigned_chunks[i]
             if remaining <= 0:
-                break
+                continue
 
             # Compute candidate indices for this req
-            next_decode_idx = req.next_audio_decode_idx[-1] + step if getattr(req, "next_audio_decode_idx", None) else 0
+            next_decode_idx = req.next_audio_decode_idx[-1] + step if req.next_audio_decode_idx else 0
             audio_idx_list = []
 
             # Add as many indices as we can for this request without exceeding the global budget
@@ -151,34 +186,37 @@ class OnlineScheduler(Scheduler):
             req.next_audio_decode_idx = audio_idx_list
             batch_used += len(audio_idx_list)
             selected_requests.append(req)
+            # print(f"{req.request_id} {req.next_audio_decode_idx=} {len(req.lm_output_audio_tokens)=}")
 
-            print(f"{req.next_audio_decode_idx=} {len(req.lm_output_audio_tokens)=}")
+        # If we don't have a full batch, try to piggyback non-critical requests
+        if batch_used < self.detokenize_max_batch_size:
+            remaining_slots = self.detokenize_max_batch_size - batch_used
 
+            for req in non_critical_requests:
+                if remaining_slots <= 0:
+                    break
 
-        # # First, take critical requests up to max_batch_size
-        # selected_requests = critical_requests[: self.max_batch_size]
+                next_decode_idx = req.next_audio_decode_idx[-1] + step if req.next_audio_decode_idx else 0
+                audio_idx_list = []
 
-        # # If we don't have a full batch, try to piggyback non-critical requests
-        # if len(selected_requests) < self.detokenize_max_batch_size:
-        #     remaining_slots = self.detokenize_max_batch_size - len(selected_requests)
-        #     for i in range(remaining_slots):
-        #         if i >= len(non_critical_requests):
-        #             break
-        #         selected_requests.append(non_critical_requests[i])
+                while (
+                    remaining_slots > 0
+                    and next_decode_idx + detokenize_interval <= len(req.lm_output_audio_tokens)
+                ):
+                    audio_idx_list.append(next_decode_idx)
+                    next_decode_idx += step
+                    remaining_slots -= 1
 
-        # else:
-        #     # find the next available batch size from available_batch_sizes
-        #     available_sizes = [size for size in self.available_batch_sizes if size >= len(selected_requests)]
-        #     remaining_slots = available_sizes[0] - len(selected_requests)
-        #     for i in range(remaining_slots):
-        #         if i >= len(non_critical_requests):
-        #             break
-        #         selected_requests.append(non_critical_requests[i])
+                if req.done_lm_generation and remaining_slots > 0:
+                    audio_idx_list.append(next_decode_idx)
+                    remaining_slots -= 1
 
-        if selected_requests:
-            step = self.model_worker.detokenize_interval - self.model_worker.detokenize_overlap
-            for req in selected_requests:
-                req.next_audio_decode_idx += step
+                if not audio_idx_list:
+                    continue
+
+                req.next_audio_decode_idx = audio_idx_list
+                selected_requests.append(req)
+                # print(f"{req.request_id} {req.next_audio_decode_idx=} {len(req.lm_output_audio_tokens)=}")
 
         return selected_requests
 
