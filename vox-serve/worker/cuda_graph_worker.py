@@ -1120,7 +1120,7 @@ class CudaGraphWorker(ModelWorker):
         # Prepare token_ids for multiple chunks from each request
         token_ids = []
         request_chunk_mapping = []  # Track which request each chunk belongs to
-        
+
         for req_idx, req in enumerate(requests):
             # Process multiple chunks from the same request if available
             for chunk_idx in range(len(req.audio_decode_idx)):
@@ -1170,7 +1170,7 @@ class CudaGraphWorker(ModelWorker):
         for i, (req_idx, chunk_idx) in enumerate(request_chunk_mapping):
             req = requests[req_idx]
             decode_idx = req.audio_decode_idx[chunk_idx]
-            
+
             audio = audio_tensors[i].detach().cpu().numpy()
             audio_int16 = (audio * 32767).astype(np.int16)
 
@@ -1188,14 +1188,10 @@ class CudaGraphWorker(ModelWorker):
 
         # Check if any request is completely done
         for req in requests:
-            if req.done_lm_generation:
-                all_chunks_done = True
-                for decode_idx in req.audio_decode_idx:
-                    if decode_idx + self.detokenize_interval < len(req.lm_output_audio_tokens):
-                        all_chunks_done = False
-                        break
-                if all_chunks_done:
-                    req.done_all = True
+            if req.done_lm_generation and (
+                req.audio_decode_idx[-1] + self.detokenize_interval > len(req.lm_output_audio_tokens)
+            ):
+                req.done_all = True
 
         self.nvtx_range_pop() # detokenize
         return

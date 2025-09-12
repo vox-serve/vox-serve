@@ -124,17 +124,17 @@ class Scheduler:
         # Select requests for detokenization
         detokenize_requests = self._select_detokenize_requests()
 
+        # Select requests for LM processing
+        lm_requests = self._select_lm_requests()
+
+        # Prepare LM inputs outside the worker and run either prefill or decode
+        lm_inputs = self.model_worker.prepare_lm_inputs(lm_requests, detokenize_requests)
+
         # run detokenization if needed
         self.model_worker.run_detokenize(detokenize_requests)
 
         # return results to clients
         self._send_responses(detokenize_requests)
-
-        # Select requests for LM processing
-        lm_requests = self._select_lm_requests()
-
-        # Prepare LM inputs outside the worker and run either prefill or decode
-        lm_inputs = self.model_worker.prepare_lm_inputs(lm_requests)
 
         if lm_inputs is not None and lm_inputs["is_prefill"]:
             task = self.model_worker.run_lm_prefill(lm_requests, lm_inputs)
@@ -155,7 +155,7 @@ class Scheduler:
         await self._prepare_requests_async()
 
         # Prepare LM inputs outside the worker and run either prefill or decode
-        lm_inputs = self.model_worker.prepare_lm_inputs(lm_requests)
+        lm_inputs = self.model_worker.prepare_lm_inputs(lm_requests, detokenize_requests)
 
         async def run_model():
             # run detokenization if needed
@@ -290,21 +290,12 @@ class Scheduler:
         for req in self.active_requests:
             if len(detokenize_requests) >= self.max_batch_size:
                 break
-            
-            # req.next_audio_decode_idx[-1] is the last decode index
-            generated_tokens = len(req.lm_output_audio_tokens) - (
-                req.next_audio_decode_idx[-1] if req.next_audio_decode_idx else 0
-            )
-            if req.done_lm_generation or generated_tokens >= detokenize_interval:
-                detokenize_requests.append(req)
 
-        if detokenize_requests:
-            for req in detokenize_requests:
-                # for base scheduler, there is always one step of detokenization
-                if not req.next_audio_decode_idx:
-                    req.next_audio_decode_idx = [0]
-                else:
-                    req.next_audio_decode_idx[0] += step
+            # req.next_audio_decode_idx[-1] is the last decode index
+            next_decode_idx = req.next_audio_decode_idx[-1] + step if req.next_audio_decode_idx else 0
+            if req.done_lm_generation or next_decode_idx + detokenize_interval <= len(req.lm_output_audio_tokens):
+                req.next_audio_decode_idx = [next_decode_idx]
+                detokenize_requests.append(req)
 
         return detokenize_requests
 

@@ -167,9 +167,16 @@ class ModelWorker:
             self.depth_attn_wrapper = None
             self.depth_kv_cache = None
 
-    def prepare_lm_inputs(self, requests: List[Request]) -> Optional[LMInputs]:
+    def prepare_lm_inputs(
+        self,
+        lm_requests: List[Request],
+        detokenize_requests: List[Request],
+    ) -> Optional[LMInputs]:
         """Prepare inputs for the LM step."""
-        if len(requests) == 0:
+        for req in detokenize_requests:
+            req.audio_decode_idx = req.next_audio_decode_idx.copy()
+
+        if len(lm_requests) == 0:
             return None
 
         # flashinfer inputs
@@ -190,9 +197,9 @@ class ModelWorker:
         repetition_cache_list = []
 
         # Determine if any request needs prefill
-        is_prefill = any(not req.done_lm_prefill for req in requests)
+        is_prefill = any(not req.done_lm_prefill for req in lm_requests)
 
-        for req in requests:
+        for req in lm_requests:
             if not req.done_lm_prefill:
                 # prefill request
                 preprocess_output = self.model.preprocess(prompt=req.prompt, audio_path=req.audio_path)
@@ -254,8 +261,6 @@ class ModelWorker:
                 position_ids_list.append(req.next_position_id)
 
                 req.next_position_id += 1
-            
-            req.audio_decode_idx = req.next_audio_decode_idx.copy()
 
         # Allocate tensors for GPU computation
         input_ids = torch.cat(input_ids_list, dim=0)
@@ -508,7 +513,7 @@ class ModelWorker:
         # Collect all chunks from all requests
         token_ids = []
         request_chunk_mapping = []  # Track which request each chunk belongs to
-        
+
         for req_idx, req in enumerate(requests):
             # Process multiple chunks from the same request if available
             for chunk_idx in range(len(req.audio_decode_idx)):
@@ -539,7 +544,7 @@ class ModelWorker:
         for i, (req_idx, chunk_idx) in enumerate(request_chunk_mapping):
             req = requests[req_idx]
             decode_idx = req.audio_decode_idx[chunk_idx]
-            
+
             audio = audio_tensors[i].detach().cpu().numpy()
             audio_int16 = (audio * 32767).astype(np.int16)
 
@@ -557,14 +562,10 @@ class ModelWorker:
 
         # Check if any request is completely done
         for req in requests:
-            if req.done_lm_generation:
-                all_chunks_done = True
-                for decode_idx in req.audio_decode_idx:
-                    if decode_idx + self.detokenize_interval < len(req.lm_output_audio_tokens):
-                        all_chunks_done = False
-                        break
-                if all_chunks_done:
-                    req.done_all = True
+            if req.done_lm_generation and (
+                req.audio_decode_idx[-1] + self.detokenize_interval > len(req.lm_output_audio_tokens)
+            ):
+                req.done_all = True
 
         return
 
