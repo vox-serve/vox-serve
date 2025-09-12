@@ -283,16 +283,28 @@ class Scheduler:
         """
         detokenize_requests = []
 
+        detokenize_interval = self.model_worker.detokenize_interval
+        detokenize_overlap = self.model_worker.detokenize_overlap
+        step = detokenize_interval - detokenize_overlap
+
         for req in self.active_requests:
             if len(detokenize_requests) >= self.max_batch_size:
                 break
-            if req.done_lm_generation or self.model_worker.do_detokenize(req):
+            
+            # req.next_audio_decode_idx[-1] is the last decode index
+            generated_tokens = len(req.lm_output_audio_tokens) - (
+                req.next_audio_decode_idx[-1] if req.next_audio_decode_idx else 0
+            )
+            if req.done_lm_generation or generated_tokens >= detokenize_interval:
                 detokenize_requests.append(req)
 
         if detokenize_requests:
-            step = self.model_worker.detokenize_interval - self.model_worker.detokenize_overlap
             for req in detokenize_requests:
-                req.next_audio_decode_idx += step
+                # for base scheduler, there is always one step of detokenization
+                if not req.next_audio_decode_idx:
+                    req.next_audio_decode_idx = [0]
+                else:
+                    req.next_audio_decode_idx[0] += step
 
         return detokenize_requests
 

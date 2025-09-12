@@ -254,6 +254,8 @@ class ModelWorker:
                 position_ids_list.append(req.next_position_id)
 
                 req.next_position_id += 1
+            
+            req.audio_decode_idx = req.next_audio_decode_idx.copy()
 
         # Allocate tensors for GPU computation
         input_ids = torch.cat(input_ids_list, dim=0)
@@ -503,16 +505,26 @@ class ModelWorker:
         if len(requests) == 0:
             return
 
+        # Collect all chunks from all requests
         token_ids = []
-        for req in requests:
-            new_tokens = req.lm_output_audio_tokens[
-                req.audio_decode_idx : req.audio_decode_idx + self.detokenize_interval
-            ]
+        request_chunk_mapping = []  # Track which request each chunk belongs to
+        
+        for req_idx, req in enumerate(requests):
+            # Process multiple chunks from the same request if available
+            for chunk_idx in range(len(req.audio_decode_idx)):
+                decode_idx = req.audio_decode_idx[chunk_idx]
+                new_tokens = req.lm_output_audio_tokens[
+                    decode_idx : decode_idx + self.detokenize_interval
+                ]
 
-            if len(new_tokens) < self.detokenize_interval:
-                new_tokens.extend([new_tokens[-1]] * (self.detokenize_interval - len(new_tokens)))
+                if len(new_tokens) < self.detokenize_interval:
+                    new_tokens.extend([new_tokens[-1]] * (self.detokenize_interval - len(new_tokens)))
 
-            token_ids.append(new_tokens)
+                token_ids.append(new_tokens)
+                request_chunk_mapping.append((req_idx, chunk_idx))
+
+        if not token_ids:
+            return
 
         token_ids = torch.tensor(token_ids, device=self.device, dtype=torch.int32)
 
@@ -523,13 +535,17 @@ class ModelWorker:
             for i in range(audio_tensors.shape[0]):
                 audio_tensors[i, 0] = self.run_watermark(audio_tensors[i, 0], orig_sr=24000)
 
-        for i, req in enumerate(requests):
+        # Process each chunk and assign to the corresponding request
+        for i, (req_idx, chunk_idx) in enumerate(request_chunk_mapping):
+            req = requests[req_idx]
+            decode_idx = req.audio_decode_idx[chunk_idx]
+            
             audio = audio_tensors[i].detach().cpu().numpy()
             audio_int16 = (audio * 32767).astype(np.int16)
 
             last_chunk_len = len(
                 req.lm_output_audio_tokens[
-                    req.audio_decode_idx : req.audio_decode_idx + self.detokenize_interval
+                    decode_idx : decode_idx + self.detokenize_interval
                 ]
             )
             if last_chunk_len < self.detokenize_interval:
@@ -539,13 +555,16 @@ class ModelWorker:
             audio_bytes = audio_int16.tobytes()
             req.output_audio.put(audio_bytes)
 
-            # Commit the audio decode progress after successful detokenization
-            req.audio_decode_idx += self.detokenize_interval - self.detokenize_overlap
-
-            if req.done_lm_generation and (
-                req.audio_decode_idx + self.detokenize_interval >= len(req.lm_output_audio_tokens)
-            ):
-                req.done_all = True
+        # Check if any request is completely done
+        for req in requests:
+            if req.done_lm_generation:
+                all_chunks_done = True
+                for decode_idx in req.audio_decode_idx:
+                    if decode_idx + self.detokenize_interval < len(req.lm_output_audio_tokens):
+                        all_chunks_done = False
+                        break
+                if all_chunks_done:
+                    req.done_all = True
 
         return
 
@@ -601,8 +620,8 @@ class ModelWorker:
             request.kv_token_len = 0
             request.kv_last_page_len = 0
 
-    def do_detokenize(self, request: Request):
-        """
-        Check if the request is ready for detokenization.
-        """
-        return len(request.lm_output_audio_tokens) - request.next_audio_decode_idx >= self.detokenize_interval
+    # def do_detokenize(self, request: Request):
+    #     """
+    #     Check if the request is ready for detokenization.
+    #     """
+    #     return len(request.lm_output_audio_tokens) - request.next_audio_decode_idx >= self.detokenize_interval
