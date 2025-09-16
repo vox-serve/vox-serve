@@ -240,15 +240,33 @@ class BenchmarkClient:
 
         return metrics
 
-    async def run_benchmark(self, rate: float, duration: float) -> BenchmarkResults:
-        """Run benchmark with specified request rate for given duration."""
-        print(f"Starting benchmark: {rate} req/s for {duration}s")
+    async def run_benchmark(self, rate: float, duration: float, burstiness: float = 1.0) -> BenchmarkResults:
+        """Run benchmark with specified request rate for given duration.
+
+        Args:
+            rate: Average request rate (requests per second)
+            duration: Test duration in seconds
+            burstiness: Burstiness parameter for arrival distribution
+                       - burstiness = 1.0: Poisson process (exponential inter-arrival times)
+                       - burstiness < 1.0: More bursty arrivals (higher variance)
+                       - burstiness > 1.0: More regular arrivals (lower variance)
+        """
+        print(f"Starting benchmark: {rate} req/s for {duration}s (burstiness={burstiness})")
         print(f"Target server: {self.base_url}")
         print("=" * 60)
 
-        # Setup Poisson arrival process
-        # For Poisson process, inter-arrival times follow exponential distribution
-        # with parameter lambda = rate (average rate)
+        # Setup arrival process with Gamma distribution
+        # For Gamma distribution with shape k and scale θ:
+        # - Mean = k * θ
+        # - Variance = k * θ²
+        # - When k = 1: reduces to exponential distribution (Poisson process)
+        # - Higher k: more regular arrivals, lower k: more bursty arrivals
+        #
+        # For our burstiness parameter:
+        # - burstiness = k (shape parameter)
+        # - burstiness = 1.0: Poisson process (k=1)
+        # - burstiness < 1.0: more bursty (k<1)
+        # - burstiness > 1.0: more regular (k>1)
         end_time = time.time() + duration
         request_count = 0
         next_request_time = time.time()
@@ -274,9 +292,15 @@ class BenchmarkClient:
                 task = asyncio.create_task(self.make_request(session, request_id))
                 tasks.append(task)
 
-                # Generate next inter-arrival time using exponential distribution
-                # Mean inter-arrival time = 1/rate
-                inter_arrival_time = np.random.exponential(1.0 / rate) if rate > 0 else float('inf')
+                # Generate next inter-arrival time using Gamma distribution
+                # Shape parameter k = burstiness
+                # Scale parameter θ = 1/(burstiness*rate) (so mean = k*θ = 1/rate)
+                if rate > 0:
+                    shape_k = burstiness
+                    scale_theta = 1.0 / (burstiness * rate)
+                    inter_arrival_time = np.random.gamma(shape_k, scale_theta)
+                else:
+                    inter_arrival_time = float('inf')
                 next_request_time += inter_arrival_time
 
             print(f"Scheduled {len(tasks)} requests. Waiting for completion...")
@@ -477,6 +501,8 @@ async def main():
     parser.add_argument("--rate", type=float, nargs='+', default=[1.0],
                        help="Request rate(s) in req/s (single value or list, default: [1.0])")
     parser.add_argument("--duration", type=float, default=10.0, help="Test duration (seconds, default: 10.0)")
+    parser.add_argument("--burstiness", type=float, default=1.0,
+                       help="Arrival burstiness parameter (default: 1.0 for Poisson). Lower values = more bursty")
     parser.add_argument("--save-audio", action="store_true", help="Save generated audio files")
 
     args = parser.parse_args()
@@ -489,6 +515,10 @@ async def main():
 
     if args.duration <= 0:
         print("Error: Duration must be positive")
+        return 1
+
+    if args.burstiness <= 0:
+        print("Error: Burstiness must be positive")
         return 1
 
     # Create and run benchmark
@@ -507,7 +537,7 @@ async def main():
         client.metrics = []
 
         # Run benchmark for this rate
-        results = await client.run_benchmark(rate, args.duration)
+        results = await client.run_benchmark(rate, args.duration, args.burstiness)
         all_results.append(results)
 
     client.print_comparison_table(all_results)
