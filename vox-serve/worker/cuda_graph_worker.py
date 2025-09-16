@@ -396,8 +396,9 @@ class CudaGraphWorker(ModelWorker):
             )
 
             # Create buffers for flashinfer inputs
-            paged_kv_indptr = torch.zeros(batch_size + 1, dtype=torch.int32)
-            paged_kv_indices = torch.zeros(batch_size, dtype=torch.int32)
+            page_per_request = self.max_num_pages // self.max_batch_size
+            paged_kv_indptr = torch.arange(batch_size + 1, dtype=torch.int32) * page_per_request
+            paged_kv_indices = torch.arange(batch_size * page_per_request, dtype=torch.int32)
             paged_kv_last_page_len = torch.zeros(batch_size, dtype=torch.int32)
 
             # Plan decode wrapper outside the graph capture
@@ -846,6 +847,7 @@ class CudaGraphWorker(ModelWorker):
         # Replay the CUDA graph
         self.nvtx_range_push("cuda_graph_replay")
         graph.replay()
+        torch.cuda.synchronize()
         self.nvtx_range_pop()
 
         # Extract logits for the actual batch size - need to get last token for each actual request
@@ -962,6 +964,7 @@ class CudaGraphWorker(ModelWorker):
         # Replay the CUDA graph
         self.nvtx_range_push("cuda_graph_replay")
         graph.replay()
+        torch.cuda.synchronize()
         self.nvtx_range_pop()
 
         # Copy output from buffer - only take the actual batch size, not padded
@@ -1043,6 +1046,7 @@ class CudaGraphWorker(ModelWorker):
 
                 self.nvtx_range_push("depth_decode_replay")
                 graph.replay()
+                torch.cuda.synchronize()
                 self.nvtx_range_pop()
 
                 # Only take outputs for actual batch size
@@ -1083,6 +1087,7 @@ class CudaGraphWorker(ModelWorker):
 
                 self.nvtx_range_push("depth_prefill_replay")
                 graph.replay()
+                torch.cuda.synchronize()
                 self.nvtx_range_pop()
 
                 depth_logits = self.cuda_graph_buffers["depth_logits"][: 2 * padded_batch_size]
@@ -1157,6 +1162,7 @@ class CudaGraphWorker(ModelWorker):
 
         self.nvtx_range_push("detokenize_replay")
         graph.replay()
+        torch.cuda.synchronize()
         self.nvtx_range_pop()
 
         # Only take outputs for actual batch size

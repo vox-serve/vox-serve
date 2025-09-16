@@ -10,7 +10,8 @@ class OnlineScheduler(Scheduler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        self.detokenize_max_batch_size = min(16, self.max_batch_size)
+        # self.detokenize_max_batch_size = min(16, self.max_batch_size)
+        self.detokenize_max_batch_size = self.max_batch_size
 
     def _select_lm_requests(self) -> List[Request]:
         """

@@ -676,7 +676,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--max-num-pages",
         type=int,
-        default=1024,
+        default=2048,
         help="Maximum number of KV cache pages (default: 1024)"
     )
     parser.add_argument(
