@@ -1,5 +1,5 @@
 import queue
-from typing import List
+from typing import Coroutine, List, Optional
 
 import numpy as np
 import torch
@@ -7,7 +7,7 @@ import torchaudio
 
 from ..flashinfer_utils import FlashInferDecodeWrapper, FlashInferPrefillWrapper
 from ..model import load_model
-from ..requests import Request
+from ..requests import LMInputs, Request
 from ..utils import get_logger
 from ..watermarker import silentcipher
 
@@ -23,9 +23,11 @@ class ModelWorker:
         top_k: int = None,
         min_p: float = None,
         temperature: float = None,
+        max_tokens: int = None,
         repetition_penalty: float = None,
         repetition_window: int = None,
         cfg_scale: float = None,
+        greedy: bool = False,
         enable_nvtx: bool = False,
     ):
         # Load model with sampling parameters
@@ -36,9 +38,11 @@ class ModelWorker:
             top_k=top_k,
             min_p=min_p,
             temperature=temperature,
+            max_tokens=max_tokens,
             repetition_penalty=repetition_penalty,
             repetition_window=repetition_window,
             cfg_scale=cfg_scale,
+            greedy=greedy,
         )
         self.device = "cuda:0"
         self.max_batch_size = max_batch_size
@@ -79,7 +83,6 @@ class ModelWorker:
 
         self._prepare_attention_wrappers()
 
-        # self.warmup()
         # self.kv_cache.zero_()
 
     @property
@@ -98,7 +101,7 @@ class ModelWorker:
         return self.model.supports_audio_input
 
     @property
-    def available_batch_sizes(self) -> List[int]:
+    def available_batch_sizes(self) -> Optional[List[int]]:
         """
         Return the available batch sizes supported by the model.
         For the base model worker, there is no restriction.
@@ -164,8 +167,18 @@ class ModelWorker:
             self.depth_attn_wrapper = None
             self.depth_kv_cache = None
 
-    def _prepare_lm_inputs(self, requests: List[Request]):
+    def prepare_lm_inputs(
+        self,
+        lm_requests: List[Request],
+        detokenize_requests: List[Request],
+    ) -> Optional[LMInputs]:
         """Prepare inputs for the LM step."""
+        for req in detokenize_requests:
+            req.audio_decode_idx = req.next_audio_decode_idx.copy()
+
+        if len(lm_requests) == 0:
+            return None
+
         # flashinfer inputs
         qo_indptr = [0]
         paged_kv_indptr = [0]
@@ -173,23 +186,27 @@ class ModelWorker:
         paged_kv_last_page_len = []
 
         # necessary inference inputs
-        input_ids = []
-        position_ids = []
+        input_ids_list = []
+        position_ids_list = []
 
         # optional inference inputs
-        # TODO: these should be single tenosr, not list of tensors
-        input_features = []
-        input_masks = []
+        input_features_list = []
+        input_masks_list = []
 
         # sampling inputs
-        # TODO: sampling params, cfg scale
-        repetition_cache = []
+        repetition_cache_list = []
 
-        for req in requests:
+        # Determine if any request needs prefill
+        is_prefill = any(not req.done_lm_prefill for req in lm_requests)
+
+        for req in lm_requests:
             if not req.done_lm_prefill:
                 # prefill request
                 preprocess_output = self.model.preprocess(prompt=req.prompt, audio_path=req.audio_path)
                 req.input_tokens = preprocess_output.input_tokens
+                # Set input length based on prepared input tokens
+                if req.input_tokens is not None:
+                    req.input_length = req.input_tokens.shape[0]
 
                 if preprocess_output.input_features is not None:
                     req.input_features = preprocess_output.input_features
@@ -200,9 +217,12 @@ class ModelWorker:
                 if preprocess_output.repetition_cache is not None:
                     req.repetition_cache = preprocess_output.repetition_cache
 
-                input_features.append(req.input_features)
-                input_masks.append(req.input_masks)
-                repetition_cache.append(req.repetition_cache)
+                # input_ids.append(req.input_tokens.to(self.device, non_blocking=True)) # (seq, codebook)
+                input_ids_list.append(req.input_tokens.to(self.device, non_blocking=True)) # (seq, codebook)
+                position_ids_list.extend([i for i in range(len(req.input_tokens))])
+                input_features_list.append(req.input_features)
+                input_masks_list.append(req.input_masks)
+                repetition_cache_list.append(req.repetition_cache)
 
                 n_pages_to_allocate = (len(req.input_tokens) + self.page_size - 1) // self.page_size
                 req.kv_token_len = len(req.input_tokens)
@@ -217,19 +237,15 @@ class ModelWorker:
                 paged_kv_indices.extend(req.kv_pages)
                 paged_kv_last_page_len.append(req.kv_last_page_len)
 
-                input_ids.extend(req.input_tokens)
-                position_ids.extend([i for i in range(len(req.input_tokens))])
-
                 req.next_position_id = len(req.input_tokens) + 1
                 req.done_lm_prefill = True
 
             else:
                 # decode request
-                next_input_token = req.lm_output_tokens[-1]
-
-                input_features.append(req.input_features)
-                input_masks.append(req.input_masks)
-                repetition_cache.append(req.repetition_cache)
+                input_ids_list.append(req.input_tokens) # (1, codebook)
+                input_features_list.append(req.input_features)
+                input_masks_list.append(req.input_masks)
+                repetition_cache_list.append(req.repetition_cache)
 
                 req.kv_token_len += 1
                 req.kv_last_page_len += 1
@@ -242,10 +258,30 @@ class ModelWorker:
                 paged_kv_indices.extend(req.kv_pages)
                 paged_kv_last_page_len.append(req.kv_last_page_len)
 
-                input_ids.append(next_input_token)
-                position_ids.append(req.next_position_id)
+                position_ids_list.append(req.next_position_id)
 
                 req.next_position_id += 1
+
+        # Allocate tensors for GPU computation
+        input_ids = torch.cat(input_ids_list, dim=0)
+        position_ids = torch.tensor(position_ids_list, device=self.device, dtype=torch.int32)
+
+        # Prepare input_masks and input_features as single tensors
+        if self.model.needs_input_masks and input_masks_list:
+            input_masks = torch.cat([mask for mask in input_masks_list if mask is not None], dim=0)
+        else:
+            input_masks = None
+
+        if self.model.needs_input_features and input_features_list:
+            input_features = torch.cat([features for features in input_features_list if features is not None], dim=0)
+        else:
+            input_features = None
+
+        # Prepare repetition cache as stacked tensor if model uses repetition penalty
+        if self.model.use_repetition_penalty and repetition_cache_list:
+            repetition_cache = torch.stack([cache for cache in repetition_cache_list if cache is not None], dim=0)
+        else:
+            repetition_cache = None
 
         return {
             "qo_indptr": qo_indptr,
@@ -256,10 +292,13 @@ class ModelWorker:
             "position_ids": position_ids,
             "input_features": input_features,
             "input_masks": input_masks,
+            "repetition_cache": repetition_cache,
+            "is_prefill": is_prefill,
         }
 
-    def run_lm_prefill(self, requests: List[Request]):
-        lm_inputs = self._prepare_lm_inputs(requests)
+    def run_lm_prefill(self, requests: List[Request], lm_inputs: LMInputs) -> Optional[Coroutine]:
+        if len(requests) == 0:
+            return None
 
         qo_indptr = lm_inputs["qo_indptr"]
         paged_kv_indptr = lm_inputs["paged_kv_indptr"]
@@ -269,20 +308,7 @@ class ModelWorker:
         position_ids = lm_inputs["position_ids"]
         input_features = lm_inputs["input_features"]
         input_masks = lm_inputs["input_masks"]
-
-        input_ids = torch.tensor(input_ids, device=self.device, dtype=torch.int32)
-        position_ids = torch.tensor(position_ids, device=self.device, dtype=torch.int32)
-
-        # Prepare input_masks and input_features as single tensors
-        if self.model.needs_input_masks:
-            input_masks = torch.cat(input_masks, dim=0)
-        else:
-            input_masks = None
-
-        if self.model.needs_input_features:
-            input_features = torch.cat(input_features, dim=0)
-        else:
-            input_features = None
+        repetition_cache = lm_inputs["repetition_cache"]
 
         qo_indptr_tensor = torch.tensor(qo_indptr, device=self.device, dtype=torch.int32)
         paged_kv_indptr_tensor = torch.tensor(paged_kv_indptr, device=self.device, dtype=torch.int32)
@@ -318,6 +344,7 @@ class ModelWorker:
                 logits=logits,
                 hidden_states=backbone_hidden_states,
                 requests=requests,
+                repetition_cache=repetition_cache,
             )
 
             # assuming that the sequence length is 2 for the initial iteration of depth transformer.
@@ -370,18 +397,21 @@ class ModelWorker:
             if getattr(self.prefill_wrapper, "qo_indptr", None) is not None:
                 logits = logits[self.prefill_wrapper.qo_indptr[:-1] - 1]
 
-            output_ids = self.model.sampling(
+            output_ids, task = self.model.sampling(
                 logits=logits,
                 requests=requests,
+                repetition_cache=repetition_cache,
             )
 
+            return task
 
-    def run_lm_decode(self, requests: List[Request]):
+    def run_lm_decode(self, requests: List[Request], lm_inputs: LMInputs) -> Optional[Coroutine]:
         """
         Run LM decode step for the given requests.
         Base implementation without CUDA graph optimization.
         """
-        lm_inputs = self._prepare_lm_inputs(requests)
+        if len(requests) == 0:
+            return None
 
         paged_kv_indptr = lm_inputs["paged_kv_indptr"]
         paged_kv_indices = lm_inputs["paged_kv_indices"]
@@ -390,21 +420,7 @@ class ModelWorker:
         position_ids = lm_inputs["position_ids"]
         input_features = lm_inputs["input_features"]
         input_masks = lm_inputs["input_masks"]
-
-        # Convert to tensors
-        input_ids = torch.tensor(input_ids, device=self.device, dtype=torch.int32)
-        position_ids = torch.tensor(position_ids, device=self.device, dtype=torch.int32)
-
-        # Handle optional inputs
-        if self.model.needs_input_masks:
-            input_masks = torch.cat(input_masks, dim=0)
-        else:
-            input_masks = None
-
-        if self.model.needs_input_features:
-            input_features = torch.cat(input_features, dim=0)
-        else:
-            input_features = None
+        repetition_cache = lm_inputs["repetition_cache"]
 
         paged_kv_indptr_tensor = torch.tensor(paged_kv_indptr, device=self.device, dtype=torch.int32)
         paged_kv_indices_tensor = torch.tensor(paged_kv_indices, device=self.device, dtype=torch.int32)
@@ -444,6 +460,7 @@ class ModelWorker:
                 logits=logits,
                 hidden_states=backbone_hidden_states,
                 requests=requests,
+                repetition_cache=repetition_cache,
             )
 
             depth_position_ids = torch.tensor([0, 1] * output_ids.shape[0], device=self.device, dtype=torch.int32)
@@ -481,48 +498,59 @@ class ModelWorker:
                 depth_kv_last_page_len += 1
 
         else:
-            output_ids = self.model.sampling(
+            output_ids, task = self.model.sampling(
                 logits=logits,
                 requests=requests,
+                repetition_cache=repetition_cache,
             )
 
+            return task
 
     def run_detokenize(self, requests: List[Request]):
         if len(requests) == 0:
             return
 
+        # Collect all chunks from all requests
         token_ids = []
-        for req in requests:
-            new_tokens = req.lm_output_audio_tokens[
-                req.next_audio_decode_idx : req.next_audio_decode_idx + self.detokenize_interval
-            ]
+        request_chunk_mapping = []  # Track which request each chunk belongs to
 
-            if req.done_lm_generation:
-                # exclude the last token since it is a stop token
-                if len(new_tokens) > 1:
-                    new_tokens = new_tokens[:-1]
+        for req_idx, req in enumerate(requests):
+            # Process multiple chunks from the same request if available
+            for chunk_idx in range(len(req.audio_decode_idx)):
+                decode_idx = req.audio_decode_idx[chunk_idx]
+                new_tokens = req.lm_output_audio_tokens[
+                    decode_idx : decode_idx + self.detokenize_interval
+                ]
 
-            if len(new_tokens) < self.detokenize_interval:
-                new_tokens.extend([new_tokens[-1]] * (self.detokenize_interval - len(new_tokens)))
+                if len(new_tokens) < self.detokenize_interval:
+                    new_tokens.extend([new_tokens[-1]] * (self.detokenize_interval - len(new_tokens)))
 
-            token_ids.append(new_tokens)
+                token_ids.append(new_tokens)
+                request_chunk_mapping.append((req_idx, chunk_idx))
+
+        if not token_ids:
+            return
 
         token_ids = torch.tensor(token_ids, device=self.device, dtype=torch.int32)
 
         audio_tensors = self.model.postprocess(token_ids)
-        self.logger.debug(f"Audio tensors: {audio_tensors}")
+        self.logger.debug("Audio tensors: %s", audio_tensors)
 
         if self.needs_watermarking:
             for i in range(audio_tensors.shape[0]):
                 audio_tensors[i, 0] = self.run_watermark(audio_tensors[i, 0], orig_sr=24000)
 
-        for i, req in enumerate(requests):
+        # Process each chunk and assign to the corresponding request
+        for i, (req_idx, chunk_idx) in enumerate(request_chunk_mapping):
+            req = requests[req_idx]
+            decode_idx = req.audio_decode_idx[chunk_idx]
+
             audio = audio_tensors[i].detach().cpu().numpy()
             audio_int16 = (audio * 32767).astype(np.int16)
 
             last_chunk_len = len(
                 req.lm_output_audio_tokens[
-                    req.next_audio_decode_idx : req.next_audio_decode_idx + self.detokenize_interval
+                    decode_idx : decode_idx + self.detokenize_interval
                 ]
             )
             if last_chunk_len < self.detokenize_interval:
@@ -532,9 +560,11 @@ class ModelWorker:
             audio_bytes = audio_int16.tobytes()
             req.output_audio.put(audio_bytes)
 
-            req.next_audio_decode_idx += self.detokenize_interval - self.detokenize_overlap
-
-            if req.done_lm_generation and req.next_audio_decode_idx >= len(req.lm_output_audio_tokens):
+        # Check if any request is completely done
+        for req in requests:
+            if req.done_lm_generation and (
+                req.audio_decode_idx[-1] + self.detokenize_interval > len(req.lm_output_audio_tokens)
+            ):
                 req.done_all = True
 
         return
@@ -591,93 +621,8 @@ class ModelWorker:
             request.kv_token_len = 0
             request.kv_last_page_len = 0
 
-    def warmup(self, num_requests: int = 1, sequence_length: int = 128):
-        """
-        Warmup function to initialize GPU kernels and optimize inference paths.
-        Runs prefill, decode, and sampling with random input data.
-
-        Args:
-            num_requests: Number of dummy requests to create for warmup
-            sequence_length: Length of random input sequences
-        """
-        self.logger.info(f"Warming up model with {num_requests} requests of length {sequence_length}")
-
-        # Create dummy requests with random data
-        dummy_requests = []
-        for i in range(num_requests):
-            request = Request(request_id=f"warmup_{i}", prompt="warmup dummy prompt")
-
-            # Initialize request state
-            request.done_lm_prefill = False
-            request.lm_output_tokens = []
-            request.next_position_id = 1
-            request.next_audio_decode_idx = 0
-            request.done_lm_generation = False
-            request.done_all = False
-
-            # Create random input tokens
-            request.input_tokens = torch.randint(0, 1000, (sequence_length,), device=self.device).tolist()
-
-            # Set dummy input features and masks if needed
-            request.input_features = None
-            request.input_masks = None
-            request.repetition_cache = None
-
-            # TODO: add example audio
-            # if self.model.supports_audio_input:
-            #     # Create dummy audio tokens
-            #     request.audio_path = ...
-
-            dummy_requests.append(request)
-
-        try:
-            # Warmup prefill (includes forward pass and sampling)
-            self.logger.info("Warming up prefill...")
-            self.run_lm_prefill(dummy_requests)
-
-            # Warmup decode (run a few decode steps, includes forward pass and sampling)
-            self.logger.info("Warming up decode and sampling...")
-            for _ in range(5):
-                # # Add dummy output tokens for decode
-                # for req in dummy_requests:
-                #     req.lm_output_tokens.append(torch.randint(0, 1000, (self.model.n_codebooks,)).tolist())
-
-                self.run_lm_decode(dummy_requests)
-
-            # Warmup detokenization if we have enough tokens
-            self.logger.info("Warming up detokenization...")
-            for req in dummy_requests:
-                # Ensure we have enough tokens for detokenization
-                while len(req.lm_output_audio_tokens) < self.detokenize_interval:
-                    req.lm_output_audio_tokens.append(torch.randint(0, 1000, (self.model.n_codebooks,)).tolist())
-
-            # Run detokenization warmup
-            self.run_detokenize(dummy_requests)
-
-            self.logger.info("Warmup completed successfully")
-
-        except Exception as e:
-            self.logger.error(f"Warmup failed: {e}")
-
-        finally:
-            # Clean up dummy requests
-            for req in dummy_requests:
-                self.free_kv_cache(req)
-
-    def do_detokenize(self, request: Request):
-        """
-        Check if the request is ready for detokenization.
-        """
-        return len(request.lm_output_audio_tokens) - request.next_audio_decode_idx >= self.detokenize_interval
-
-    def is_finished(self, request: Request):
-        # TODO: request-specific max_tokens
-        if self.model.is_stop_id(request.lm_output_tokens[-1]):
-            request.finish_reason = "stop_id_encountered"
-            self.logger.debug(f"Request {request.request_id}: stop_id encountered.")
-            return True
-        elif request.next_position_id > self.model.max_tokens:
-            request.finish_reason = "position_limit_exceeded"
-            self.logger.debug(f"Request {request.request_id}: position limit exceeded.")
-            return True
-        return False
+    # def do_detokenize(self, request: Request):
+    #     """
+    #     Check if the request is ready for detokenization.
+    #     """
+    #     return len(request.lm_output_audio_tokens) - request.next_audio_decode_idx >= self.detokenize_interval

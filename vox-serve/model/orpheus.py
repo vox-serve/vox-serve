@@ -1,12 +1,11 @@
 from typing import Any, List
 
-import flashinfer
 import torch
 from torch import nn
 from transformers import LlamaConfig, LlamaPreTrainedModel
 from transformers.activations import ACT2FN
 
-from ..flashinfer_utils import FlashInferWrapper
+from ..flashinfer_utils import FlashInferWrapper, apply_rope_pos_ids, rms_norm
 from ..requests import Request
 from ..sampling import Sampler, SamplingConfig
 from ..tokenizer.snac import SNAC
@@ -23,11 +22,11 @@ class OrpheusRMSNorm(nn.Module):
         self.variance_epsilon = eps
 
     def forward(self, hidden_states):
-        input_dtype = hidden_states.dtype
-        hidden_states = hidden_states.to(torch.float32)
-        variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
-        return self.weight * hidden_states.to(input_dtype)
+        return rms_norm(
+            hidden_states=hidden_states,
+            weight=self.weight,
+            eps=self.variance_epsilon,
+        )
 
     def extra_repr(self):
         return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
@@ -93,10 +92,10 @@ class OrpheusAttention(nn.Module):
         key_states = self.k_proj(hidden_states).view(hidden_shape)  # .transpose(0, 1)
         value_states = self.v_proj(hidden_states).view(hidden_shape)  # .transpose(0, 1)
 
-        query_states, key_states = flashinfer.rope.apply_llama31_rope_pos_ids(
-            query_states,
-            key_states,
-            pos_ids=position_ids,
+        query_states, key_states = apply_rope_pos_ids(
+            query_states=query_states,
+            key_states=key_states,
+            position_ids=position_ids,
             rope_scale=self.rope_scale,
             rope_theta=self.rope_theta,
             low_freq_factor=self.low_freq_factor,
@@ -301,6 +300,8 @@ class OrpheusModel(BaseLM):
         """
         Maximum number of tokens the model generates in a single request.
         """
+        if self.default_sampling_config.max_tokens is not None:
+            return self.default_sampling_config.max_tokens
         return 1200
 
     @property
@@ -344,15 +345,15 @@ class OrpheusModel(BaseLM):
             start_token = torch.tensor([[128259]], dtype=torch.int64)
             end_tokens = torch.tensor([[128009, 128260, 128261, 128257]], dtype=torch.int64)
             all_input_ids = torch.cat([start_token, prompt_tokens.input_ids, end_tokens], dim=1)
-            prompt_string = self.text_tokenizer.decode(all_input_ids[0])
-            return all_input_ids, prompt_string
+            # prompt_string = self.text_tokenizer.decode(all_input_ids[0])
+            return all_input_ids
         else:
             prompt_tokens = self.text_tokenizer(prompt, return_tensors="pt")
             start_token = torch.tensor([[128259]], dtype=torch.int64)
             end_tokens = torch.tensor([[128009, 128260, 128261, 128257]], dtype=torch.int64)
             all_input_ids = torch.cat([start_token, prompt_tokens.input_ids, end_tokens], dim=1)
-            prompt_string = self.text_tokenizer.decode(all_input_ids[0])
-            return all_input_ids, prompt_string
+            # prompt_string = self.text_tokenizer.decode(all_input_ids[0])
+            return prompt_tokens
 
     def preprocess(
         self,
@@ -364,18 +365,24 @@ class OrpheusModel(BaseLM):
         """Prepare the prompt for the model, formatting it according to Orpheus specifications."""
         assert audio_path is None
         self._validate_voice(voice)
-        input_ids, _ = self._orpheus_format_prompt(prompt, voice, model_type)
+        input_ids = self._orpheus_format_prompt(prompt, voice, model_type)
         input_ids = input_ids.view(-1, 1)  # add codebook dimension
 
-        repetition_cache = torch.zeros(
-            self.default_sampling_config.repetition_window if self.default_sampling_config.repetition_window > 0 else 1,
-            self.n_codebooks,
-            self.vocab_size,
-            dtype=torch.bool,
-            device=self.device,
-        )
+        # Create repetition cache if repetition penalty is enabled
+        repetition_cache = None
+        config = self.default_sampling_config
+        if (config.repetition_penalty is not None and
+            config.repetition_window is not None and
+            config.repetition_penalty != 1.0):
+            repetition_cache = torch.zeros(
+                config.repetition_window if config.repetition_window > 0 else 1,
+                self.n_codebooks,
+                self.vocab_size,
+                dtype=torch.bool,
+                device=self.device,
+            )
 
-        return PreprocessOutput(input_tokens=input_ids.tolist(), repetition_cache=repetition_cache)
+        return PreprocessOutput(input_tokens=input_ids, repetition_cache=repetition_cache)
 
     def forward(
         self,
@@ -403,42 +410,60 @@ class OrpheusModel(BaseLM):
         logits: torch.Tensor,
         requests: List[Request],
         sampling_params: SamplingConfig | None = None,
+        repetition_cache: torch.Tensor | None = None,
         cfg_scale: float | None = None,
         **kwargs,
     ) -> torch.Tensor:
         if sampling_params is None:
             sampling_params = self.default_sampling_config
 
-        # apply repetition penalty
-        for i, req in enumerate(requests):
-            if req.repetition_cache is None:
-                continue
-
-            logits[i] = Sampler.apply_repetition_penalty(
-                logits[i], req.repetition_cache, sampling_params.repetition_penalty
+        if repetition_cache is not None:
+            logits = Sampler.apply_repetition_penalty(
+                logits, repetition_cache, sampling_params.repetition_penalty
             )
 
         output_ids = Sampler.run_sampling(logits.view(-1, self.vocab_size), config=sampling_params)
         output_ids = output_ids.view(logits.shape[0], logits.shape[1])
 
-        # update repetition cache
-        for i, req in enumerate(requests):
-            if req.repetition_cache is None:
-                continue
-
+        if repetition_cache is not None:
             Sampler.update_repetition_penalty_cache(
-                req.repetition_cache,
-                output_ids[i],
+                repetition_cache,
+                output_ids,
                 sampling_params.repetition_window,
             )
 
-            # no additional logic for Orpheus model for now
-            req.lm_output_tokens.append(output_ids[i].tolist())
-            if not self.is_stop_id(output_ids[i].tolist()):
-                # Don't add the EOS token to lm_output_audio_tokens
-                req.lm_output_audio_tokens.append(output_ids[i].tolist())
+        for i, req in enumerate(requests):
+            req.input_tokens = output_ids[i : i + 1]
 
-        return output_ids
+        async def update_req_states():
+            stop_mask = output_ids[:, 0] == self.stop_token_id
+            stop_indices = torch.nonzero(stop_mask, as_tuple=True)[0]
+
+            for i, req in enumerate(requests):
+                req.lm_output_tokens.append(output_ids[i : i + 1])
+                req.lm_output_audio_tokens.append(output_ids[i : i + 1])
+
+            # Remove from stop requests
+            for idx in stop_indices:
+                req = requests[idx.item()]
+                # Remove the EOS token from lm_output_audio_tokens
+                req.lm_output_audio_tokens.pop()
+                req.done_lm_generation = True
+                req.finish_reason = "stop_id_encountered"
+
+            for req in requests:
+                if req.next_position_id > self.max_tokens:
+                    req.done_lm_generation = True
+                    req.finish_reason = "max_tokens_reached"
+
+            if repetition_cache is not None:
+                # Update repetition cache in requests
+                for i, req in enumerate(requests):
+                    req.repetition_cache = repetition_cache[i]
+
+        task = update_req_states()
+
+        return output_ids, task
 
     def _turn_token_into_id(self, output_ids):
         """Modoel's output ids to audio ids"""

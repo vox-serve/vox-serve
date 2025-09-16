@@ -4,7 +4,6 @@ from dataclasses import dataclass, field
 from functools import cache
 from typing import Any, Iterable, List, Literal
 
-import flashinfer
 import inflect
 import safetensors
 import torch
@@ -15,7 +14,7 @@ from torch import nn
 from torch.nn import functional as F
 
 from ..encoder.zonos import ZonosSpeakerEmbeddingLDA
-from ..flashinfer_utils import FlashInferWrapper
+from ..flashinfer_utils import FlashInferWrapper, apply_rope_pos_ids
 from ..requests import Request
 from ..sampling import Sampler, SamplingConfig
 from ..tokenizer.dac import DAC
@@ -109,10 +108,10 @@ class ZonosAttention(nn.Module):
         key_states = key_states.view(-1, self.num_heads_kv, self.head_dim)  # .transpose(0, 1)
         value_states = value_states.view(-1, self.num_heads_kv, self.head_dim)  # .transpose(0, 1)
 
-        query_states, key_states = flashinfer.rope.apply_rope_pos_ids(
-            query_states,
-            key_states,
-            pos_ids=position_ids,
+        query_states, key_states = apply_rope_pos_ids(
+            query_states=query_states,
+            key_states=key_states,
+            position_ids=position_ids,
             rope_theta=10000,
             interleave=True,
         )
@@ -646,6 +645,8 @@ class ZonosModel(BaseLM):
         """
         Maximum number of tokens the model generates in a single request.
         """
+        if self.default_sampling_config.max_tokens is not None:
+            return self.default_sampling_config.max_tokens
         return 2048
 
     @property
@@ -797,13 +798,19 @@ class ZonosModel(BaseLM):
         input_mask[-1] = False  # Last position should not be filled with features
         input_mask = input_mask[:, None].expand(-1, self.n_codebooks) # Expand for n_codebooks
 
-        repetition_cache = torch.zeros(
-            self.default_sampling_config.repetition_window if self.default_sampling_config.repetition_window > 0 else 1,
-            self.n_codebooks,
-            self.vocab_size,
-            dtype=torch.bool,
-            device=self.device,
-        )
+        # Create repetition cache if repetition penalty is enabled
+        repetition_cache = None
+        config = self.default_sampling_config
+        if (config.repetition_penalty is not None and
+            config.repetition_window is not None and
+            config.repetition_penalty != 1.0):
+            repetition_cache = torch.zeros(
+                config.repetition_window if config.repetition_window > 0 else 1,
+                self.n_codebooks,
+                self.vocab_size,
+                dtype=torch.bool,
+                device=self.device,
+            )
 
         return PreprocessOutput(
             input_tokens=prefix_tokens.tolist(),
@@ -843,50 +850,69 @@ class ZonosModel(BaseLM):
         logits: torch.Tensor,
         requests: List[Request],
         sampling_params: SamplingConfig | None = None,
+        repetition_cache: torch.Tensor | None = None,
         cfg_scale: float | None = None,
     ) -> torch.Tensor:
         if sampling_params is None:
             sampling_params = self.default_sampling_config
 
-        # apply repetition penalty
-        for i, req in enumerate(requests):
-            if req.repetition_cache is None:
-                continue
-
-            logits[i] = Sampler.apply_repetition_penalty(
-                logits[i], req.repetition_cache, sampling_params.repetition_penalty
+        if repetition_cache is not None:
+            logits = Sampler.apply_repetition_penalty(
+                logits, repetition_cache, sampling_params.repetition_penalty
             )
 
         output_ids = Sampler.run_sampling(logits.view(-1, self.vocab_size), config=sampling_params)
         output_ids = output_ids.view(logits.shape[0], logits.shape[1])
 
-        # update repetition cache
-        for i, req in enumerate(requests):
-            if req.repetition_cache is not None:
-                Sampler.update_repetition_penalty_cache(
-                    req.repetition_cache,
-                    output_ids[i],
-                    sampling_params.repetition_window,
-                )
+        if repetition_cache is not None:
+            Sampler.update_repetition_penalty_cache(
+                repetition_cache,
+                output_ids,
+                sampling_params.repetition_window,
+            )
 
+        for i, req in enumerate(requests):
             # mask part of the output tokens for the first n_codebooks - 1 tokens
             # use len(req.lm_output_tokens) + 1 since the output is not yet appended
             if len(req.lm_output_tokens) + 1 < self.n_codebooks:
-                for j in range(len(req.lm_output_tokens) + 1, self.n_codebooks):
-                    output_ids[i, j] = self.masked_token_id
+                # for j in range(len(req.lm_output_tokens) + 1, self.n_codebooks):
+                #     output_ids[i, j] = self.masked_token_id
+                output_ids[i, len(req.lm_output_tokens) + 1 :] = self.masked_token_id
 
+            req.input_tokens = output_ids[i : i + 1]
             # for decode phase, input_features are not used
-            req.input_features = torch.zeros(1, self.hidden_size, device=self.device, dtype=torch.bfloat16)
-            req.input_masks = torch.zeros(1, self.n_codebooks, dtype=torch.bool, device=self.device)
+            req.input_features = req.input_features[:1].zero_()
+            req.input_masks = req.input_masks[:1].zero_()
 
-            # no additional logic for CSM model for now. TODO: revert delay patterns here?
-            req.lm_output_tokens.append(output_ids[i].tolist())
+        async def update_req_states():
+            stop_mask = output_ids[:, 0] == self.eos_token_id
+            stop_indices = torch.nonzero(stop_mask, as_tuple=True)[0]
 
-            if not self.is_stop_id(output_ids[i].tolist()):
-                # Don't add the EOS token to lm_output_audio_tokens
-                req.lm_output_audio_tokens.append(output_ids[i].tolist())
+            for i, req in enumerate(requests):
+                req.lm_output_tokens.append(output_ids[i : i + 1])
+                req.lm_output_audio_tokens.append(output_ids[i : i + 1])
 
-        return output_ids
+            # Remove from stop requests
+            for idx in stop_indices:
+                req = requests[idx.item()]
+                # Remove the EOS token from lm_output_audio_tokens
+                req.lm_output_audio_tokens.pop()
+                req.done_lm_generation = True
+                req.finish_reason = "stop_id_encountered"
+
+            for req in requests:
+                if req.next_position_id > self.max_tokens:
+                    req.done_lm_generation = True
+                    req.finish_reason = "max_tokens_reached"
+
+            if repetition_cache is not None:
+                # Update repetition cache in requests
+                for i, req in enumerate(requests):
+                    req.repetition_cache = repetition_cache[i]
+
+        task = update_req_states()
+
+        return output_ids, task
 
     def postprocess(self, token_ids: torch.Tensor):
         interval = token_ids.shape[1]

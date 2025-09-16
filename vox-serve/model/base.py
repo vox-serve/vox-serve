@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Coroutine, List, Optional, Tuple
 
 import torch
 
@@ -93,6 +93,13 @@ class BaseLM(ABC):
         return False
 
     @property
+    def use_repetition_penalty(self) -> bool:
+        """Indicates if the model has repetition penalty enabled in default sampling config."""
+        return (hasattr(self, 'default_sampling_config') and
+                self.default_sampling_config.repetition_penalty is not None and
+                self.default_sampling_config.repetition_penalty != 1.0)
+
+    @property
     @abstractmethod
     def detokenize_interval(self) -> int:
         """Interval at which to detokenize outputs."""
@@ -176,9 +183,10 @@ class BaseLM(ABC):
         logits: torch.Tensor,
         requests: List[Request],
         sampling_params: SamplingConfig | None,
+        repetition_cache: torch.Tensor | None,
         cfg_scale: float | None,
         **kwargs,
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, Coroutine]:
         """
         Sampling and other model-specific logics for generating output tokens.
         `requests` will be updated with the sampled tokens.
@@ -187,11 +195,15 @@ class BaseLM(ABC):
             logits: Output logits from the model. Shape: (batch_size, n_codebooks, vocab_size)
             requests: List of Request objects containing sampling configurations etc.
             sampling_params: Optional common sampling configurations
+            repetition_cache: Optional tensor for repetition penalty.
+                Shape: (batch_size, window_size, n_codebooks, vocab_size)
             cfg_scale: Optional common classifier-free guidance scale
             **kwargs: Additional model-specific parameters
 
         Returns:
-            Output token IDs from sampling
+            Tuple containing:
+                - Output token IDs from sampling. Shape: (batch_size, n_codebooks)
+                - Coroutine for request state update, for asynchronous scheduling
         """
         pass
 

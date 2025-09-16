@@ -11,9 +11,11 @@ class SamplingConfig:
     top_k: Optional[int] = None
     min_p: Optional[float] = None
     temperature: float = 1.0
+    max_tokens: Optional[int] = None
     repetition_penalty: Optional[float] = None
     repetition_window: Optional[int] = None  # -1 for global window
     cfg_scale: Optional[float] = None
+    greedy: bool = False
 
 
 def greedy_sampling(logits):
@@ -93,8 +95,11 @@ class Sampler:
             Sampled token indices
         """
         # Determine sampling strategy based on config
-        if config.temperature == 0.0:
-            # Greedy sampling
+        if config.greedy:
+            # Greedy sampling when explicitly enabled
+            return greedy_sampling(logits)
+        elif config.temperature == 0.0:
+            # Greedy sampling (backward compatibility)
             return greedy_sampling(logits)
         elif config.top_k is not None and config.top_p is not None:
             # Combined top-k and top-p sampling
@@ -113,6 +118,7 @@ class Sampler:
             return greedy_sampling(logits)
 
     @classmethod
+    @torch.compile(mode="default")
     def apply_repetition_penalty(
         cls, logits: torch.Tensor, repetition_cache: torch.Tensor, penalty: float
     ) -> torch.Tensor:
@@ -120,16 +126,16 @@ class Sampler:
         Apply repetition penalty to logits based on the repetition cache.
 
         Args:
-            logits: Tensor of shape (n_codebooks, vocab_size) containing the logits.
-            repetition_cache: Tensor of shape (window_size, n_codebooks, vocab_size)
+            logits: Tensor of shape (batch_size, n_codebooks, vocab_size) containing the logits.
+            repetition_cache: Tensor of shape (batch_size, window_size, n_codebooks, vocab_size)
                 indicating which tokens have appeared.
             penalty: Float value to apply as a penalty for repeated tokens.
 
         Returns:
-            Logits tensor of shape (n_codebooks, vocab_size) with the repetition penalty applied.
+            Logits tensor of shape (batch_size, n_codebooks, vocab_size) with the repetition penalty applied.
         """
         # OR operation over window_size dimension.
-        appearance_mask = repetition_cache.any(dim=0)
+        appearance_mask = repetition_cache.any(dim=1)
 
         logits = torch.where((logits > 0) & appearance_mask, logits / penalty, logits)
         logits = torch.where((logits <= 0) & appearance_mask, logits * penalty, logits)
@@ -137,6 +143,7 @@ class Sampler:
         return logits
 
     @classmethod
+    @torch.compile(mode="default")
     def update_repetition_penalty_cache(
         cls, repetition_cache: torch.Tensor, output_ids: torch.Tensor, window_size: int
     ) -> None:
@@ -144,23 +151,21 @@ class Sampler:
         Update the repetition penalty cache with the newly generated tokens.
 
         Args:
-            repetition_cache: Tensor of shape (window_size, n_codebooks, vocab_size).
-            output_ids: Tensor of shape (n_codebooks) containing the newly generated tokens.
+            repetition_cache: Tensor of shape (batch_size, window_size, n_codebooks, vocab_size).
+            output_ids: Tensor of shape (batch_size, n_codebooks) containing the newly generated tokens.
             window_size: Size of the repetition penalty window.
 
         Returns:
             Updated repetition cache tensor.
         """
-        n_codebooks = repetition_cache.shape[1]
-        vocab_size = repetition_cache.shape[2]
         # Shift the cache to make room for new tokens
         if window_size > 1:
             # shift the cache to the left and add the new token
-            repetition_cache[:-1] = repetition_cache[1:]
-            repetition_cache[-1].zero_()
-            repetition_cache[-1, torch.arange(n_codebooks), output_ids] = True
+            repetition_cache[:, :-1] = repetition_cache[:, 1:]
+            repetition_cache[:, -1].zero_()
+            repetition_cache[:, -1, :, output_ids] = True
 
         else:
             # global cache, just set the new token
-            repetition_cache[0, torch.arange(n_codebooks), output_ids] = True
+            repetition_cache[:, :, :, output_ids] = True
 

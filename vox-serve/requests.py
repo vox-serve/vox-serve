@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from queue import Queue
-from typing import List
+from typing import List, Optional, TypedDict
 
 import torch
 
@@ -28,17 +28,25 @@ class Request:
     # kv_token_len == (len(kv_pages) - 1) * page_size + kv_last_page_len
 
     # input prompt tokens. shape: (seq_len, n_codebooks)
-    input_tokens: List[List[int]] = None
+    input_tokens: torch.Tensor = None
+    # length of input prompt tokens
+    input_length: int = None
     # raw output tokens from LM to be given to the next step of LM inference. shape: (seq_len, n_codebooks)
-    lm_output_tokens: List[List[int]] = field(default_factory=list)
+    lm_output_tokens: List[torch.Tensor] = field(default_factory=list)
     # audio tokens to be given to the detokenizer, after filtering or reverting delay patterns.
     # shape: (seq_len, n_codebooks)
-    lm_output_audio_tokens: List[List[int]] = field(default_factory=list)
+    lm_output_audio_tokens: List[torch.Tensor] = field(default_factory=list)
     output_audio: Queue = field(default_factory=Queue)
+
+    # optional inputs for inference or sampling
+    input_features: torch.Tensor = None
+    input_masks: torch.Tensor = None
+    repetition_cache: torch.Tensor = None  # Shape: (window_size, n_codebooks, vocab_size)
 
     # progress status
     done_lm_prefill: bool = False
-    next_audio_decode_idx: int = 0
+    audio_decode_idx: List[int] = field(default_factory=list)
+    next_audio_decode_idx: List[int] = field(default_factory=list)
     done_lm_generation: bool = False
     done_all: bool = False
     finish_reason: str = None
@@ -50,7 +58,17 @@ class Request:
     chunk_send_timestamps: List[float] = field(default_factory=list)  # when each chunk was sent
     chunk_durations: List[float] = field(default_factory=list)  # duration of each chunk in seconds
 
-    # optional inputs for inference or sampling
-    input_features: torch.Tensor = None
-    input_masks: torch.Tensor = None
-    repetition_cache: torch.Tensor = None  # Shape: (window_size, n_codebooks, vocab_size)
+
+class LMInputs(TypedDict):
+    """Typed container for scheduler-prepared inputs for LM steps."""
+    qo_indptr: List[int]
+    paged_kv_indptr: List[int]
+    paged_kv_indices: List[int]
+    paged_kv_last_page_len: List[int]
+    # Pre-allocated tensors for GPU computation
+    input_ids: torch.Tensor
+    position_ids: torch.Tensor
+    input_features: Optional[torch.Tensor]
+    input_masks: Optional[torch.Tensor]
+    repetition_cache: Optional[torch.Tensor]
+    is_prefill: bool

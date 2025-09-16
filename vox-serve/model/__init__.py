@@ -59,9 +59,11 @@ def load_model(
     top_k: int = None,
     min_p: float = None,
     temperature: float = None,
+    max_tokens: int = None,
     repetition_penalty: float = None,
     repetition_window: int = None,
     cfg_scale: float = None,
+    greedy: bool = False,
     **kwargs: Any
 ) -> BaseLM | BaseLMWithDepth:
     """
@@ -75,9 +77,11 @@ def load_model(
         top_k: Top-k sampling parameter (overrides model default if provided)
         min_p: Min-p sampling parameter (overrides model default if provided)
         temperature: Temperature for sampling (overrides model default if provided)
+        max_tokens: Maximum number of tokens to generate (overrides model default if provided)
         repetition_penalty: Repetition penalty (overrides model default if provided)
         repetition_window: Repetition window size (overrides model default if provided)
         cfg_scale: CFG scale for guidance (overrides model default if provided)
+        greedy: Enable greedy sampling (ignores other sampling parameters if True)
         **kwargs: Additional arguments to pass to the model constructor
 
     Returns:
@@ -91,8 +95,8 @@ def load_model(
 
     # Override default sampling config if CLI parameters are provided
     if any(param is not None for param in [
-        top_p, top_k, min_p, temperature, repetition_penalty, repetition_window, cfg_scale
-    ]):
+        top_p, top_k, min_p, temperature, max_tokens, repetition_penalty, repetition_window, cfg_scale
+    ]) or greedy:
         # Get current default config
         current_config = model.default_sampling_config
 
@@ -102,6 +106,7 @@ def load_model(
             top_k=top_k if top_k is not None else current_config.top_k,
             min_p=min_p if min_p is not None else current_config.min_p,
             temperature=temperature if temperature is not None else current_config.temperature,
+            max_tokens=max_tokens if max_tokens is not None else current_config.max_tokens,
             repetition_penalty=(
                 repetition_penalty if repetition_penalty is not None
                 else current_config.repetition_penalty
@@ -111,6 +116,7 @@ def load_model(
                 else current_config.repetition_window
             ),
             cfg_scale=cfg_scale if cfg_scale is not None else current_config.cfg_scale,
+            greedy=greedy,
         )
 
     return model

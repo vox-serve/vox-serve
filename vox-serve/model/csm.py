@@ -1,6 +1,5 @@
 from typing import Any, List, Tuple
 
-import flashinfer
 import torch
 import torchaudio
 from tokenizers.processors import TemplateProcessing
@@ -8,7 +7,7 @@ from torch import nn
 from transformers import AutoTokenizer, CsmConfig, CsmDepthDecoderConfig, CsmPreTrainedModel, LlamaConfig
 from transformers.activations import ACT2FN
 
-from ..flashinfer_utils import FlashInferWrapper
+from ..flashinfer_utils import FlashInferWrapper, apply_rope_pos_ids, rms_norm
 from ..requests import Request
 from ..sampling import Sampler, SamplingConfig
 from ..utils import get_logger
@@ -25,11 +24,11 @@ class CsmRMSNorm(nn.Module):
         self.variance_epsilon = eps
 
     def forward(self, hidden_states):
-        input_dtype = hidden_states.dtype
-        hidden_states = hidden_states.to(torch.float32)
-        variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
-        return self.weight * hidden_states.to(input_dtype)
+        return rms_norm(
+            hidden_states=hidden_states,
+            weight=self.weight,
+            eps=self.variance_epsilon,
+        )
 
     def extra_repr(self):
         return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
@@ -95,10 +94,10 @@ class CsmAttention(nn.Module):
         key_states = self.k_proj(hidden_states).view(hidden_shape)  # .transpose(0, 1)
         value_states = self.v_proj(hidden_states).view(hidden_shape)  # .transpose(0, 1)
 
-        query_states, key_states = flashinfer.rope.apply_llama31_rope_pos_ids(
-            query_states,
-            key_states,
-            pos_ids=position_ids,
+        query_states, key_states = apply_rope_pos_ids(
+            query_states=query_states,
+            key_states=key_states,
+            position_ids=position_ids,
             rope_scale=self.rope_scale,
             rope_theta=self.rope_theta,
             low_freq_factor=self.low_freq_factor,
@@ -275,7 +274,7 @@ class CsmForConditionalGeneration(CsmPreTrainedModel):
     def __init__(self, config: CsmConfig):
         super().__init__(config)
         logger = get_logger(__name__)
-        logger.debug(f"CSM Config: {config}")
+        logger.debug("CSM Config: %s", config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.embed_text_tokens = nn.Embedding(config.text_vocab_size, config.hidden_size)
@@ -565,6 +564,8 @@ class CSMModel(BaseLMWithDepth):
         """
         Maximum number of tokens the model generates in a single request.
         """
+        if self.default_sampling_config.max_tokens is not None:
+            return self.default_sampling_config.max_tokens
         return 1200
 
     @property
@@ -585,7 +586,25 @@ class CSMModel(BaseLMWithDepth):
             prompt_tokens = torch.cat(self.default_context["tokens"] + [prompt_tokens], dim=0)
             prompt_tokens_mask = torch.cat(self.default_context["tokens_mask"] + [prompt_tokens_mask], dim=0)
 
-        return PreprocessOutput(input_tokens=prompt_tokens.tolist(), input_masks=prompt_tokens_mask)
+        # Create repetition cache if repetition penalty is enabled
+        repetition_cache = None
+        config = self.default_sampling_config
+        if (config.repetition_penalty is not None and
+            config.repetition_window is not None and
+            config.repetition_penalty != 1.0):
+            repetition_cache = torch.zeros(
+                config.repetition_window if config.repetition_window > 0 else 1,
+                self.n_codebooks,
+                self.vocab_size,
+                dtype=torch.bool,
+                device=self.device,
+            )
+
+        return PreprocessOutput(
+            input_tokens=prompt_tokens.tolist(),
+            input_masks=prompt_tokens_mask,
+            repetition_cache=repetition_cache
+        )
 
     def forward(
         self,
@@ -621,6 +640,7 @@ class CSMModel(BaseLMWithDepth):
         hidden_states: torch.Tensor,
         requests: List[Request],
         sampling_params: SamplingConfig | None = None,
+        repetition_cache: torch.Tensor | None = None,
         cfg_scale: float | None = None,
         **kwargs: Any,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -634,11 +654,23 @@ class CSMModel(BaseLMWithDepth):
 
         assert logits.shape[1] == 1, "Logits should have shape [bs, 1, vocab_size]"
 
+        if repetition_cache is not None:
+            logits = Sampler.apply_repetition_penalty(
+                logits, repetition_cache, sampling_params.repetition_penalty
+            )
+
         # there are 33 codebooks (32 audio + 1 text), but the output from backbone transformer is single codebook
         # so here we allocate output_ids for all codebooks but do sampling only for the first one
         output_ids = Sampler.run_sampling(logits.view(-1, self.vocab_size), config=sampling_params)
         output_ids = output_ids.view(logits.shape[0], logits.shape[1])
         output_ids = output_ids.expand(-1, self.n_codebooks)  # [bs, 33]
+
+        if repetition_cache is not None:
+            Sampler.update_repetition_penalty_cache(
+                repetition_cache,
+                output_ids,
+                sampling_params.repetition_window,
+            )
 
         c0_embed = self.embed_audio_tokens_single(output_ids[:, 0], 0)
         hidden_for_depth = torch.cat([hidden_states[:, None, :], c0_embed[:, None, :]], dim=1) # (bs, 2, hidden_size)
@@ -652,6 +684,12 @@ class CSMModel(BaseLMWithDepth):
             if not self.is_stop_id(output_ids[i].tolist()):
                 # Don't add the EOS token to lm_output_audio_tokens
                 req.lm_output_audio_tokens.append(output_ids[i].tolist())
+            elif req.next_position_id > self.max_tokens:
+                req.done_lm_generation = True
+                req.finish_reason = "max_tokens_reached"
+            else:
+                req.done_lm_generation = True
+                req.finish_reason = "stop_id_encountered"
 
         return output_ids, hidden_for_depth
 

@@ -3,7 +3,6 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
 # from hyperpyyaml import load_hyperpyyaml
-import flashinfer
 import torch
 import torchaudio
 from huggingface_hub import hf_hub_download
@@ -11,7 +10,7 @@ from torch import nn
 from torch.nn import functional as F
 
 from ..encoder.glm import GLMVoiceEncoder
-from ..flashinfer_utils import FlashInferWrapper
+from ..flashinfer_utils import FlashInferWrapper, apply_rope_pos_ids, rms_norm
 from ..requests import Request
 from ..sampling import Sampler, SamplingConfig
 from ..tokenizer.glm import GLMAudioDecoder
@@ -73,11 +72,11 @@ class GLMVoiceRMSNorm(nn.Module):
         self.variance_epsilon = eps
 
     def forward(self, hidden_states):
-        input_dtype = hidden_states.dtype
-        hidden_states = hidden_states.to(torch.float32)
-        variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
-        return self.weight * hidden_states.to(input_dtype)
+        return rms_norm(
+            hidden_states=hidden_states,
+            weight=self.weight,
+            eps=self.variance_epsilon,
+        )
 
     def extra_repr(self):
         return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
@@ -146,10 +145,10 @@ class GLMVoiceAttention(nn.Module):
         key_states = key_layer.view(hidden_shape)  # .transpose(0, 1)
         value_states = value_layer.view(hidden_shape)  # .transpose(0, 1)
 
-        query_states, key_states = flashinfer.rope.apply_rope_pos_ids(
-            query_states,
-            key_states,
-            pos_ids=position_ids,
+        query_states, key_states = apply_rope_pos_ids(
+            query_states=query_states,
+            key_states=key_states,
+            position_ids=position_ids,
             rotary_dim=self.head_dim // 2,
             interleave=True,
             rope_scale=self.rope_scale,
@@ -420,6 +419,8 @@ class GLMVoiceModel(BaseLM):
         """
         Maximum number of tokens the model generates in a single request.
         """
+        if self.default_sampling_config.max_tokens is not None:
+            return self.default_sampling_config.max_tokens
         return 512
 
     @property
@@ -491,7 +492,21 @@ class GLMVoiceModel(BaseLM):
         input_ids = self.text_tokenizer(text_input, return_tensors="pt").input_ids
         input_ids = input_ids.view(-1, 1)  # add codebook dimension
 
-        return PreprocessOutput(input_tokens=input_ids.tolist())
+        # Create repetition cache if repetition penalty is enabled
+        repetition_cache = None
+        config = self.default_sampling_config
+        if (config.repetition_penalty is not None and
+            config.repetition_window is not None and
+            config.repetition_penalty != 1.0):
+            repetition_cache = torch.zeros(
+                config.repetition_window if config.repetition_window > 0 else 1,
+                self.n_codebooks,
+                self.vocab_size,
+                dtype=torch.bool,
+                device=self.device,
+            )
+
+        return PreprocessOutput(input_tokens=input_ids.tolist(), repetition_cache=repetition_cache)
 
     def forward(
         self,
@@ -519,24 +534,56 @@ class GLMVoiceModel(BaseLM):
         logits: torch.Tensor,
         requests: List[Request],
         sampling_params: SamplingConfig | None = None,
+        repetition_cache: torch.Tensor | None = None,
         cfg_scale: float | None = None,
         **kwargs,
     ) -> torch.Tensor:
         if sampling_params is None:
             sampling_params = self.default_sampling_config
 
+        if repetition_cache is not None:
+            logits = Sampler.apply_repetition_penalty(
+                logits, repetition_cache, sampling_params.repetition_penalty
+            )
+
         output_ids = Sampler.run_sampling(logits.view(-1, self.vocab_size), config=sampling_params)
         output_ids = output_ids.view(logits.shape[0], logits.shape[1])
 
-        for i, req in enumerate(requests):
-            # filter out the non-audio tokens
-            req.lm_output_tokens.append(output_ids[i].tolist())
-            if output_ids[i, 0] >= self.audio_offset:
-                # if the first token is an audio token, append it to the audio tokens
-                req.lm_output_audio_tokens.append(output_ids[i].tolist())
+        if repetition_cache is not None:
+            Sampler.update_repetition_penalty_cache(
+                repetition_cache,
+                output_ids,
+                sampling_params.repetition_window,
+            )
 
-        self.logger.debug(f"Sampling output: {output_ids.tolist()}")
-        return output_ids
+        for i, req in enumerate(requests):
+            req.input_tokens = output_ids[i : i + 1]
+
+        async def update_req_states():
+            stop_mask = (output_ids[:, 0] == self.stop_token_ids[0]) | \
+                        (output_ids[:, 0] == self.stop_token_ids[1]) | \
+                        (output_ids[:, 0] == self.stop_token_ids[2])
+            audio_mask = output_ids[:, 0] >= self.audio_offset
+
+            for i, req in enumerate(requests):
+                req.lm_output_tokens.append(output_ids[i : i + 1])
+                if audio_mask[i] and not stop_mask[i]:
+                    req.lm_output_audio_tokens.append(output_ids[i : i + 1])
+                if stop_mask[i]:
+                    req.done_lm_generation = True
+                    req.finish_reason = "stop_id_encountered"
+                if req.next_position_id > self.max_tokens:
+                    req.done_lm_generation = True
+                    req.finish_reason = "max_tokens_reached"
+
+            if repetition_cache is not None:
+                # Update repetition cache in requests
+                for i, req in enumerate(requests):
+                    req.repetition_cache = repetition_cache[i]
+
+        task = update_req_states()
+
+        return output_ids, task
 
     def postprocess(self, token_ids: torch.Tensor):
         audio_tensor = self.audio_decoder(token_ids[:, :, 0] - self.audio_offset, self.detokenize_token_len)
