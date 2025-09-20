@@ -69,8 +69,7 @@ def _mel_filters(device, n_mels: int) -> torch.Tensor:
     """
     assert n_mels in {80, 128}, f"Unsupported n_mels: {n_mels}"
 
-    filters_path = os.path.join(os.path.dirname(__file__), "assets",
-                                "mel_filters.npz")
+    filters_path = os.path.join(os.path.dirname(__file__), "assets", "mel_filters.npz")
     with np.load(filters_path, allow_pickle=False) as f:
         return torch.from_numpy(f[f"mel_{n_mels}"]).to(device)
 
@@ -114,7 +113,7 @@ def log_mel_spectrogram(
         audio = F.pad(audio, (0, padding))
     window = torch.hann_window(400).to(audio.device)
     stft = torch.stft(audio, 400, 160, window=window, return_complex=True)
-    magnitudes = stft[..., :-1].abs()**2
+    magnitudes = stft[..., :-1].abs() ** 2
 
     filters = _mel_filters(audio.device, n_mels)
     mel_spec = filters @ magnitudes
@@ -126,7 +125,7 @@ def log_mel_spectrogram(
 
 
 def padding(data: List[torch.Tensor]):
-    """ Padding the data into batch data
+    """Padding the data into batch data
 
     Parameters
     ----------
@@ -138,16 +137,16 @@ def padding(data: List[torch.Tensor]):
     """
     sample = data
     assert isinstance(sample, list)
-    feats_lengths = torch.tensor([s.size(1) for s in sample],
-                                 dtype=torch.int32)
+    feats_lengths = torch.tensor([s.size(1) for s in sample], dtype=torch.int32)
     feats = [s.t() for s in sample]
     padded_feats = pad_sequence(feats, batch_first=True, padding_value=0)
 
     return padded_feats.transpose(1, 2), feats_lengths
 
 
-def mel_spectrogram(y, n_fft=1920, num_mels=80, sampling_rate=24000, hop_size=480,
-                    win_size=1920, fmin=0, fmax=8000, center=False):
+def mel_spectrogram(
+    y, n_fft=1920, num_mels=80, sampling_rate=24000, hop_size=480, win_size=1920, fmin=0, fmax=8000, center=False
+):
     global mel_basis, hann_window  # pylint: disable=global-statement
     if f"{str(fmax)}_{str(y.device)}" not in mel_basis:
         mel = librosa.filters.mel(sr=sampling_rate, n_fft=n_fft, n_mels=num_mels, fmin=fmin, fmax=fmax)
@@ -182,15 +181,14 @@ def mel_spectrogram(y, n_fft=1920, num_mels=80, sampling_rate=24000, hop_size=48
     return spec
 
 
-
-def fade_in_out(fade_in_mel:torch.Tensor, fade_out_mel:torch.Tensor, window:torch.Tensor):
-    """perform fade_in_out in tensor style
-    """
+def fade_in_out(fade_in_mel: torch.Tensor, fade_out_mel: torch.Tensor, window: torch.Tensor):
+    """perform fade_in_out in tensor style"""
     mel_overlap_len = int(window.shape[0] / 2)
     fade_in_mel = fade_in_mel.clone()
-    fade_in_mel[..., :mel_overlap_len] = \
-        fade_in_mel[..., :mel_overlap_len] * window[:mel_overlap_len] + \
-        fade_out_mel[..., -mel_overlap_len:] * window[mel_overlap_len:]
+    fade_in_mel[..., :mel_overlap_len] = (
+        fade_in_mel[..., :mel_overlap_len] * window[:mel_overlap_len]
+        + fade_out_mel[..., -mel_overlap_len:] * window[mel_overlap_len:]
+    )
     return fade_in_mel
 
 
@@ -213,10 +211,7 @@ def make_pad_mask(lengths: torch.Tensor, max_len: int = 0) -> torch.Tensor:
     """
     batch_size = lengths.size(0)
     max_len = max_len if max_len > 0 else lengths.max().item()
-    seq_range = torch.arange(0,
-                             max_len,
-                             dtype=torch.int64,
-                             device=lengths.device)
+    seq_range = torch.arange(0, max_len, dtype=torch.int64, device=lengths.device)
     seq_range_expand = seq_range.unsqueeze(0).expand(batch_size, max_len)
     seq_length_expand = lengths.unsqueeze(-1)
     mask = seq_range_expand >= seq_length_expand
@@ -225,14 +220,14 @@ def make_pad_mask(lengths: torch.Tensor, max_len: int = 0) -> torch.Tensor:
 
 class DiTMLP(torch.nn.Module):
     def __init__(
-            self,
-            in_features:int,
-            hidden_features:Optional[int]=None,
-            out_features:Optional[int]=None,
-            act_layer=nn.GELU,
-            norm_layer=None,
-            bias=True,
-            drop=0.,
+        self,
+        in_features: int,
+        hidden_features: Optional[int] = None,
+        out_features: Optional[int] = None,
+        act_layer=nn.GELU,
+        norm_layer=None,
+        bias=True,
+        drop=0.0,
     ):
         super().__init__()
         hidden_features = hidden_features or in_features
@@ -256,21 +251,21 @@ class DiTMLP(torch.nn.Module):
 
 class DiTAttention(torch.nn.Module):
     def __init__(
-            self,
-            dim: int,
-            num_heads: int = 8,
-            head_dim: int = 64,
-            qkv_bias: bool = False,
-            qk_norm: bool = False,
-            attn_drop: float = 0.,
-            proj_drop: float = 0.,
-            norm_layer: nn.Module = nn.LayerNorm,
+        self,
+        dim: int,
+        num_heads: int = 8,
+        head_dim: int = 64,
+        qkv_bias: bool = False,
+        qk_norm: bool = False,
+        attn_drop: float = 0.0,
+        proj_drop: float = 0.0,
+        norm_layer: nn.Module = nn.LayerNorm,
     ) -> None:
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = head_dim
         self.inner_dim = num_heads * head_dim
-        self.scale = head_dim ** -0.5
+        self.scale = head_dim**-0.5
 
         self.to_q = nn.Linear(dim, self.inner_dim, bias=qkv_bias)
         self.to_k = nn.Linear(dim, self.inner_dim, bias=qkv_bias)
@@ -284,7 +279,7 @@ class DiTAttention(torch.nn.Module):
 
         self.proj = nn.Linear(self.inner_dim, dim)
 
-    def to_heads(self, ts:torch.Tensor):
+    def to_heads(self, ts: torch.Tensor):
         b, t, c = ts.shape
         # (b, t, nh, c)
         ts = ts.reshape(b, t, self.num_heads, c // self.num_heads)
@@ -293,8 +288,8 @@ class DiTAttention(torch.nn.Module):
 
     def forward(self, x: torch.Tensor, attn_mask: torch.Tensor) -> torch.Tensor:
         """Args:
-            x(torch.Tensor): shape (b, t, c)
-            attn_mask(torch.Tensor): shape (b, t, t)
+        x(torch.Tensor): shape (b, t, c)
+        attn_mask(torch.Tensor): shape (b, t, t)
         """
         b, t, c = x.shape
 
@@ -302,7 +297,7 @@ class DiTAttention(torch.nn.Module):
         k = self.to_k(x)
         v = self.to_v(x)
 
-        q = self.to_heads(q)    # (b, nh, t, c)
+        q = self.to_heads(q)  # (b, nh, t, c)
         k = self.to_heads(k)
         v = self.to_heads(v)
 
@@ -311,16 +306,18 @@ class DiTAttention(torch.nn.Module):
 
         attn_mask = attn_mask.unsqueeze(1)
         x = F.scaled_dot_product_attention(
-            q, k, v,
+            q,
+            k,
+            v,
             attn_mask=attn_mask,
-            dropout_p=self.attn_drop.p if self.training else 0.,
-        )   # (b, nh, t, c)
+            dropout_p=self.attn_drop.p if self.training else 0.0,
+        )  # (b, nh, t, c)
         x = x.transpose(1, 2).reshape(b, t, -1)
         x = self.proj(x)
         x = self.proj_drop(x)
         return x
 
-    def forward_chunk(self, x: torch.Tensor, att_cache: torch.Tensor=None, attn_mask: torch.Tensor=None):
+    def forward_chunk(self, x: torch.Tensor, att_cache: torch.Tensor = None, attn_mask: torch.Tensor = None):
         """
         Args:
             x: shape (b, dt, c)
@@ -332,7 +329,7 @@ class DiTAttention(torch.nn.Module):
         k = self.to_k(x)
         v = self.to_v(x)
 
-        q = self.to_heads(q)    # (b, nh, t, c)
+        q = self.to_heads(q)  # (b, nh, t, c)
         k = self.to_heads(k)
         v = self.to_heads(v)
 
@@ -356,7 +353,7 @@ class DiTAttention(torch.nn.Module):
         # attn_mask = torch.ones((b, 1, t, t1), dtype=torch.bool, device=x.device)
         if attn_mask is not None:
             attn_mask = attn_mask.unsqueeze(1)
-        x = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)   # (b, nh, t, c)
+        x = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)  # (b, nh, t, c)
         x = x.transpose(1, 2).reshape(b, t, -1)
         x = self.proj(x)
         x = self.proj_drop(x)
@@ -371,6 +368,7 @@ class DiTTimestepEmbedder(nn.Module):
     """
     Embeds scalar timesteps into vector representations.
     """
+
     def __init__(self, hidden_size, frequency_embedding_size=256):
         super().__init__()
         self.mlp = nn.Sequential(
@@ -394,9 +392,7 @@ class DiTTimestepEmbedder(nn.Module):
         """
         # https://github.com/openai/glide-text2im/blob/main/glide_text2im/nn.py
         half = dim // 2
-        freqs = torch.exp(
-            -math.log(max_period) * torch.arange(start=0, end=half) / half
-        ).to(t)
+        freqs = torch.exp(-math.log(max_period) * torch.arange(start=0, end=half) / half).to(t)
         args = t[:, None] * freqs[None]
         embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
         if dim % 2:
@@ -436,21 +432,22 @@ class DiTCausalConv1d(torch.nn.Conv1d):
         x = super(DiTCausalConv1d, self).forward(x)
         return x
 
-    def forward_chunk(self, x: torch.Tensor, cnn_cache: torch.Tensor=None):
+    def forward_chunk(self, x: torch.Tensor, cnn_cache: torch.Tensor = None):
         if cnn_cache is None:
             cnn_cache = x.new_zeros((x.shape[0], self.in_channels, self.causal_padding[0]))
         x = torch.cat([cnn_cache, x], dim=2)
-        new_cnn_cache = x[..., -self.causal_padding[0]:]
+        new_cnn_cache = x[..., -self.causal_padding[0] :]
         x = super(DiTCausalConv1d, self).forward(x)
         return x, new_cnn_cache
 
 
 class DiTCausalConvBlock(nn.Module):
-    def __init__(self,
-                 in_channels: int,
-                 out_channels: int,
-                 kernel_size: int = 3,
-                 ):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int = 3,
+    ):
         super().__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
@@ -477,12 +474,14 @@ class DiTCausalConvBlock(nn.Module):
             x: shape (b, t, c)
             mask: shape (b, t, 1)
         """
-        if mask is not None: x = x * mask
+        if mask is not None:
+            x = x * mask
         x = self.block(x)
-        if mask is not None: x = x * mask
+        if mask is not None:
+            x = x * mask
         return x
 
-    def forward_chunk(self, x: torch.Tensor, cnn_cache: torch.Tensor=None):
+    def forward_chunk(self, x: torch.Tensor, cnn_cache: torch.Tensor = None):
         """
         Args:
             x: shape (b, dt, c)
@@ -505,29 +504,30 @@ class DiTBlock(nn.Module):
     """
     A DiT block with adaptive layer norm zero (adaLN-Zero) conditioning.
     """
+
     def __init__(self, hidden_size, num_heads, head_dim, mlp_ratio=4.0, **block_kwargs):
         super().__init__()
         self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.attn = DiTAttention(hidden_size, num_heads=num_heads, head_dim=head_dim, qkv_bias=True, qk_norm=True, **block_kwargs)
+        self.attn = DiTAttention(
+            hidden_size, num_heads=num_heads, head_dim=head_dim, qkv_bias=True, qk_norm=True, **block_kwargs
+        )
         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
         approx_gelu = lambda: nn.GELU(approximate="tanh")
         self.mlp = DiTMLP(in_features=hidden_size, hidden_features=mlp_hidden_dim, act_layer=approx_gelu, drop=0)
         self.norm3 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.conv = DiTCausalConvBlock(in_channels=hidden_size, out_channels=hidden_size, kernel_size=3)
-        self.adaLN_modulation = nn.Sequential(
-            nn.SiLU(),
-            nn.Linear(hidden_size, 9 * hidden_size, bias=True)
-        )
+        self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(hidden_size, 9 * hidden_size, bias=True))
 
-    def forward(self, x:torch.Tensor, c:torch.Tensor, attn_mask:torch.Tensor):
+    def forward(self, x: torch.Tensor, c: torch.Tensor, attn_mask: torch.Tensor):
         """Args
-            x: shape (b, t, c)
-            c: shape (b, 1, c)
-            attn_mask: shape (b, t, t), bool type attention mask
+        x: shape (b, t, c)
+        c: shape (b, 1, c)
+        attn_mask: shape (b, t, t), bool type attention mask
         """
-        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp, shift_conv, scale_conv, gate_conv \
-              = self.adaLN_modulation(c).chunk(9, dim=-1)
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp, shift_conv, scale_conv, gate_conv = (
+            self.adaLN_modulation(c).chunk(9, dim=-1)
+        )
         # attention
         x = x + gate_msa * self.attn(modulate(self.norm1(x), shift_msa, scale_msa), attn_mask)
         # conv
@@ -536,7 +536,14 @@ class DiTBlock(nn.Module):
         x = x + gate_mlp * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
         return x
 
-    def forward_chunk(self, x: torch.Tensor, c: torch.Tensor, cnn_cache: torch.Tensor=None, att_cache: torch.Tensor=None, mask: torch.Tensor=None):
+    def forward_chunk(
+        self,
+        x: torch.Tensor,
+        c: torch.Tensor,
+        cnn_cache: torch.Tensor = None,
+        att_cache: torch.Tensor = None,
+        mask: torch.Tensor = None,
+    ):
         """
         Args:
             x: shape (b, dt, c)
@@ -544,8 +551,9 @@ class DiTBlock(nn.Module):
             cnn_cache: shape (b, c1+c2, 2)
             att_cache: shape (b, nh, t, c * 2)
         """
-        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp, shift_conv, scale_conv, gate_conv \
-              = self.adaLN_modulation(c).chunk(9, dim=-1)
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp, shift_conv, scale_conv, gate_conv = (
+            self.adaLN_modulation(c).chunk(9, dim=-1)
+        )
         # attention
         x_att, new_att_cache = self.attn.forward_chunk(modulate(self.norm1(x), shift_msa, scale_msa), att_cache, mask)
         x = x + gate_msa * x_att
@@ -561,12 +569,10 @@ class DiTFinalLayer(nn.Module):
     """
     The final layer of DiT.
     """
+
     def __init__(self, hidden_size, out_channels):
         super().__init__()
-        self.adaLN_modulation = nn.Sequential(
-            nn.SiLU(),
-            nn.Linear(hidden_size, 2 * hidden_size, bias=True)
-        )
+        self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(hidden_size, 2 * hidden_size, bias=True))
         self.norm_final = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.linear = nn.Linear(hidden_size, out_channels, bias=True)
 
@@ -581,6 +587,7 @@ class DiT(nn.Module):
     """
     Diffusion model with a Transformer backbone.
     """
+
     def __init__(
         self,
         in_channels: int,
@@ -598,9 +605,9 @@ class DiT(nn.Module):
 
         self.in_proj = nn.Linear(in_channels, hidden_size)
 
-        self.blocks = nn.ModuleList([
-            DiTBlock(hidden_size, num_heads, head_dim, mlp_ratio=mlp_ratio) for _ in range(depth)
-        ])
+        self.blocks = nn.ModuleList(
+            [DiTBlock(hidden_size, num_heads, head_dim, mlp_ratio=mlp_ratio) for _ in range(depth)]
+        )
         self.final_layer = DiTFinalLayer(hidden_size, self.out_channels)
 
         self.initialize_weights()
@@ -612,8 +619,8 @@ class DiT(nn.Module):
         self.inference_buffers_chunk = {}
         self.max_size_chunk = {}
 
-        self.register_buffer('att_cache_buffer', torch.zeros((16, 2, 8, 1000, 128)), persistent=False)
-        self.register_buffer('cnn_cache_buffer', torch.zeros((16, 2, 1024, 2)), persistent=False)
+        self.register_buffer("att_cache_buffer", torch.zeros((16, 2, 8, 1000, 128)), persistent=False)
+        self.register_buffer("cnn_cache_buffer", torch.zeros((16, 2, 1024, 2)), persistent=False)
 
     def initialize_weights(self):
         # Initialize transformer layers:
@@ -622,6 +629,7 @@ class DiT(nn.Module):
                 torch.nn.init.xavier_uniform_(module.weight)
                 if module.bias is not None:
                     nn.init.constant_(module.bias, 0)
+
         self.apply(_basic_init)
 
         # Initialize timestep embedding MLP:
@@ -653,7 +661,7 @@ class DiT(nn.Module):
                     self.max_size_chunk[chunk_size] = max_size
                 static_x1 = torch.zeros((2, 320, chunk_size), dtype=dtype, device=device)
                 static_t1 = torch.zeros((2, 1, 512), dtype=dtype, device=device)
-                static_mask1 = torch.ones((2, chunk_size, max_size+chunk_size), dtype=torch.bool, device=device)
+                static_mask1 = torch.ones((2, chunk_size, max_size + chunk_size), dtype=torch.bool, device=device)
                 static_att_cache = torch.zeros((16, 2, 8, max_size, 128), dtype=dtype, device=device)
                 static_cnn_cache = torch.zeros((16, 2, 1024, 2), dtype=dtype, device=device)
                 static_inputs1 = [
@@ -664,7 +672,7 @@ class DiT(nn.Module):
                     static_att_cache,
                 ]
                 static_new_cnn_cache = torch.zeros((16, 2, 1024, 2), dtype=dtype, device=device)
-                static_new_att_cache = torch.zeros((16, 2, 8, max_size+chunk_size, 128), dtype=dtype, device=device)
+                static_new_att_cache = torch.zeros((16, 2, 8, max_size + chunk_size, 128), dtype=dtype, device=device)
                 self.blocks_forward_chunk(
                     static_inputs1[0],
                     static_inputs1[1],
@@ -672,14 +680,23 @@ class DiT(nn.Module):
                     static_inputs1[3],
                     static_inputs1[4],
                     static_new_cnn_cache,
-                    static_new_att_cache)
+                    static_new_att_cache,
+                )
                 graph_chunk = torch.cuda.CUDAGraph()
                 with torch.cuda.graph(graph_chunk):
-                    static_out1 = self.blocks_forward_chunk(static_x1, static_t1, static_mask1, static_cnn_cache, static_att_cache, static_new_cnn_cache, static_new_att_cache)
+                    static_out1 = self.blocks_forward_chunk(
+                        static_x1,
+                        static_t1,
+                        static_mask1,
+                        static_cnn_cache,
+                        static_att_cache,
+                        static_new_cnn_cache,
+                        static_new_att_cache,
+                    )
                 static_outputs1 = [static_out1, static_new_cnn_cache, static_new_att_cache]
                 self.inference_buffers_chunk[chunk_size] = {
-                    'static_inputs': static_inputs1,
-                    'static_outputs': static_outputs1
+                    "static_inputs": static_inputs1,
+                    "static_outputs": static_outputs1,
                 }
                 self.graph_chunk[chunk_size] = graph_chunk
 
@@ -690,11 +707,11 @@ class DiT(nn.Module):
 
     def forward(self, x, mask, mu, t, spks=None, cond=None):
         """Args:
-            x: shape (b, c, t)
-            mask: shape (b, 1, t)
-            t: shape (b,)
-            spks: shape (b, c)
-            cond: shape (b, c, t)
+        x: shape (b, c, t)
+        mask: shape (b, 1, t)
+        t: shape (b,)
+        spks: shape (b, c)
+        cond: shape (b, c, t)
         """
         # (sfy) chunk training strategy should not be open-sourced
 
@@ -719,15 +736,16 @@ class DiT(nn.Module):
         x = x.transpose(1, 2)
         return x
 
-    def forward_chunk(self,
-                      x: torch.Tensor,
-                      mu: torch.Tensor,
-                      t: torch.Tensor,
-                      spks: torch.Tensor,
-                      cond: torch.Tensor,
-                      cnn_cache: torch.Tensor = None,
-                      att_cache: torch.Tensor = None,
-                      ):
+    def forward_chunk(
+        self,
+        x: torch.Tensor,
+        mu: torch.Tensor,
+        t: torch.Tensor,
+        spks: torch.Tensor,
+        cond: torch.Tensor,
+        cnn_cache: torch.Tensor = None,
+        att_cache: torch.Tensor = None,
+    ):
         """
         Args:
             x: shape (b, dt, c)
@@ -758,53 +776,69 @@ class DiT(nn.Module):
         else:
             last_att_len = 0
         chunk_size = x.shape[2]
-        mask = torch.ones(x.shape[0], chunk_size, last_att_len+chunk_size, dtype=torch.bool, device=x.device)
-        if self.use_cuda_graph and att_cache[0] is not None and chunk_size in self.graph_chunk and last_att_len <= self.max_size_chunk[chunk_size]:
-            padded_mask = torch.zeros((2, chunk_size, self.max_size_chunk[chunk_size]+chunk_size), dtype=mask.dtype, device=mask.device)
-            padded_mask[:, :, :mask.shape[-1]] = mask
-            padded_att_cache = torch.zeros((16, 2, 8, self.max_size_chunk[chunk_size], 128), dtype=att_cache.dtype, device=att_cache.device)
+        mask = torch.ones(x.shape[0], chunk_size, last_att_len + chunk_size, dtype=torch.bool, device=x.device)
+        if (
+            self.use_cuda_graph
+            and att_cache[0] is not None
+            and chunk_size in self.graph_chunk
+            and last_att_len <= self.max_size_chunk[chunk_size]
+        ):
+            padded_mask = torch.zeros(
+                (2, chunk_size, self.max_size_chunk[chunk_size] + chunk_size), dtype=mask.dtype, device=mask.device
+            )
+            padded_mask[:, :, : mask.shape[-1]] = mask
+            padded_att_cache = torch.zeros(
+                (16, 2, 8, self.max_size_chunk[chunk_size], 128), dtype=att_cache.dtype, device=att_cache.device
+            )
             padded_att_cache[:, :, :, :last_att_len, :] = att_cache
-            self.inference_buffers_chunk[chunk_size]['static_inputs'][0].copy_(x)
-            self.inference_buffers_chunk[chunk_size]['static_inputs'][1].copy_(t)
-            self.inference_buffers_chunk[chunk_size]['static_inputs'][2].copy_(padded_mask)
-            self.inference_buffers_chunk[chunk_size]['static_inputs'][3].copy_(cnn_cache)
-            self.inference_buffers_chunk[chunk_size]['static_inputs'][4].copy_(padded_att_cache)
+            self.inference_buffers_chunk[chunk_size]["static_inputs"][0].copy_(x)
+            self.inference_buffers_chunk[chunk_size]["static_inputs"][1].copy_(t)
+            self.inference_buffers_chunk[chunk_size]["static_inputs"][2].copy_(padded_mask)
+            self.inference_buffers_chunk[chunk_size]["static_inputs"][3].copy_(cnn_cache)
+            self.inference_buffers_chunk[chunk_size]["static_inputs"][4].copy_(padded_att_cache)
             self.graph_chunk[chunk_size].replay()
-            x = self.inference_buffers_chunk[chunk_size]['static_outputs'][0][:, :, :chunk_size]
-            new_cnn_cache = self.inference_buffers_chunk[chunk_size]['static_outputs'][1]
-            new_att_cache = self.inference_buffers_chunk[chunk_size]['static_outputs'][2][:, :, :, :chunk_size+last_att_len, :]
+            x = self.inference_buffers_chunk[chunk_size]["static_outputs"][0][:, :, :chunk_size]
+            new_cnn_cache = self.inference_buffers_chunk[chunk_size]["static_outputs"][1]
+            new_att_cache = self.inference_buffers_chunk[chunk_size]["static_outputs"][2][
+                :, :, :, : chunk_size + last_att_len, :
+            ]
         else:
             mask = None
-            x = self.blocks_forward_chunk(x, t, mask, cnn_cache, att_cache, self.cnn_cache_buffer, self.att_cache_buffer)
+            x = self.blocks_forward_chunk(
+                x, t, mask, cnn_cache, att_cache, self.cnn_cache_buffer, self.att_cache_buffer
+            )
             new_cnn_cache = self.cnn_cache_buffer
-            new_att_cache = self.att_cache_buffer[:, :, :, :last_att_len+chunk_size, :]
+            new_att_cache = self.att_cache_buffer[:, :, :, : last_att_len + chunk_size, :]
 
         return x, new_cnn_cache, new_att_cache
 
-    def blocks_forward_chunk(self, x, t, mask, cnn_cache=None, att_cache=None, cnn_cache_buffer=None, att_cache_buffer=None):
+    def blocks_forward_chunk(
+        self, x, t, mask, cnn_cache=None, att_cache=None, cnn_cache_buffer=None, att_cache_buffer=None
+    ):
         x = x.transpose(1, 2)
         x = self.in_proj(x)
         for b_idx, block in enumerate(self.blocks):
-            x, this_new_cnn_cache, this_new_att_cache \
-                = block.forward_chunk(x, t, cnn_cache[b_idx], att_cache[b_idx], mask)
+            x, this_new_cnn_cache, this_new_att_cache = block.forward_chunk(
+                x, t, cnn_cache[b_idx], att_cache[b_idx], mask
+            )
             cnn_cache_buffer[b_idx] = this_new_cnn_cache
-            att_cache_buffer[b_idx][:, :, :this_new_att_cache.shape[2], :] = this_new_att_cache
+            att_cache_buffer[b_idx][:, :, : this_new_att_cache.shape[2], :] = this_new_att_cache
         x = self.final_layer(x, t)
         x = x.transpose(1, 2)
         return x
 
 
 class CausalConditionalCFM(torch.nn.Module):
-    def __init__(self, estimator: DiT, inference_cfg_rate:float=0.7):
+    def __init__(self, estimator: DiT, inference_cfg_rate: float = 0.7):
         super().__init__()
         self.estimator = estimator
         self.inference_cfg_rate = inference_cfg_rate
         self.out_channels = estimator.out_channels
-         # a maximum of 600s
-        self.register_buffer('rand_noise', torch.randn([1, self.out_channels, 50 * 600]), persistent=False)
+        # a maximum of 600s
+        self.register_buffer("rand_noise", torch.randn([1, self.out_channels, 50 * 600]), persistent=False)
 
-        self.register_buffer('cnn_cache_buffer', torch.zeros(16, 16, 2, 1024, 2), persistent=False)
-        self.register_buffer('att_cache_buffer', torch.zeros(16, 16, 2, 8, 1000, 128), persistent=False)
+        self.register_buffer("cnn_cache_buffer", torch.zeros(16, 16, 2, 1024, 2), persistent=False)
+        self.register_buffer("att_cache_buffer", torch.zeros(16, 16, 2, 8, 1000, 128), persistent=False)
 
     def scatter_cuda_graph(self, enable_cuda_graph: bool):
         if enable_cuda_graph:
@@ -827,7 +861,7 @@ class CausalConditionalCFM(torch.nn.Module):
         """
         t, _, dt = t_span[0], t_span[-1], t_span[1] - t_span[0]
         t = t.unsqueeze(dim=0)
-        assert self.inference_cfg_rate > 0, 'inference_cfg_rate better > 0'
+        assert self.inference_cfg_rate > 0, "inference_cfg_rate better > 0"
 
         # constant during denoising
         mask_in = torch.cat([mask, mask], dim=0)
@@ -836,7 +870,6 @@ class CausalConditionalCFM(torch.nn.Module):
         cond_in = torch.cat([cond, torch.zeros_like(cond)], dim=0)
 
         for step in range(1, len(t_span)):
-
             x_in = torch.cat([x, x], dim=0)
             t_in = torch.cat([t, t], dim=0)
 
@@ -849,7 +882,7 @@ class CausalConditionalCFM(torch.nn.Module):
                 cond_in,
             )
             dphi_dt, cfg_dphi_dt = torch.split(dphi_dt, [x.size(0), x.size(0)], dim=0)
-            dphi_dt = ((1.0 + self.inference_cfg_rate) * dphi_dt - self.inference_cfg_rate * cfg_dphi_dt)
+            dphi_dt = (1.0 + self.inference_cfg_rate) * dphi_dt - self.inference_cfg_rate * cfg_dphi_dt
             x = x + dt * dphi_dt
             t = t + dt
             if step < len(t_span) - 1:
@@ -859,21 +892,22 @@ class CausalConditionalCFM(torch.nn.Module):
 
     @torch.inference_mode()
     def forward(self, mu, mask, spks, cond, n_timesteps=10, temperature=1.0):
-        z = self.rand_noise[:, :, :mu.size(2)] * temperature
+        z = self.rand_noise[:, :, : mu.size(2)] * temperature
         t_span = torch.linspace(0, 1, n_timesteps + 1, device=mu.device, dtype=mu.dtype)
         # cosine scheduling
         t_span = 1 - torch.cos(t_span * 0.5 * torch.pi)
         return self.solve_euler(z, t_span, mu, mask, spks, cond)
 
-    def solve_euler_chunk(self,
-                          x:torch.Tensor,
-                          t_span:torch.Tensor,
-                          mu:torch.Tensor,
-                          spks:torch.Tensor,
-                          cond:torch.Tensor,
-                          cnn_cache:torch.Tensor=None,
-                          att_cache:torch.Tensor=None,
-                          ):
+    def solve_euler_chunk(
+        self,
+        x: torch.Tensor,
+        t_span: torch.Tensor,
+        mu: torch.Tensor,
+        spks: torch.Tensor,
+        cond: torch.Tensor,
+        cnn_cache: torch.Tensor = None,
+        att_cache: torch.Tensor = None,
+    ):
         """
         Fixed euler solver for ODEs.
         Args:
@@ -890,16 +924,16 @@ class CausalConditionalCFM(torch.nn.Module):
             cnn_cache: shape (n_time, depth, b, c1+c2, 2)
             att_cache: shape (n_time, depth, b, nh, t, c * 2)
         """
-        assert self.inference_cfg_rate > 0, 'cfg rate should be > 0'
+        assert self.inference_cfg_rate > 0, "cfg rate should be > 0"
 
         t, _, dt = t_span[0], t_span[-1], t_span[1] - t_span[0]
         t = t.unsqueeze(dim=0)  # (b,)
 
         # setup initial cache
         if cnn_cache is None:
-            cnn_cache = [None for _ in range(len(t_span)-1)]
+            cnn_cache = [None for _ in range(len(t_span) - 1)]
         if att_cache is None:
-            att_cache = [None for _ in range(len(t_span)-1)]
+            att_cache = [None for _ in range(len(t_span) - 1)]
         # next chunk's cache at each timestep
 
         if att_cache[0] is not None:
@@ -914,42 +948,43 @@ class CausalConditionalCFM(torch.nn.Module):
         for step in range(1, len(t_span)):
             # torch.cuda.memory._record_memory_history(max_entries=100000)
             # torch.cuda.memory._record_memory_history(max_entries=100000)
-            this_att_cache = att_cache[step-1]
-            this_cnn_cache = cnn_cache[step-1]
+            this_att_cache = att_cache[step - 1]
+            this_cnn_cache = cnn_cache[step - 1]
 
             dphi_dt, this_new_cnn_cache, this_new_att_cache = self.estimator.forward_chunk(
-                x = x.repeat(2, 1, 1),
-                mu = mu_in,
-                t = t.repeat(2),
-                spks = spks_in,
-                cond = cond_in,
-                cnn_cache = this_cnn_cache,
-                att_cache = this_att_cache,
+                x=x.repeat(2, 1, 1),
+                mu=mu_in,
+                t=t.repeat(2),
+                spks=spks_in,
+                cond=cond_in,
+                cnn_cache=this_cnn_cache,
+                att_cache=this_att_cache,
             )
             dphi_dt, cfg_dphi_dt = dphi_dt.chunk(2, dim=0)
-            dphi_dt = ((1.0 + self.inference_cfg_rate) * dphi_dt - self.inference_cfg_rate * cfg_dphi_dt)
+            dphi_dt = (1.0 + self.inference_cfg_rate) * dphi_dt - self.inference_cfg_rate * cfg_dphi_dt
             x = x + dt * dphi_dt
             t = t + dt
             if step < len(t_span) - 1:
                 dt = t_span[step + 1] - t
 
-            self.cnn_cache_buffer[step-1] = this_new_cnn_cache
-            self.att_cache_buffer[step-1][:, :, :, :x.shape[2]+last_att_len, :] = this_new_att_cache
+            self.cnn_cache_buffer[step - 1] = this_new_cnn_cache
+            self.att_cache_buffer[step - 1][:, :, :, : x.shape[2] + last_att_len, :] = this_new_att_cache
 
         cnn_cache = self.cnn_cache_buffer
-        att_cache = self.att_cache_buffer[:, :, :, :, :x.shape[2]+last_att_len, :]
+        att_cache = self.att_cache_buffer[:, :, :, :, : x.shape[2] + last_att_len, :]
         return x, cnn_cache, att_cache
 
     @torch.inference_mode()
-    def forward_chunk(self,
-                      mu:torch.Tensor,
-                      spks:torch.Tensor,
-                      cond:torch.Tensor,
-                      n_timesteps:int=10,
-                      temperature:float=1.0,
-                      cnn_cache:torch.Tensor=None,
-                      att_cache:torch.Tensor=None,
-                      ):
+    def forward_chunk(
+        self,
+        mu: torch.Tensor,
+        spks: torch.Tensor,
+        cond: torch.Tensor,
+        n_timesteps: int = 10,
+        temperature: float = 1.0,
+        cnn_cache: torch.Tensor = None,
+        att_cache: torch.Tensor = None,
+    ):
         """
         Args:
             mu(torch.Tensor): shape (b, c, t)
@@ -960,7 +995,7 @@ class CausalConditionalCFM(torch.nn.Module):
         """
         # get offset from att_cache
         offset = att_cache.shape[4] if att_cache is not None else 0
-        z = self.rand_noise[:, :, offset:offset+mu.size(2)] * temperature
+        z = self.rand_noise[:, :, offset : offset + mu.size(2)] * temperature
         t_span = torch.linspace(0, 1, n_timesteps + 1, device=mu.device, dtype=mu.dtype)
         # cosine scheduling
         t_span = 1 - torch.cos(t_span * 0.5 * torch.pi)
@@ -1022,8 +1057,7 @@ class ConformerEncoderLayer(nn.Module):
             self.ff_scale = 1.0
         if self.conv_module is not None:
             self.norm_conv = nn.LayerNorm(size, eps=1e-12)  # for the CNN module
-            self.norm_final = nn.LayerNorm(
-                size, eps=1e-12)  # for the final output of the block
+            self.norm_final = nn.LayerNorm(size, eps=1e-12)  # for the final output of the block
         self.dropout = nn.Dropout(dropout_rate)
         self.size = size
         self.normalize_before = normalize_before
@@ -1074,8 +1108,7 @@ class ConformerEncoderLayer(nn.Module):
             residual = x
             if self.normalize_before:
                 x = self.norm_ff_macaron(x)
-            x = residual + self.ff_scale * self.dropout(
-                self.feed_forward_macaron(x))
+            x = residual + self.ff_scale * self.dropout(self.feed_forward_macaron(x))
             if not self.normalize_before:
                 x = self.norm_ff_macaron(x)
 
@@ -1084,8 +1117,7 @@ class ConformerEncoderLayer(nn.Module):
         if self.normalize_before:
             x = self.norm_mha(x)
         # att_cache: (b, head, cache_t, d_k*2)
-        x_att, new_att_cache = self.self_attn(x, x, x, mask, pos_emb,
-                                              att_cache)
+        x_att, new_att_cache = self.self_attn(x, x, x, mask, pos_emb, att_cache)
         x = residual + self.dropout(x_att)
         if not self.normalize_before:
             x = self.norm_mha(x)
@@ -1131,11 +1163,11 @@ class PositionwiseFeedForward(torch.nn.Module):
     """
 
     def __init__(
-            self,
-            idim: int,
-            hidden_units: int,
-            dropout_rate: float,
-            activation: torch.nn.Module = torch.nn.ReLU(),
+        self,
+        idim: int,
+        hidden_units: int,
+        dropout_rate: float,
+        activation: torch.nn.Module = torch.nn.ReLU(),
     ):
         """Construct a PositionwiseFeedForward object."""
         super(PositionwiseFeedForward, self).__init__()
@@ -1156,14 +1188,12 @@ class PositionwiseFeedForward(torch.nn.Module):
 
 
 class BaseSubsampling(torch.nn.Module):
-
     def __init__(self):
         super().__init__()
         self.right_context = 0
         self.subsampling_rate = 1
 
-    def position_encoding(self, offset: Union[int, torch.Tensor],
-                          size: int) -> torch.Tensor:
+    def position_encoding(self, offset: Union[int, torch.Tensor], size: int) -> torch.Tensor:
         return self.pos_enc.position_encoding(offset, size)
 
 
@@ -1177,8 +1207,7 @@ class LinearNoSubsampling(BaseSubsampling):
 
     """
 
-    def __init__(self, idim: int, odim: int, dropout_rate: float,
-                 pos_enc_class: torch.nn.Module):
+    def __init__(self, idim: int, odim: int, dropout_rate: float, pos_enc_class: torch.nn.Module):
         """Construct an linear object."""
         super().__init__()
         self.out = torch.nn.Sequential(
@@ -1191,10 +1220,7 @@ class LinearNoSubsampling(BaseSubsampling):
         self.subsampling_rate = 1
 
     def forward(
-        self,
-        x: torch.Tensor,
-        x_mask: torch.Tensor,
-        offset: Union[int, torch.Tensor] = 0
+        self, x: torch.Tensor, x_mask: torch.Tensor, offset: Union[int, torch.Tensor] = 0
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Input x.
 
@@ -1253,8 +1279,7 @@ class EspnetRelPositionalEncoding(torch.nn.Module):
         pe_negative = torch.zeros(x.size(1), self.d_model)
         position = torch.arange(0, x.size(1), dtype=torch.float32).unsqueeze(1)
         div_term = torch.exp(
-            torch.arange(0, self.d_model, 2, dtype=torch.float32)
-            * -(math.log(10000.0) / self.d_model)
+            torch.arange(0, self.d_model, 2, dtype=torch.float32) * -(math.log(10000.0) / self.d_model)
         )
         pe_positive[:, 0::2] = torch.sin(position * div_term)
         pe_positive[:, 1::2] = torch.cos(position * div_term)
@@ -1269,8 +1294,7 @@ class EspnetRelPositionalEncoding(torch.nn.Module):
         pe = torch.cat([pe_positive, pe_negative], dim=1)
         self.pe = pe.to(device=x.device, dtype=x.dtype)
 
-    def forward(self, x: torch.Tensor, offset: Union[int, torch.Tensor] = 0) \
-            -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor, offset: Union[int, torch.Tensor] = 0) -> Tuple[torch.Tensor, torch.Tensor]:
         """Add positional encoding.
 
         Args:
@@ -1285,10 +1309,8 @@ class EspnetRelPositionalEncoding(torch.nn.Module):
         pos_emb = self.position_encoding(size=x.size(1), offset=offset)
         return self.dropout(x), self.dropout(pos_emb)
 
-    def position_encoding(self,
-                          offset: Union[int, torch.Tensor],
-                          size: int) -> torch.Tensor:
-        """ For getting encoding in a streaming fashion
+    def position_encoding(self, offset: Union[int, torch.Tensor], size: int) -> torch.Tensor:
+        """For getting encoding in a streaming fashion
 
         Attention!!!!!
         we apply dropout only once at the whole utterance level in a none
@@ -1305,7 +1327,7 @@ class EspnetRelPositionalEncoding(torch.nn.Module):
         """
         pos_emb = self.pe[
             :,
-            self.pe.size(1) // 2 - size + 1: self.pe.size(1) // 2 + size,
+            self.pe.size(1) // 2 - size + 1 : self.pe.size(1) // 2 + size,
         ]
         return pos_emb
 
@@ -1320,11 +1342,7 @@ class FlowEncoderMultiHeadedAttention(nn.Module):
 
     """
 
-    def __init__(self,
-                 n_head: int,
-                 n_feat: int,
-                 dropout_rate: float,
-                 key_bias: bool = True):
+    def __init__(self, n_head: int, n_feat: int, dropout_rate: float, key_bias: bool = True):
         """Construct an MultiHeadedAttention object."""
         super().__init__()
         assert n_feat % n_head == 0
@@ -1367,10 +1385,7 @@ class FlowEncoderMultiHeadedAttention(nn.Module):
         return q, k, v
 
     def forward_attention(
-        self,
-        value: torch.Tensor,
-        scores: torch.Tensor,
-        mask: torch.Tensor = torch.ones((0, 0, 0), dtype=torch.bool)
+        self, value: torch.Tensor, scores: torch.Tensor, mask: torch.Tensor = torch.ones((0, 0, 0), dtype=torch.bool)
     ) -> torch.Tensor:
         """Compute attention context vector.
 
@@ -1395,10 +1410,9 @@ class FlowEncoderMultiHeadedAttention(nn.Module):
         if mask.size(2) > 0:  # time2 > 0
             mask = mask.unsqueeze(1).eq(0)  # (batch, 1, *, time2)
             # For last chunk, time2 might be larger than scores.size(-1)
-            mask = mask[:, :, :, :scores.size(-1)]  # (batch, 1, *, time2)
-            scores = scores.masked_fill(mask, -float('inf'))
-            attn = torch.softmax(scores, dim=-1).masked_fill(
-                mask, 0.0)  # (batch, head, time1, time2)
+            mask = mask[:, :, :, : scores.size(-1)]  # (batch, 1, *, time2)
+            scores = scores.masked_fill(mask, -float("inf"))
+            attn = torch.softmax(scores, dim=-1).masked_fill(mask, 0.0)  # (batch, head, time1, time2)
         # NOTE(xcsong): When will `if mask.size(2) > 0` be False?
         #   1. onnx(16/-1, -1/-1, 16/0)
         #   2. jit (16/-1, -1/-1, 16/0, 16/4)
@@ -1407,9 +1421,7 @@ class FlowEncoderMultiHeadedAttention(nn.Module):
 
         p_attn = self.dropout(attn)
         x = torch.matmul(p_attn, value)  # (batch, head, time1, d_k)
-        x = (x.transpose(1, 2).contiguous().view(n_batch, -1,
-                                                 self.h * self.d_k)
-             )  # (batch, time1, d_model)
+        x = x.transpose(1, 2).contiguous().view(n_batch, -1, self.h * self.d_k)  # (batch, time1, d_model)
 
         return self.linear_out(x)  # (batch, time1, d_model)
 
@@ -1420,7 +1432,7 @@ class FlowEncoderMultiHeadedAttention(nn.Module):
         value: torch.Tensor,
         mask: torch.Tensor = torch.ones((0, 0, 0), dtype=torch.bool),
         pos_emb: torch.Tensor = torch.empty(0),
-        cache: torch.Tensor = torch.zeros((0, 0, 0, 0))
+        cache: torch.Tensor = torch.zeros((0, 0, 0, 0)),
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Compute scaled dot product attention.
 
@@ -1471,9 +1483,7 @@ class FlowEncoderMultiHeadedAttention(nn.Module):
         # >>> d = torch.split(a, 2, dim=-1)
         # >>> torch.equal(d[0], d[1])  # True
         if cache.size(0) > 0:
-            key_cache, value_cache = torch.split(cache,
-                                                 cache.size(-1) // 2,
-                                                 dim=-1)
+            key_cache, value_cache = torch.split(cache, cache.size(-1) // 2, dim=-1)
             k = torch.cat([key_cache, k], dim=2)
             v = torch.cat([value_cache, v], dim=2)
         # NOTE(xcsong): We do cache slicing in encoder.forward_chunk, since it's
@@ -1493,11 +1503,7 @@ class RelPositionMultiHeadedAttention(FlowEncoderMultiHeadedAttention):
         dropout_rate (float): Dropout rate.
     """
 
-    def __init__(self,
-                 n_head: int,
-                 n_feat: int,
-                 dropout_rate: float,
-                 key_bias: bool = True):
+    def __init__(self, n_head: int, n_feat: int, dropout_rate: float, key_bias: bool = True):
         """Construct an RelPositionMultiHeadedAttention object."""
         super().__init__(n_head, n_feat, dropout_rate, key_bias)
         # linear transformation for positional encoding
@@ -1520,17 +1526,11 @@ class RelPositionMultiHeadedAttention(FlowEncoderMultiHeadedAttention):
             torch.Tensor: Output tensor.
 
         """
-        zero_pad = torch.zeros((x.size()[0], x.size()[1], x.size()[2], 1),
-                               device=x.device,
-                               dtype=x.dtype)
+        zero_pad = torch.zeros((x.size()[0], x.size()[1], x.size()[2], 1), device=x.device, dtype=x.dtype)
         x_padded = torch.cat([zero_pad, x], dim=-1)
 
-        x_padded = x_padded.view(x.size()[0],
-                                 x.size()[1],
-                                 x.size(3) + 1, x.size(2))
-        x = x_padded[:, :, 1:].view_as(x)[
-            :, :, :, : x.size(-1) // 2 + 1
-        ]  # only keep the positions from 0 to time2
+        x_padded = x_padded.view(x.size()[0], x.size()[1], x.size(3) + 1, x.size(2))
+        x = x_padded[:, :, 1:].view_as(x)[:, :, :, : x.size(-1) // 2 + 1]  # only keep the positions from 0 to time2
         return x
 
     def forward(
@@ -1609,8 +1609,7 @@ class RelPositionMultiHeadedAttention(FlowEncoderMultiHeadedAttention):
         if matrix_ac.shape != matrix_bd.shape:
             matrix_bd = self.rel_shift(matrix_bd)
 
-        scores = (matrix_ac + matrix_bd) / math.sqrt(
-            self.d_k)  # (batch, head, time1, time2)
+        scores = (matrix_ac + matrix_bd) / math.sqrt(self.d_k)  # (batch, head, time1, time2)
 
         return self.forward_attention(v, scores, mask), new_cache
 
@@ -1644,11 +1643,13 @@ class Upsample1D(nn.Module):
         outputs = self.conv(outputs)
         return outputs, input_lengths * self.stride
 
-    def forward_chunk(self, inputs: torch.Tensor, input_lengths: torch.Tensor, cache: torch.Tensor = torch.zeros((0, 0, 0))):
+    def forward_chunk(
+        self, inputs: torch.Tensor, input_lengths: torch.Tensor, cache: torch.Tensor = torch.zeros((0, 0, 0))
+    ):
         """
         Args:
             inputs(torch.Tensor): shape (b, c, t)
-            input_length(torch.Tensor): shape (b), can be None 
+            input_length(torch.Tensor): shape (b), can be None
             cache(torch.Tensor): shape (b, c, cache_t), where cache_t = stride * 2
         """
         outputs = F.interpolate(inputs, scale_factor=self.scale_factor, mode="nearest")
@@ -1656,7 +1657,7 @@ class Upsample1D(nn.Module):
         if cache is None:
             cache = inputs.new_zeros(inputs.shape[0], inputs.shape[1], self.stride * 2)
         outputs = torch.cat([cache, outputs], dim=2)
-        new_cache = outputs[..., -self.stride*2:]
+        new_cache = outputs[..., -self.stride * 2 :]
         outputs = self.conv(outputs)
 
         if input_lengths is not None:
@@ -1670,13 +1671,18 @@ class PreLookaheadLayer(nn.Module):
         self.channels = channels
         self.pre_lookahead_len = pre_lookahead_len
         self.conv1 = nn.Conv1d(
-            channels, channels,
+            channels,
+            channels,
             kernel_size=pre_lookahead_len + 1,
-            stride=1, padding=0,
+            stride=1,
+            padding=0,
         )
         self.conv2 = nn.Conv1d(
-            channels, channels,
-            kernel_size=3, stride=1, padding=0,
+            channels,
+            channels,
+            kernel_size=3,
+            stride=1,
+            padding=0,
         )
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
@@ -1685,10 +1691,10 @@ class PreLookaheadLayer(nn.Module):
         """
         outputs = inputs.transpose(1, 2).contiguous()
         # look ahead
-        outputs = F.pad(outputs, (0, self.pre_lookahead_len), mode='constant', value=0.0)
+        outputs = F.pad(outputs, (0, self.pre_lookahead_len), mode="constant", value=0.0)
         outputs = F.leaky_relu(self.conv1(outputs))
         # outputs
-        outputs = F.pad(outputs, (2, 0), mode='constant', value=0.0)
+        outputs = F.pad(outputs, (2, 0), mode="constant", value=0.0)
         outputs = self.conv2(outputs)
         outputs = outputs.transpose(1, 2).contiguous()
 
@@ -1713,12 +1719,11 @@ class PreLookaheadLayer(nn.Module):
         outputs = self.conv2(outputs)
         outputs = outputs.transpose(1, 2).contiguous()
         # residual connection
-        outputs = outputs + inputs[:, :-self.pre_lookahead_len]
+        outputs = outputs + inputs[:, : -self.pre_lookahead_len]
         return outputs, new_cache
 
 
 class UpsampleConformerEncoderV2(torch.nn.Module):
-
     def __init__(
         self,
         # input & output
@@ -1754,10 +1759,7 @@ class UpsampleConformerEncoderV2(torch.nn.Module):
             input_size,
             output_size,
             dropout_rate,
-            EspnetRelPositionalEncoding(
-                output_size,
-                positional_dropout_rate
-            ),
+            EspnetRelPositionalEncoding(output_size, positional_dropout_rate),
         )
 
         self.normalize_before = normalize_before
@@ -1777,51 +1779,44 @@ class UpsampleConformerEncoderV2(torch.nn.Module):
             dropout_rate,
             activation,
         )
-        self.pre_lookahead_layer = PreLookaheadLayer(
-            channels=output_size,
-            pre_lookahead_len=pre_lookahead_len
+        self.pre_lookahead_layer = PreLookaheadLayer(channels=output_size, pre_lookahead_len=pre_lookahead_len)
+        self.encoders = torch.nn.ModuleList(
+            [
+                ConformerEncoderLayer(
+                    output_size,
+                    RelPositionMultiHeadedAttention(*encoder_selfattn_layer_args),
+                    PositionwiseFeedForward(*positionwise_layer_args),
+                    None,
+                    None,
+                    dropout_rate,
+                    normalize_before,
+                )
+                for _ in range(num_blocks)
+            ]
         )
-        self.encoders = torch.nn.ModuleList([
-            ConformerEncoderLayer(
-                output_size,
-                RelPositionMultiHeadedAttention(
-                    *encoder_selfattn_layer_args
-                ),
-                PositionwiseFeedForward(*positionwise_layer_args),
-                None,
-                None,
-                dropout_rate,
-                normalize_before,
-            ) for _ in range(num_blocks)
-        ])
         self.up_layer = Upsample1D(
-            channels=output_size,
-            out_channels=output_size,
-            stride=up_stride,
-            scale_factor=up_scale_factor
+            channels=output_size, out_channels=output_size, stride=up_stride, scale_factor=up_scale_factor
         )
         self.up_embed = LinearNoSubsampling(
             input_size,
             output_size,
             dropout_rate,
-            EspnetRelPositionalEncoding(
-                output_size,
-                positional_dropout_rate
-            ),
+            EspnetRelPositionalEncoding(output_size, positional_dropout_rate),
         )
-        self.up_encoders = torch.nn.ModuleList([
-            ConformerEncoderLayer(
-                output_size,
-                RelPositionMultiHeadedAttention(
-                    *encoder_selfattn_layer_args
-                ),
-                PositionwiseFeedForward(*positionwise_layer_args),
-                None,
-                None,
-                dropout_rate,
-                normalize_before,
-            ) for _ in range(num_up_blocks)
-        ])
+        self.up_encoders = torch.nn.ModuleList(
+            [
+                ConformerEncoderLayer(
+                    output_size,
+                    RelPositionMultiHeadedAttention(*encoder_selfattn_layer_args),
+                    PositionwiseFeedForward(*positionwise_layer_args),
+                    None,
+                    None,
+                    dropout_rate,
+                    normalize_before,
+                )
+                for _ in range(num_up_blocks)
+            ]
+        )
 
         self.enable_cuda_graph = False
         self.use_cuda_graph = False
@@ -1842,12 +1837,9 @@ class UpsampleConformerEncoderV2(torch.nn.Module):
         """初始化 CUDA Graph"""
 
         for l in range(100, 1500, 10):
-            static_x = torch.zeros((1, l, 512),
-                                dtype=torch.float32, device=torch.device('cuda'))
-            static_mask = torch.ones((1, 1, l),
-                                    dtype=torch.bool, device=torch.device('cuda'))
-            static_pos_emb = torch.zeros((1, 2*l-1, 512),
-                                        dtype=torch.float32, device=torch.device('cuda'))
+            static_x = torch.zeros((1, l, 512), dtype=torch.float32, device=torch.device("cuda"))
+            static_mask = torch.ones((1, 1, l), dtype=torch.bool, device=torch.device("cuda"))
+            static_pos_emb = torch.zeros((1, 2 * l - 1, 512), dtype=torch.float32, device=torch.device("cuda"))
 
             static_inputs = [
                 static_x,
@@ -1863,27 +1855,17 @@ class UpsampleConformerEncoderV2(torch.nn.Module):
             graph = torch.cuda.CUDAGraph()
             with torch.no_grad():
                 with torch.cuda.graph(graph):
-                    static_out_x = self._forward_impl_encoder(
-                        static_inputs[0],
-                        static_inputs[1],
-                        static_inputs[2]
-                    )
+                    static_out_x = self._forward_impl_encoder(static_inputs[0], static_inputs[1], static_inputs[2])
             self.graph_encoder[l] = graph
             static_outputs = [
                 static_out_x,
             ]
-            self.inference_buffers_encoder[l] = {
-                'static_inputs': static_inputs,
-                'static_outputs': static_outputs
-            }
+            self.inference_buffers_encoder[l] = {"static_inputs": static_inputs, "static_outputs": static_outputs}
 
         for l in range(100, 1500, 10):
-            static_x = torch.zeros((1, l, 512),
-                                dtype=torch.float32, device=torch.device('cuda'))
-            static_mask = torch.ones((1, 1, l),
-                                    dtype=torch.bool, device=torch.device('cuda'))
-            static_pos_emb = torch.zeros((1, 2*l-1, 512),
-                                        dtype=torch.float32, device=torch.device('cuda'))
+            static_x = torch.zeros((1, l, 512), dtype=torch.float32, device=torch.device("cuda"))
+            static_mask = torch.ones((1, 1, l), dtype=torch.bool, device=torch.device("cuda"))
+            static_pos_emb = torch.zeros((1, 2 * l - 1, 512), dtype=torch.float32, device=torch.device("cuda"))
 
             static_inputs = [
                 static_x,
@@ -1899,37 +1881,24 @@ class UpsampleConformerEncoderV2(torch.nn.Module):
             graph = torch.cuda.CUDAGraph()
             with torch.no_grad():
                 with torch.cuda.graph(graph):
-                    static_out_x = self._forward_impl_up_encoder(
-                        static_inputs[0],
-                        static_inputs[1],
-                        static_inputs[2]
-                    )
+                    static_out_x = self._forward_impl_up_encoder(static_inputs[0], static_inputs[1], static_inputs[2])
             self.graph_up_encoder[l] = graph
             static_outputs = [
                 static_out_x,
             ]
-            self.inference_buffers_up_encoder[l] = {
-                'static_inputs': static_inputs,
-                'static_outputs': static_outputs
-            }
+            self.inference_buffers_up_encoder[l] = {"static_inputs": static_inputs, "static_outputs": static_outputs}
 
         self.use_cuda_graph = True
         print("CUDA Graph initialized successfully for encoder and up_encoder")
 
     # @torch.compile(dynamic=True,backend="eager")
-    def _forward_impl_encoder(self,
-                             x: torch.Tensor,
-                             mask: torch.Tensor,
-                             pos_emb: torch.Tensor):
+    def _forward_impl_encoder(self, x: torch.Tensor, mask: torch.Tensor, pos_emb: torch.Tensor):
         for layer in self.encoders:
             x, _, _, _ = layer(x, mask, pos_emb)
         return x
 
     # @torch.compile(dynamic=True,backend="eager")
-    def _forward_impl_up_encoder(self,
-                             x: torch.Tensor,
-                             mask: torch.Tensor,
-                             pos_emb: torch.Tensor):
+    def _forward_impl_up_encoder(self, x: torch.Tensor, mask: torch.Tensor, pos_emb: torch.Tensor):
         for layer in self.up_encoders:
             x, _, _, _ = layer(x, mask, pos_emb)
         return x
@@ -1952,11 +1921,11 @@ class UpsampleConformerEncoderV2(torch.nn.Module):
         xs = self.pre_lookahead_layer(xs)
         # conformer block
         if self.enable_cuda_graph and xs.shape[1] in self.graph_encoder:
-            self.inference_buffers_encoder[xs.shape[1]]['static_inputs'][0].copy_(xs)
-            self.inference_buffers_encoder[xs.shape[1]]['static_inputs'][1].copy_(masks)
-            self.inference_buffers_encoder[xs.shape[1]]['static_inputs'][2].copy_(pos_emb)
+            self.inference_buffers_encoder[xs.shape[1]]["static_inputs"][0].copy_(xs)
+            self.inference_buffers_encoder[xs.shape[1]]["static_inputs"][1].copy_(masks)
+            self.inference_buffers_encoder[xs.shape[1]]["static_inputs"][2].copy_(pos_emb)
             self.graph_encoder[xs.shape[1]].replay()
-            xs = self.inference_buffers_encoder[xs.shape[1]]['static_outputs'][0]
+            xs = self.inference_buffers_encoder[xs.shape[1]]["static_outputs"][0]
         else:
             xs = self._forward_impl_encoder(xs, masks, pos_emb)
         # upsample
@@ -1969,11 +1938,11 @@ class UpsampleConformerEncoderV2(torch.nn.Module):
         masks = ~make_pad_mask(xs_lens, T).unsqueeze(1)  # (B, 1, T)
         xs, pos_emb, masks = self.up_embed(xs, masks)
         if self.enable_cuda_graph and xs.shape[1] in self.graph_up_encoder:
-            self.inference_buffers_up_encoder[xs.shape[1]]['static_inputs'][0].copy_(xs)
-            self.inference_buffers_up_encoder[xs.shape[1]]['static_inputs'][1].copy_(masks)
-            self.inference_buffers_up_encoder[xs.shape[1]]['static_inputs'][2].copy_(pos_emb)
+            self.inference_buffers_up_encoder[xs.shape[1]]["static_inputs"][0].copy_(xs)
+            self.inference_buffers_up_encoder[xs.shape[1]]["static_inputs"][1].copy_(masks)
+            self.inference_buffers_up_encoder[xs.shape[1]]["static_inputs"][2].copy_(pos_emb)
             self.graph_up_encoder[xs.shape[1]].replay()
-            xs = self.inference_buffers_up_encoder[xs.shape[1]]['static_outputs'][0]
+            xs = self.inference_buffers_up_encoder[xs.shape[1]]["static_outputs"][0]
         else:
             xs = self._forward_impl_up_encoder(xs, masks, pos_emb)
         # post norm
@@ -1981,13 +1950,14 @@ class UpsampleConformerEncoderV2(torch.nn.Module):
             xs = self.after_norm(xs)
         return xs, masks
 
-    @torch.compile(dynamic=True,backend="eager")
-    def forward_chunk(self,
-                      xs: torch.Tensor,
-                      last_chunk: bool = False,
-                      cnn_cache: torch.Tensor = None,
-                      att_cache: torch.Tensor = None,
-                      ):
+    # @torch.compile(dynamic=True,backend="eager")
+    def forward_chunk(
+        self,
+        xs: torch.Tensor,
+        last_chunk: bool = False,
+        cnn_cache: torch.Tensor = None,
+        att_cache: torch.Tensor = None,
+    ):
         """
         Args:
             xs: shape (b, dt, c)
@@ -1998,12 +1968,14 @@ class UpsampleConformerEncoderV2(torch.nn.Module):
         if att_cache is not None:
             assert att_cache.shape[3] % 2 == 0, att_cache.shape
         if cnn_cache is not None:
-            assert cnn_cache.shape[2] == 2+self.up_layer.stride*2, cnn_cache.shape
+            assert cnn_cache.shape[2] == 2 + self.up_layer.stride * 2, cnn_cache.shape
 
         # unpack caches
         offset1 = att_cache.shape[3] // 2 if att_cache is not None else 0
-        att_cache1 = att_cache[:len(self.encoders), :, :, :offset1] if att_cache is not None else [None] * len(self.encoders)
-        att_cache2 = att_cache[len(self.encoders):] if att_cache is not None else [None] * len(self.encoders)
+        att_cache1 = (
+            att_cache[: len(self.encoders), :, :, :offset1] if att_cache is not None else [None] * len(self.encoders)
+        )
+        att_cache2 = att_cache[len(self.encoders) :] if att_cache is not None else [None] * len(self.encoders)
         cnn_cache1 = cnn_cache[:, :, :2] if cnn_cache is not None else None
         cnn_cache2 = cnn_cache[:, :, 2:] if cnn_cache is not None else None
         xs, _, _ = self.embed(xs, None)
@@ -2039,7 +2011,7 @@ class UpsampleConformerEncoderV2(torch.nn.Module):
         pos_emb = self.embed.position_encoding(offset=None, size=offset1 * self.up_layer.stride + xs.shape[1])
 
         # second conformer
-        chunk_masks = torch.zeros((0, 0, 0),dtype=torch.bfloat16)
+        chunk_masks = torch.zeros((0, 0, 0), dtype=torch.bfloat16)
         new_att_cache2 = []
 
         for idx, layer in enumerate(self.up_encoders):
@@ -2058,16 +2030,17 @@ class UpsampleConformerEncoderV2(torch.nn.Module):
 
 
 class CausalMaskedDiffWithXvec(torch.nn.Module):
-    def __init__(self,
-                 input_size: int = 512,
-                 output_size: int = 80,
-                 spk_embed_dim: int = 192,
-                 output_type: str = "mel",
-                 vocab_size: int = 5121,
-                 encoder: UpsampleConformerEncoderV2 = None,
-                 decoder: CausalConditionalCFM = None,
-                 input_embedding: torch.nn.Module = None,
-                 ):
+    def __init__(
+        self,
+        input_size: int = 512,
+        output_size: int = 80,
+        spk_embed_dim: int = 192,
+        output_type: str = "mel",
+        vocab_size: int = 5121,
+        encoder: UpsampleConformerEncoderV2 = None,
+        decoder: CausalConditionalCFM = None,
+        input_embedding: torch.nn.Module = None,
+    ):
         super().__init__()
         self.input_size = input_size
         self.output_size = output_size
@@ -2099,16 +2072,17 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
             self.decoder.scatter_cuda_graph(enable_cuda_graph)
 
     @torch.inference_mode()
-    def inference(self,
-                  token,
-                  token_len,
-                  prompt_token,
-                  prompt_token_len,
-                  prompt_feat,
-                  prompt_feat_len,
-                  embedding,
-                  n_timesteps: int = 10,
-                  ):
+    def inference(
+        self,
+        token,
+        token_len,
+        prompt_token,
+        prompt_token_len,
+        prompt_feat,
+        prompt_feat_len,
+        embedding,
+        n_timesteps: int = 10,
+    ):
         assert token.shape[0] == 1
 
         # xvec projection
@@ -2149,12 +2123,13 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
         return feat
 
     @torch.inference_mode()
-    def setup_cache(self,
-                    token: torch.Tensor,
-                    mel: torch.Tensor,
-                    spk: torch.Tensor,
-                    n_timesteps: int = 10,
-                    ):
+    def setup_cache(
+        self,
+        token: torch.Tensor,
+        mel: torch.Tensor,
+        spk: torch.Tensor,
+        n_timesteps: int = 10,
+    ):
         """
         Args:
             token: shape (b, t), with look ahead tokens
@@ -2162,7 +2137,7 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
             spk: shape (b, 192), speaker embedding
         Returns:
             cache: dict {
-                'conformer': {'cnn_cache': xxx, 'att_cache': xxx}, 
+                'conformer': {'cnn_cache': xxx, 'att_cache': xxx},
                 'estimator': {'cnn_cache': xxx, 'att_cache': xxx}
             }
         """
@@ -2176,39 +2151,40 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
         token = self.input_embedding(token)
         # NOTE encoder.forward_chunk will strip the look ahead part
         h, conformer_cnn_cache, conformer_att_cache = self.encoder.forward_chunk(
-            xs = token,
-            last_chunk = False,
-            cnn_cache = None,
-            att_cache = None,
+            xs=token,
+            last_chunk=False,
+            cnn_cache=None,
+            att_cache=None,
         )
         h = self.encoder_proj(h)
 
         feat, estimator_cnn_cache, estimator_att_cache = self.decoder.forward_chunk(
-            mu = h.transpose(1, 2).contiguous(),
-            spks = spk,
-            cond = mel.transpose(1, 2).contiguous(),
-            n_timesteps = n_timesteps,
-            temperature = 1.0,
-            cnn_cache = None,
-            att_cache = None,
+            mu=h.transpose(1, 2).contiguous(),
+            spks=spk,
+            cond=mel.transpose(1, 2).contiguous(),
+            n_timesteps=n_timesteps,
+            temperature=1.0,
+            cnn_cache=None,
+            att_cache=None,
         )
 
         cache = {
-            'conformer_cnn_cache': conformer_cnn_cache,
-            'conformer_att_cache': conformer_att_cache,
-            'estimator_cnn_cache': estimator_cnn_cache,
-            'estimator_att_cache': estimator_att_cache,
+            "conformer_cnn_cache": conformer_cnn_cache,
+            "conformer_att_cache": conformer_att_cache,
+            "estimator_cnn_cache": estimator_cnn_cache,
+            "estimator_att_cache": estimator_att_cache,
         }
         return cache
 
     @torch.inference_mode()
-    def inference_chunk(self,
-                        token: torch.Tensor,
-                        spk: torch.Tensor,
-                        cache: dict,
-                        last_chunk: bool = False,
-                        n_timesteps: int = 10,
-                        ):
+    def inference_chunk(
+        self,
+        token: torch.Tensor,
+        spk: torch.Tensor,
+        cache: dict,
+        last_chunk: bool = False,
+        n_timesteps: int = 10,
+    ):
         """
         Args:
             token: shape (b, t), with look ahead tokens
@@ -2219,10 +2195,10 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
             }
         """
         # unpack cache
-        conformer_cnn_cache = cache['conformer_cnn_cache']
-        conformer_att_cache = cache['conformer_att_cache']
-        estimator_cnn_cache = cache['estimator_cnn_cache']
-        estimator_att_cache = cache['estimator_att_cache']
+        conformer_cnn_cache = cache["conformer_cnn_cache"]
+        conformer_att_cache = cache["conformer_att_cache"]
+        estimator_cnn_cache = cache["estimator_cnn_cache"]
+        estimator_att_cache = cache["estimator_att_cache"]
 
         # xvec projection
         spk = F.normalize(spk, dim=1)
@@ -2231,36 +2207,33 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
         token = self.input_embedding(token)
         # if not the last chunk, h is shorter than xs for a length of lookahead_length * stride (6)
         h, conformer_cnn_cache, conformer_att_cache = self.encoder.forward_chunk(
-            xs = token,
-            last_chunk = last_chunk,
-            cnn_cache = conformer_cnn_cache,
-            att_cache = conformer_att_cache,
+            xs=token,
+            last_chunk=last_chunk,
+            cnn_cache=conformer_cnn_cache,
+            att_cache=conformer_att_cache,
         )
         h = self.encoder_proj(h)
 
         cond = torch.zeros_like(h)
         # forward estimator
         feat, estimator_cnn_cache, estimator_att_cache = self.decoder.forward_chunk(
-            mu = h.transpose(1, 2).contiguous(),
-            spks = spk,
-            cond = cond.transpose(1, 2).contiguous(),
-            n_timesteps = n_timesteps,
-            temperature = 1.0,
-            cnn_cache = estimator_cnn_cache,
-            att_cache = estimator_att_cache,
+            mu=h.transpose(1, 2).contiguous(),
+            spks=spk,
+            cond=cond.transpose(1, 2).contiguous(),
+            n_timesteps=n_timesteps,
+            temperature=1.0,
+            cnn_cache=estimator_cnn_cache,
+            att_cache=estimator_att_cache,
         )
 
-
         new_cache = {
-            'conformer_cnn_cache': conformer_cnn_cache,
-            'conformer_att_cache': conformer_att_cache,
-            'estimator_cnn_cache': estimator_cnn_cache,
-            'estimator_att_cache': estimator_att_cache,
+            "conformer_cnn_cache": conformer_cnn_cache,
+            "conformer_att_cache": conformer_att_cache,
+            "estimator_cnn_cache": estimator_cnn_cache,
+            "estimator_att_cache": estimator_att_cache,
         }
 
         return feat, new_cache
-
-
 
 
 def init_weights(m, mean=0.0, std=0.01):
@@ -2268,10 +2241,11 @@ def init_weights(m, mean=0.0, std=0.01):
     if classname.find("Conv") != -1:
         m.weight.data.normal_(mean, std)
 
+
 # Implementation adapted from https://github.com/EdwardDixon/snake under the MIT license.
 #   LICENSE is in incl_licenses directory.
 class Snake(nn.Module):
-    '''
+    """
     Implementation of a sine-based periodic activation function
     Shape:
         - Input: (B, C, T)
@@ -2293,7 +2267,8 @@ class Snake(nn.Module):
         alpha_logscale: whether to use log scale for alpha
             alpha is initialized to 1 by default, higher values = higher-frequency.
             alpha will be trained along with the rest of your model.
-    '''
+    """
+
     def __init__(self, in_features, alpha=1.0, alpha_trainable=True, alpha_logscale=False):
         super(Snake, self).__init__()
         self.in_features = in_features
@@ -2310,11 +2285,11 @@ class Snake(nn.Module):
         self.no_div_by_zero = 0.000000001
 
     def forward(self, x):
-        '''
+        """
         Forward pass of the function.
         Applies the function to the input elementwise.
         Snake ∶= x + 1/a * sin^2 (xa)
-        '''
+        """
         alpha = self.alpha.unsqueeze(0).unsqueeze(-1)  # line up with x to [B, C, T]
         if self.alpha_logscale:
             alpha = torch.exp(alpha)
@@ -2325,6 +2300,7 @@ class Snake(nn.Module):
 
 class ResBlock(torch.nn.Module):
     """Residual block module in HiFiGAN/BigVGAN."""
+
     def __init__(
         self,
         channels: int = 512,
@@ -2344,32 +2320,19 @@ class ResBlock(torch.nn.Module):
                         kernel_size,
                         1,
                         dilation=dilation,
-                        padding=self.get_padding(kernel_size, dilation)
+                        padding=self.get_padding(kernel_size, dilation),
                     )
                 )
             )
             self.convs2.append(
                 weight_norm(  # noqa
-                    nn.Conv1d(
-                        channels,
-                        channels,
-                        kernel_size,
-                        1,
-                        dilation=1,
-                        padding=self.get_padding(kernel_size, 1)
-                    )
+                    nn.Conv1d(channels, channels, kernel_size, 1, dilation=1, padding=self.get_padding(kernel_size, 1))
                 )
             )
         self.convs1.apply(init_weights)
         self.convs2.apply(init_weights)
-        self.activations1 = nn.ModuleList([
-            Snake(channels, alpha_logscale=False)
-            for _ in range(len(self.convs1))
-        ])
-        self.activations2 = nn.ModuleList([
-            Snake(channels, alpha_logscale=False)
-            for _ in range(len(self.convs2))
-        ])
+        self.activations1 = nn.ModuleList([Snake(channels, alpha_logscale=False) for _ in range(len(self.convs1))])
+        self.activations2 = nn.ModuleList([Snake(channels, alpha_logscale=False) for _ in range(len(self.convs2))])
 
     def get_padding(self, kernel_size, dilation=1):
         return int((kernel_size * dilation - dilation) / 2)
@@ -2390,7 +2353,7 @@ class ResBlock(torch.nn.Module):
 
 
 class SineGen2(torch.nn.Module):
-    """ Definition of sine generator
+    """Definition of sine generator
     SineGen(samp_rate, harmonic_num = 0,
             sine_amp = 0.1, noise_std = 0.003,
             voiced_threshold = 0,
@@ -2405,10 +2368,16 @@ class SineGen2(torch.nn.Module):
         segment is always sin(np.pi) or cos(0)
     """
 
-    def __init__(self, samp_rate, upsample_scale, harmonic_num=0,
-                 sine_amp=0.1, noise_std=0.003,
-                 voiced_threshold=0,
-                 flag_for_pulse=False):
+    def __init__(
+        self,
+        samp_rate,
+        upsample_scale,
+        harmonic_num=0,
+        sine_amp=0.1,
+        noise_std=0.003,
+        voiced_threshold=0,
+        flag_for_pulse=False,
+    ):
         super(SineGen2, self).__init__()
         self.sine_amp = sine_amp
         self.noise_std = noise_std
@@ -2425,8 +2394,8 @@ class SineGen2(torch.nn.Module):
         return uv
 
     def _f02sine(self, f0_values):
-        """ f0_values: (batchsize, length, dim)
-            where dim indicates fundamental tone and overtones
+        """f0_values: (batchsize, length, dim)
+        where dim indicates fundamental tone and overtones
         """
         # convert to F0 in rad. The interger part n can be ignored
         # because 2 * np.pi * n doesn't affect phase
@@ -2439,13 +2408,14 @@ class SineGen2(torch.nn.Module):
 
         # instantanouse phase sine[t] = sin(2*pi \sum_i=1 ^{t} rad)
         if not self.flag_for_pulse:
-            rad_values = torch.nn.functional.interpolate(rad_values.transpose(1, 2),
-                                                         scale_factor=1 / self.upsample_scale,
-                                                         mode="linear").transpose(1, 2)
+            rad_values = torch.nn.functional.interpolate(
+                rad_values.transpose(1, 2), scale_factor=1 / self.upsample_scale, mode="linear"
+            ).transpose(1, 2)
 
             phase = torch.cumsum(rad_values, dim=1) * 2 * np.pi
-            phase = torch.nn.functional.interpolate(phase.transpose(1, 2) * self.upsample_scale,
-                                                    scale_factor=self.upsample_scale, mode="linear").transpose(1, 2)
+            phase = torch.nn.functional.interpolate(
+                phase.transpose(1, 2) * self.upsample_scale, scale_factor=self.upsample_scale, mode="linear"
+            ).transpose(1, 2)
             sines = torch.sin(phase)
         else:
             # If necessary, make sure that the first time step of every
@@ -2478,7 +2448,7 @@ class SineGen2(torch.nn.Module):
         return sines
 
     def forward(self, f0):
-        """ sine_tensor, uv = forward(f0)
+        """sine_tensor, uv = forward(f0)
         input F0: tensor(batchsize=1, length, dim=1)
                   f0 for unvoiced steps should be 0
         output sine_tensor: tensor(batchsize=1, length, dim)
@@ -2506,7 +2476,7 @@ class SineGen2(torch.nn.Module):
 
 
 class SourceModuleHnNSF2(torch.nn.Module):
-    """ SourceModule for hn-nsf
+    """SourceModule for hn-nsf
     SourceModule(sampling_rate, harmonic_num=0, sine_amp=0.1,
                  add_noise_std=0.003, voiced_threshod=0)
     sampling_rate: sampling_rate in Hz
@@ -2523,16 +2493,16 @@ class SourceModuleHnNSF2(torch.nn.Module):
     uv (batchsize, length, 1)
     """
 
-    def __init__(self, sampling_rate, upsample_scale, harmonic_num=0, sine_amp=0.1,
-                 add_noise_std=0.003, voiced_threshod=0):
+    def __init__(
+        self, sampling_rate, upsample_scale, harmonic_num=0, sine_amp=0.1, add_noise_std=0.003, voiced_threshod=0
+    ):
         super(SourceModuleHnNSF2, self).__init__()
 
         self.sine_amp = sine_amp
         self.noise_std = add_noise_std
 
         # to produce sine waveforms
-        self.l_sin_gen = SineGen2(sampling_rate, upsample_scale, harmonic_num,
-                                  sine_amp, add_noise_std, voiced_threshod)
+        self.l_sin_gen = SineGen2(sampling_rate, upsample_scale, harmonic_num, sine_amp, add_noise_std, voiced_threshod)
 
         # to merge source harmonics into a single excitation
         self.l_linear = torch.nn.Linear(harmonic_num + 1, 1)
@@ -2556,11 +2526,7 @@ class SourceModuleHnNSF2(torch.nn.Module):
 
 
 class ConvRNNF0Predictor(nn.Module):
-    def __init__(self,
-                 num_class: int = 1,
-                 in_channels: int = 80,
-                 cond_channels: int = 512
-                 ):
+    def __init__(self, num_class: int = 1, in_channels: int = 80, cond_channels: int = 512):
         super().__init__()
 
         self.num_class = num_class
@@ -2599,6 +2565,7 @@ class HiFTGenerator(nn.Module):
     HiFTNet Generator: Neural Source Filter + ISTFTNet
     https://arxiv.org/abs/2309.09493
     """
+
     def __init__(
         self,
         in_channels: int = 80,
@@ -2638,7 +2605,8 @@ class HiFTGenerator(nn.Module):
             harmonic_num=nb_harmonics,
             sine_amp=nsf_alpha,
             add_noise_std=nsf_sigma,
-            voiced_threshod=nsf_voiced_threshold)
+            voiced_threshod=nsf_voiced_threshold,
+        )
         self.f0_upsamp = torch.nn.Upsample(scale_factor=np.prod(upsample_rates) * istft_params["hop_len"])
 
         self.conv_pre = weight_norm(  # noqa
@@ -2652,7 +2620,7 @@ class HiFTGenerator(nn.Module):
                 weight_norm(  # noqa
                     nn.ConvDiTTranspose1d(
                         base_channels // (2**i),
-                        base_channels // (2**(i + 1)),
+                        base_channels // (2 ** (i + 1)),
                         k,
                         u,
                         padding=(k - u) // 2,
@@ -2665,23 +2633,21 @@ class HiFTGenerator(nn.Module):
         self.source_resblocks = nn.ModuleList()
         downsample_rates = [1] + upsample_rates[::-1][:-1]
         downsample_cum_rates = np.cumprod(downsample_rates)
-        for i, (u, k, d) in enumerate(zip(downsample_cum_rates[::-1], source_resblock_kernel_sizes, source_resblock_dilation_sizes, strict=False)):
+        for i, (u, k, d) in enumerate(
+            zip(downsample_cum_rates[::-1], source_resblock_kernel_sizes, source_resblock_dilation_sizes, strict=False)
+        ):
             if u == 1:
-                self.source_downs.append(
-                    nn.Conv1d(istft_params["n_fft"] + 2, base_channels // (2 ** (i + 1)), 1, 1)
-                )
+                self.source_downs.append(nn.Conv1d(istft_params["n_fft"] + 2, base_channels // (2 ** (i + 1)), 1, 1))
             else:
                 self.source_downs.append(
                     nn.Conv1d(istft_params["n_fft"] + 2, base_channels // (2 ** (i + 1)), u * 2, u, padding=(u // 2))
                 )
 
-            self.source_resblocks.append(
-                ResBlock(base_channels // (2 ** (i + 1)), k, d)
-            )
+            self.source_resblocks.append(ResBlock(base_channels // (2 ** (i + 1)), k, d))
 
         self.resblocks = nn.ModuleList()
         for i in range(len(self.ups)):
-            ch = base_channels // (2**(i + 1))
+            ch = base_channels // (2 ** (i + 1))
             for _, (k, d) in enumerate(zip(resblock_kernel_sizes, resblock_dilation_sizes, strict=False)):
                 self.resblocks.append(ResBlock(ch, k, d))
 
@@ -2690,10 +2656,10 @@ class HiFTGenerator(nn.Module):
         self.conv_post.apply(init_weights)
         self.reflection_pad = nn.ReflectionPad1d((1, 0))
         self.stft_window = torch.from_numpy(get_window("hann", istft_params["n_fft"], fftbins=True).astype(np.float32))
-        self.f0_predictor = ConvRNNF0Predictor() # if f0_predictor is None else f0_predictor
+        self.f0_predictor = ConvRNNF0Predictor()  # if f0_predictor is None else f0_predictor
 
     def remove_weight_norm(self):
-        print('Removing weight norm...')
+        print("Removing weight norm...")
         for up in self.ups:
             remove_weight_norm(up)
         for resblock in self.resblocks:
@@ -2709,8 +2675,12 @@ class HiFTGenerator(nn.Module):
     def _stft(self, x):
         spec = torch.stft(
             x,
-            self.istft_params["n_fft"], self.istft_params["hop_len"], self.istft_params["n_fft"], window=self.stft_window.to(x.device),
-            return_complex=True)
+            self.istft_params["n_fft"],
+            self.istft_params["hop_len"],
+            self.istft_params["n_fft"],
+            window=self.stft_window.to(x.device),
+            return_complex=True,
+        )
         spec = torch.view_as_real(spec)  # [B, F, TT, 2]
         return spec[..., 0], spec[..., 1]
 
@@ -2718,8 +2688,13 @@ class HiFTGenerator(nn.Module):
         magnitude = torch.clip(magnitude, max=1e2)
         real = magnitude * torch.cos(phase)
         img = magnitude * torch.sin(phase)
-        inverse_transform = torch.istft(torch.complex(real, img), self.istft_params["n_fft"], self.istft_params["hop_len"],
-                                        self.istft_params["n_fft"], window=self.stft_window.to(magnitude.device))
+        inverse_transform = torch.istft(
+            torch.complex(real, img),
+            self.istft_params["n_fft"],
+            self.istft_params["hop_len"],
+            self.istft_params["n_fft"],
+            window=self.stft_window.to(magnitude.device),
+        )
         return inverse_transform
 
     def decode(self, x: torch.Tensor, s: torch.Tensor = torch.zeros(1, 1, 0)) -> torch.Tensor:
@@ -2749,8 +2724,8 @@ class HiFTGenerator(nn.Module):
 
         x = F.leaky_relu(x)
         x = self.conv_post(x)
-        magnitude = torch.exp(x[:, :self.istft_params["n_fft"] // 2 + 1, :])
-        phase = torch.sin(x[:, self.istft_params["n_fft"] // 2 + 1:, :])  # actually, sin is redundancy
+        magnitude = torch.exp(x[:, : self.istft_params["n_fft"] // 2 + 1, :])
+        phase = torch.sin(x[:, self.istft_params["n_fft"] // 2 + 1 :, :])  # actually, sin is redundancy
 
         x = self._istft(magnitude, phase)
         x = torch.clamp(x, -self.audio_limit, self.audio_limit)
@@ -2766,13 +2741,12 @@ class HiFTGenerator(nn.Module):
         s = s.transpose(1, 2)
         # use cache_source to avoid glitch
         if cache_source.shape[2] != 0:
-            s[:, :, :cache_source.shape[2]] = cache_source
+            s[:, :, : cache_source.shape[2]] = cache_source
         generated_speech = self.decode(x=speech_feat, s=s)
         return generated_speech, s
 
 
 class StepAudio2Decoder(nn.Module):
-
     def __init__(self, model_path, device, float16=False):
         self.device = device
         self.float16 = float16
@@ -2804,20 +2778,22 @@ class StepAudio2Decoder(nn.Module):
         option = onnxruntime.SessionOptions()
         option.graph_optimization_level = onnxruntime.GraphOptimizationLevel.ORT_ENABLE_ALL
         option.intra_op_num_threads = 1
-        self.spk_model = onnxruntime.InferenceSession(spk_model_path, sess_options=option, providers=["CPUExecutionProvider"])
+        self.spk_model = onnxruntime.InferenceSession(
+            spk_model_path, sess_options=option, providers=["CPUExecutionProvider"]
+        )
 
         flow_encoder = UpsampleConformerEncoderV2(
             input_size=512,
             output_size=512,
-            input_layer='linear',
+            input_layer="linear",
             pre_lookahead_len=3,
             num_blocks=6,
             num_up_blocks=4,
             up_stride=2,
             up_scale_factor=2,
             attention_heads=8,
-            pos_enc_layer_type='rel_pos_espnet',
-            selfattention_layer_type='rel_selfattn',
+            pos_enc_layer_type="rel_pos_espnet",
+            selfattention_layer_type="rel_selfattn",
             key_bias=True,
             linear_units=2048,
             dropout_rate=0.1,
@@ -2835,13 +2811,13 @@ class StepAudio2Decoder(nn.Module):
                 num_heads=8,
                 head_dim=64,
                 hidden_size=512,
-            )
+            ),
         )
         self.flow = CausalMaskedDiffWithXvec(
             input_size=512,
             output_size=80,
             spk_embed_dim=192,
-            output_type='mel',
+            output_type="mel",
             vocab_size=6561,
             encoder=flow_encoder,
             decoder=flow_decoder,
@@ -2852,7 +2828,10 @@ class StepAudio2Decoder(nn.Module):
         self.flow.to(self.device).eval()
 
         self.hift = HiFTGenerator()
-        hift_state_dict = {k.replace('generator.', ''): v for k, v in torch.load(hift_path, map_location="cpu", weights_only=True).items()}
+        hift_state_dict = {
+            k.replace("generator.", ""): v
+            for k, v in torch.load(hift_path, map_location="cpu", weights_only=True).items()
+        }
         self.hift.load_state_dict(hift_state_dict, strict=True)
         self.hift.to(self.device).eval()
 
@@ -2860,33 +2839,39 @@ class StepAudio2Decoder(nn.Module):
 
         # stream conf
         self.mel_cache_len = 8  # hard-coded, 160ms
-        self.source_cache_len = int(self.mel_cache_len * 480)   # 50hz mel -> 24kHz wave
+        self.source_cache_len = int(self.mel_cache_len * 480)  # 50hz mel -> 24kHz wave
         self.speech_window = torch.from_numpy(np.hamming(2 * self.source_cache_len)).to(self.device)
 
         # hifigan cache
         self.hift_cache_dict = {}
 
-
     def _prepare_prompt(self, prompt_wav):
         audio = load_audio(prompt_wav, sr=16000)  # [T]
         mels = log_mel_spectrogram(audio)
         mels, mels_lens = padding([mels])
-        prompt_speech_tokens, prompt_speech_tokens_lens = self.audio_tokenizer.quantize(mels.to(self.device), mels_lens.to(self.device))
+        prompt_speech_tokens, prompt_speech_tokens_lens = self.audio_tokenizer.quantize(
+            mels.to(self.device), mels_lens.to(self.device)
+        )
 
         spk_feat = kaldi.fbank(audio.unsqueeze(0), num_mel_bins=80, dither=0, sample_frequency=16000)
         spk_feat = spk_feat - spk_feat.mean(dim=0, keepdim=True)
-        spk_emb = torch.tensor(self.spk_model.run(
-            None, {self.spk_model.get_inputs()[0].name: spk_feat.unsqueeze(dim=0).cpu().numpy()}
-        )[0], device='cuda')
+        spk_emb = torch.tensor(
+            self.spk_model.run(None, {self.spk_model.get_inputs()[0].name: spk_feat.unsqueeze(dim=0).cpu().numpy()})[0],
+            device="cuda",
+        )
 
-        audio, sample_rate = torchaudio.load(prompt_wav, backend='soundfile')
+        audio, sample_rate = torchaudio.load(prompt_wav, backend="soundfile")
         audio = audio.mean(dim=0, keepdim=True)  # [1, T]
         if sample_rate != 24000:
             audio = torchaudio.transforms.Resample(orig_freq=sample_rate, new_freq=24000)(audio)
         prompt_mel = mel_spectrogram(audio).transpose(1, 2).squeeze(0)  # [T, num_mels]
         prompt_mels = prompt_mel.unsqueeze(0).to(self.device)
-        prompt_mels_lens = torch.tensor([prompt_mels.shape[1]], dtype=torch.int32, device='cuda')
-        prompt_mels = torch.nn.functional.pad(prompt_mels, (0, 0, 0, prompt_speech_tokens.shape[1] * self.flow.up_rate - prompt_mels.shape[1]), mode='replicate')
+        prompt_mels_lens = torch.tensor([prompt_mels.shape[1]], dtype=torch.int32, device="cuda")
+        prompt_mels = torch.nn.functional.pad(
+            prompt_mels,
+            (0, 0, 0, prompt_speech_tokens.shape[1] * self.flow.up_rate - prompt_mels.shape[1]),
+            mode="replicate",
+        )
         return prompt_speech_tokens, prompt_speech_tokens_lens, spk_emb, prompt_mels, prompt_mels_lens
 
     def set_stream_cache(self, prompt_wav):
@@ -2894,31 +2879,31 @@ class StepAudio2Decoder(nn.Module):
             self.cache[prompt_wav] = self._prepare_prompt(prompt_wav)
         prompt_speech_tokens, prompt_speech_tokens_lens, spk_emb, prompt_mels, prompt_mels_lens = self.cache[prompt_wav]
         self.stream_cache = self.flow.setup_cache(
-            torch.cat([prompt_speech_tokens, prompt_speech_tokens[:, :3]], dim=1),
-            prompt_mels, spk_emb, n_timesteps=10)
+            torch.cat([prompt_speech_tokens, prompt_speech_tokens[:, :3]], dim=1), prompt_mels, spk_emb, n_timesteps=10
+        )
 
         # hift cache
         self.hift_cache_dict = dict(
-            mel = torch.zeros(1, prompt_mels.shape[2], 0, device='cuda'),
-            source = torch.zeros(1, 1, 0, device='cuda'),
-            speech = torch.zeros(1, 0, device='cuda'),
+            mel=torch.zeros(1, prompt_mels.shape[2], 0, device="cuda"),
+            source=torch.zeros(1, 1, 0, device="cuda"),
+            speech=torch.zeros(1, 0, device="cuda"),
         )
-
 
     def stream(self, generated_speech_tokens, prompt_wav, last_chunk=False):
         if prompt_wav not in self.cache:
             self.cache[prompt_wav] = self._prepare_prompt(prompt_wav)
         prompt_speech_tokens, prompt_speech_tokens_lens, spk_emb, prompt_mels, prompt_mels_lens = self.cache[prompt_wav]
 
-        generated_speech_tokens = torch.tensor([generated_speech_tokens], dtype=torch.int32, device='cuda')
-        generated_speech_tokens_lens = torch.tensor([generated_speech_tokens.shape[1]], dtype=torch.int32, device='cuda')
+        generated_speech_tokens = torch.tensor([generated_speech_tokens], dtype=torch.int32, device="cuda")
+        generated_speech_tokens_lens = torch.tensor(
+            [generated_speech_tokens.shape[1]], dtype=torch.int32, device="cuda"
+        )
 
         if self.stream_cache is None:
             raise ValueError("stream_cache is not set")
 
-        self.stream_cache['conformer_att_cache'] = self.stream_cache['conformer_att_cache'][:, :, :, -128:, :]
-        self.stream_cache['estimator_att_cache'] = self.stream_cache['estimator_att_cache'][:, :, :, :, -128:, :]
-
+        self.stream_cache["conformer_att_cache"] = self.stream_cache["conformer_att_cache"][:, :, :, -128:, :]
+        self.stream_cache["estimator_att_cache"] = self.stream_cache["estimator_att_cache"][:, :, :, :, -128:, :]
 
         with torch.amp.autocast("cuda", dtype=torch.float16 if self.float16 else torch.float32):
             chunk_mel, self.stream_cache = self.flow.inference_chunk(
@@ -2928,16 +2913,19 @@ class StepAudio2Decoder(nn.Module):
                 last_chunk=last_chunk,
                 n_timesteps=10,
             )
-        if self.stream_cache['estimator_att_cache'].shape[4] > (prompt_mels.shape[1] + 100):
-            self.stream_cache['estimator_att_cache'] = torch.cat([
-                self.stream_cache['estimator_att_cache'][:, :, :, :, :prompt_mels.shape[1]],
-                self.stream_cache['estimator_att_cache'][:, :, :, :, -100:],
-            ], dim=4)
+        if self.stream_cache["estimator_att_cache"].shape[4] > (prompt_mels.shape[1] + 100):
+            self.stream_cache["estimator_att_cache"] = torch.cat(
+                [
+                    self.stream_cache["estimator_att_cache"][:, :, :, :, : prompt_mels.shape[1]],
+                    self.stream_cache["estimator_att_cache"][:, :, :, :, -100:],
+                ],
+                dim=4,
+            )
 
         # vocoder cache
-        hift_cache_mel = self.hift_cache_dict['mel']
-        hift_cache_source = self.hift_cache_dict['source']
-        hift_cache_speech = self.hift_cache_dict['speech']
+        hift_cache_mel = self.hift_cache_dict["mel"]
+        hift_cache_source = self.hift_cache_dict["source"]
+        hift_cache_speech = self.hift_cache_dict["speech"]
         mel = torch.concat([hift_cache_mel, chunk_mel], dim=2)
 
         speech, source = self.hift(mel, hift_cache_source)
@@ -2948,16 +2936,16 @@ class StepAudio2Decoder(nn.Module):
 
         # update vocoder cache
         self.hift_cache_dict = dict(
-            mel = mel[..., -self.mel_cache_len:].clone().detach(),
-            source = source[:, :, -self.source_cache_len:].clone().detach(),
-            speech = speech[:, -self.source_cache_len:].clone().detach(),
+            mel=mel[..., -self.mel_cache_len :].clone().detach(),
+            source=source[:, :, -self.source_cache_len :].clone().detach(),
+            speech=speech[:, -self.source_cache_len :].clone().detach(),
         )
         if not last_chunk:
-            speech = speech[:, :-self.source_cache_len]
+            speech = speech[:, : -self.source_cache_len]
 
         wav_np = speech.cpu().numpy()
         # Clip to [-1, 1] to avoid overflow, then scale to int16
         wav_np = np.clip(wav_np, -1.0, 1.0)
-        wav_int16 = (wav_np * 32767.0).astype('<i2')  # 16-bit little-endian PCM
+        wav_int16 = (wav_np * 32767.0).astype("<i2")  # 16-bit little-endian PCM
         pcm_bytes = wav_int16.tobytes()
         return pcm_bytes

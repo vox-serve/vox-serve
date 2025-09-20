@@ -32,6 +32,7 @@ def load_audio(file_path, target_rate=16000, max_length=None):
 
     return audio
 
+
 def log_mel_spectrogram(audio, n_mels=128, padding=479, device=None):
     """
     Compute the log-Mel spectrogram with specific padding for StepAudio
@@ -55,6 +56,7 @@ def log_mel_spectrogram(audio, n_mels=128, padding=479, device=None):
     log_spec = (log_spec + 4.0) / 4.0
     return log_spec
 
+
 def compute_token_num(max_feature_len):
     # First, audio goes through encoder:
     # 1. conv1: kernel=3, stride=1, padding=1 -> size unchanged
@@ -66,9 +68,10 @@ def compute_token_num(max_feature_len):
     # Then through adaptor (parameters from config file):
     padding = 1
     kernel_size = 3  # from config: audio_encoder_config.kernel_size
-    stride = 2      # from config: audio_encoder_config.adapter_stride
+    stride = 2  # from config: audio_encoder_config.adapter_stride
     adapter_output_dim = (encoder_output_dim + 2 * padding - kernel_size) // stride + 1
     return adapter_output_dim
+
 
 def make_non_pad_mask(lengths: torch.Tensor, max_len: int = 0) -> torch.Tensor:
     """Make mask tensor containing indices of non-padded part.
@@ -95,14 +98,12 @@ def make_non_pad_mask(lengths: torch.Tensor, max_len: int = 0) -> torch.Tensor:
     """
     batch_size = lengths.size(0)
     max_len = max_len if max_len > 0 else lengths.max().item()
-    seq_range = torch.arange(0,
-                             max_len,
-                             dtype=torch.int64,
-                             device=lengths.device)
+    seq_range = torch.arange(0, max_len, dtype=torch.int64, device=lengths.device)
     seq_range_expand = seq_range.unsqueeze(0).expand(batch_size, max_len)
     seq_length_expand = lengths.unsqueeze(-1)
     mask = seq_range_expand >= seq_length_expand
     return ~mask
+
 
 def mask_to_bias(mask: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
     """Convert bool-tensor to float-tensor for flash attention.
@@ -131,7 +132,7 @@ def mask_to_bias(mask: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
     # attention mask bias
     # NOTE(Mddct): torch.finfo jit issues
     #     chunk_masks = (1.0 - chunk_masks) * torch.finfo(dtype).min
-    mask = (1.0 - mask) * -1.0e+10
+    mask = (1.0 - mask) * -1.0e10
     return mask
 
 
@@ -156,9 +157,7 @@ class StepAudio2EncoderAttention(nn.Module):
         wv, qk = self.qkv_attention(q, k, v, mask)
         return self.out(wv), qk
 
-    def qkv_attention(
-        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, mask: Optional[torch.Tensor] = None
-    ):
+    def qkv_attention(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, mask: Optional[torch.Tensor] = None):
         _, T, D = q.shape
         scale = (D // self.n_head) ** -0.25
         q = q.view(*q.shape[:2], self.n_head, -1).permute(0, 2, 1, 3) * scale
@@ -173,6 +172,7 @@ class StepAudio2EncoderAttention(nn.Module):
         w = F.softmax(qk, dim=-1).to(q.dtype)
         return (w @ v).permute(0, 2, 1, 3).flatten(start_dim=2), qk.detach()
 
+
 class StepAudio2EncoderBlock(nn.Module):
     def __init__(self, n_state: int, n_head: int):
         super().__init__()
@@ -181,9 +181,7 @@ class StepAudio2EncoderBlock(nn.Module):
         self.attn_ln = nn.LayerNorm(n_state)
 
         n_mlp = n_state * 4
-        self.mlp = nn.Sequential(
-            nn.Linear(n_state, n_mlp), nn.GELU(), nn.Linear(n_mlp, n_state)
-        )
+        self.mlp = nn.Sequential(nn.Linear(n_state, n_mlp), nn.GELU(), nn.Linear(n_mlp, n_state))
         self.mlp_ln = nn.LayerNorm(n_state)
 
     def forward(
@@ -197,9 +195,7 @@ class StepAudio2EncoderBlock(nn.Module):
 
 
 class StepAudio2Encoder(nn.Module):
-    def __init__(
-        self, n_mels: int, n_ctx: int, n_state: int, n_head: int, n_layer: int
-    ):
+    def __init__(self, n_mels: int, n_ctx: int, n_state: int, n_head: int, n_layer: int):
         super().__init__()
         self.conv1 = nn.Conv1d(n_mels, n_state, kernel_size=3, padding=1)
         self.conv2 = nn.Conv1d(n_state, n_state, kernel_size=3, stride=2, padding=1)
@@ -217,8 +213,8 @@ class StepAudio2Encoder(nn.Module):
         x = F.gelu(self.conv2(x))
         x = x.permute(0, 2, 1)  # (B, T // 2, n_state)
         mask = make_non_pad_mask(x_len, T).unsqueeze(1)  # (B, 1, T)
-        mask = mask_to_bias(mask[:, :, (T + 1) % 2::2], x.dtype)  # (B, 1, T // 2)
-        x = (x + self.positional_embedding.weight[:x.shape[1], :]).to(x.dtype)
+        mask = mask_to_bias(mask[:, :, (T + 1) % 2 :: 2], x.dtype)  # (B, 1, T // 2)
+        x = (x + self.positional_embedding.weight[: x.shape[1], :]).to(x.dtype)
         for block in self.blocks:
             x = block(x, mask.unsqueeze(1))
         x = x.permute(0, 2, 1)
