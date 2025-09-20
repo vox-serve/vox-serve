@@ -2,11 +2,13 @@ import json
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
+import librosa
 import torch
 import torchaudio
 from huggingface_hub import hf_hub_download
 from torch import nn
 from torch.nn import functional as F
+from torch.nn.utils.rnn import pad_sequence
 
 from ..encoder.step_audio_2 import StepAudio2Encoder
 from ..flashinfer_utils import FlashInferWrapper, apply_rope_pos_ids, rms_norm
@@ -275,12 +277,13 @@ class StepAudio2ForCausalLM(nn.Module):
         attn_wrapper: FlashInferWrapper,
         kv_cache: torch.Tensor,
     ):
-        logits = self.model(
+        hidden_states = self.model(
             inputs_embeds=inputs_embeds,
             position_ids=position_ids,
             attn_wrapper=attn_wrapper,
             kv_cache=kv_cache,
         )
+        logits = self.lm_head(hidden_states)
 
         return logits
 
@@ -323,15 +326,15 @@ class StepAudio2Model(BaseLM):
         # self.vocab_size = self.config.vocab_size
 
         self.stop_token_id = self.text_tokenizer.convert_tokens_to_ids("<|EOT|>")
-        self.audio_offset = self.text_tokenizer.convert_tokens_to_ids("<|audio_0|>")
+        self.audio_offset = 151696
 
         self.default_sampling_config = SamplingConfig(
             top_k=None,
-            top_p=0.8,
+            top_p=0.9,
             min_p=None,
-            temperature=0.8,
-            repetition_penalty=None,
-            repetition_window=None,
+            temperature=0.7,
+            repetition_penalty=1.05,
+            repetition_window=-1,
             cfg_scale=None,
         )
 
@@ -395,7 +398,7 @@ class StepAudio2Model(BaseLM):
         """
         if self.default_sampling_config.max_tokens is not None:
             return self.default_sampling_config.max_tokens
-        return 512
+        return 4096
 
     @property
     def vocab_size(self) -> int:
@@ -430,27 +433,161 @@ class StepAudio2Model(BaseLM):
 
         return output_tokens
 
-    def _format_prompt(self, input_mode: str, prompt: str | None, audio_path: str | None) -> str:
-        if input_mode == "audio":
-            audio_tokens = self._extract_speech_token(audio_path)[0]
-            audio_tokens = "".join([f"<|audio_{x}|>" for x in audio_tokens])
-            audio_tokens = "<|begin_of_audio|>" + audio_tokens + "<|end_of_audio|>"
-            user_input = audio_tokens
-            system_prompt = (
-                "User will provide you with a speech instruction. Do it step by step. First, think about the "
-                "instruction and respond in a interleaved manner, with 13 text token followed by 26 audio tokens. "
-            )
+    def _mel_filters(self, n_mels: int) -> torch.Tensor:
+        """Load the mel filterbank matrix for projecting STFT into a Mel spectrogram."""
+        assert n_mels in {80, 128}, f"Unsupported n_mels: {n_mels}"
+        if n_mels == 128:
+            return torch.from_numpy(librosa.filters.mel(sr=16000, n_fft=400, n_mels=128))
         else:
-            user_input = prompt
-            system_prompt = (
-                "User will provide you with a text instruction. Do it step by step. First, think about the "
-                "instruction and respond in a interleaved manner, with 13 text token followed by 26 audio tokens."
-            )
+            return torch.from_numpy(librosa.filters.mel(sr=16000, n_fft=400, n_mels=80))
 
-        text_input = f"<|system|>\n{system_prompt}"
-        text_input += f"<|user|>\n{user_input}<|assistant|>streaming_transcription\n"
+    def _load_audio(self, file_path, target_rate=16000, max_length=None):
+        """
+        Open an audio file and read as mono waveform, resampling as necessary
+        If max_length is provided, truncate the audio to that length
+        """
+        waveform, sample_rate = torchaudio.load(file_path)
+        if sample_rate != target_rate:
+            waveform = torchaudio.transforms.Resample(orig_freq=sample_rate, new_freq=target_rate)(waveform)
+        audio = waveform[0]  # get the first channel
 
-        return text_input
+        # Truncate audio if it exceeds max_length
+        if max_length is not None and audio.shape[0] > max_length:
+            audio = audio[:max_length]
+
+        return audio
+
+    def _log_mel_spectrogram(self, audio, n_mels=128, padding=479, device=None):
+        """
+        Compute the log-Mel spectrogram with specific padding for StepAudio
+        """
+        if not torch.is_tensor(audio):
+            if isinstance(audio, str):
+                audio = self._load_audio(audio)
+            audio = torch.from_numpy(audio)
+        if device is not None:
+            audio = audio.to(device)
+        if padding > 0:
+            audio = F.pad(audio, (0, padding))
+        window = torch.hann_window(400).to(audio.device)
+        stft = torch.stft(audio, 400, 160, window=window, return_complex=True)
+        magnitudes = stft[..., :-1].abs() ** 2
+        filters = self._mel_filters(n_mels)
+        mel_spec = filters @ magnitudes
+
+        log_spec = torch.clamp(mel_spec, min=1e-10).log10()
+        log_spec = torch.maximum(log_spec, log_spec.max() - 8.0)
+        log_spec = (log_spec + 4.0) / 4.0
+        return log_spec
+
+    def _compute_token_num(self, max_feature_len):
+        # First, audio goes through encoder:
+        # 1. conv1: kernel=3, stride=1, padding=1 -> size unchanged
+        # 2. conv2: kernel=3, stride=2, padding=1 -> size/2
+        # 3. avg_pooler: kernel=2, stride=2 -> size/2
+        max_feature_len = max_feature_len - 2  # remove padding
+        encoder_output_dim = (max_feature_len + 1) // 2 // 2  # after conv2 and avg_pooler
+
+        # Then through adaptor (parameters from config file):
+        padding = 1
+        kernel_size = 3  # from config: audio_encoder_config.kernel_size
+        stride = 2      # from config: audio_encoder_config.adapter_stride
+        adapter_output_dim = (encoder_output_dim + 2 * padding - kernel_size) // stride + 1
+        return adapter_output_dim
+
+    def _padding_mels(self, data: List[torch.Tensor]):
+        """ Padding the data into batch data
+
+        Parameters
+        ----------
+            data: List[Tensor], shape of Tensor (128, T)
+
+        Returns:
+        -------
+            feats, feats lengths
+        """
+        sample = data
+        assert isinstance(sample, list)
+        feats_lengths = torch.tensor([s.size(1)-2 for s in sample],
+                                    dtype=torch.int32)
+        feats = [s.t() for s in sample]
+        padded_feats = pad_sequence(feats,
+                                    batch_first=True,
+                                    padding_value=0)
+
+        return padded_feats.transpose(1, 2), feats_lengths
+
+    def _apply_chat_template(self, messages: list):
+        results = []
+        mels = []
+        for msg in messages:
+            role = msg["role"]
+            content = msg["content"]
+            if role == "user":
+                role = "human"
+            if isinstance(content, str):
+                text_with_audio = f"<|BOT|>{role}\n{content}"
+                text_with_audio += '<|EOT|>' if msg.get('eot', True) else ''
+                results.append(text_with_audio)
+            elif isinstance(content, list):
+                results.append(f"<|BOT|>{role}\n")
+                for item in content:
+                    if item["type"] == "text":
+                        results.append(f"{item['text']}")
+                    elif item["type"] == "audio":
+                        audio = self.load_audio(item['audio'])
+                        for i in range(0, audio.shape[0], 16000 * 25):
+                            mel = self._log_mel_spectrogram(audio[i:i+16000*25], n_mels=128, padding=479)
+                            mels.append(mel)
+                            audio_tokens = "<audio_patch>" * self._compute_token_num(mel.shape[1])
+                            results.append(f"<audio_start>{audio_tokens}<audio_end>")
+                    elif item["type"] == "token":
+                        results.append(item["token"])
+                if msg.get('eot', True):
+                    results.append('<|EOT|>')
+            elif content is None:
+                results.append(f"<|BOT|>{role}\n")
+            else:
+                raise ValueError(f"Unsupported content type: {type(content)}")
+        # print(results)
+        return results, mels
+
+    def _format_prompt(self, input_mode: str, prompt: str | None, audio_path: str | None) -> str:
+        # TODO: For now, we fix the system prompt and limit to single-turn conversation
+        if input_mode == "audio":
+            messages = [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "human", "content": prompt},
+                {"role": "assistant", "content": "<tts_start>", "eot": False}, # Insert <tts_start> for speech response
+            ]
+        else:
+            messages = [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "human", "content": [{"type": "audio", "audio": audio_path}]},
+                {"role": "assistant", "content": "<tts_start>", "eot": False}, # Insert <tts_start> for speech response
+            ]
+
+        messages, mels = self._apply_chat_template(messages)
+        prompt_ids = []
+        for msg in messages:
+            if isinstance(msg, str):
+                prompt_ids.append(self.text_tokenizer(text=msg, return_tensors="pt", padding=True)["input_ids"])
+            elif isinstance(msg, list):
+                prompt_ids.append(torch.tensor([msg], dtype=torch.int32))
+            else:
+                raise ValueError(f"Unsupported content type: {type(msg)}")
+
+        prompt_ids = torch.cat(prompt_ids, dim=-1).to(self.device)
+
+        if len(mels) == 0:
+            mels = None
+            mel_lengths = None
+        else:
+            mels, mel_lengths = self._padding_mels(mels)
+            mels = mels.to(self.device)
+            mel_lengths = mel_lengths.to(self.device)
+
+        return prompt_ids, mels, mel_lengths
 
     def preprocess(
         self,
@@ -458,13 +595,26 @@ class StepAudio2Model(BaseLM):
         audio_path: str | None = None,
     ) -> PreprocessOutput:
         """Prepare the prompt for the model, formatting it according to StepAudio2 specifications."""
-        text_input = self._format_prompt(
+        prompt_ids, mels, mel_lengths = self._format_prompt(
             input_mode="audio" if audio_path is not None else "text",
             prompt=prompt,
             audio_path=audio_path,
         )
-        input_ids = self.text_tokenizer(text_input, return_tensors="pt").input_ids
-        input_ids = input_ids.view(-1, 1)  # add codebook dimension
+        input_ids = prompt_ids.view(-1, 1) # add codebook dimension
+
+        input_features = torch.zeros(prompt_ids.shape[0], prompt_ids.shape[1], self.config.text_config.hidden_size, device=self.device, dtype=self.dtype)
+        input_masks = torch.zeros(prompt_ids.shape[0], prompt_ids.shape[1], device=self.device, dtype=torch.bool)
+
+        if mels is not None:
+            out, feat_lens = self.model.encoder(mels, mel_lengths)
+            out = self.model.adapter(out)
+            feat_lens = (feat_lens - 1) // 2 + 1
+            insert_location = torch.nonzero(input_ids == 151688)
+            insert_location[:, 0] += 1
+            for idx in range(len(insert_location)):
+                s, _ = insert_location[idx]
+                input_features[s : s + feat_lens[idx], :] = out[idx][:feat_lens[idx]]
+                input_masks[s : s + feat_lens[idx]] = 1
 
         # Create repetition cache if repetition penalty is enabled
         repetition_cache = None
@@ -480,7 +630,12 @@ class StepAudio2Model(BaseLM):
                 device=self.device,
             )
 
-        return PreprocessOutput(input_tokens=input_ids.tolist(), repetition_cache=repetition_cache)
+        return PreprocessOutput(
+            input_tokens=input_ids.tolist(),
+            repetition_cache=repetition_cache,
+            input_masks=input_masks,
+            input_features=input_features,
+        )
 
     def forward(
         self,
@@ -488,11 +643,15 @@ class StepAudio2Model(BaseLM):
         position_ids: torch.Tensor,
         attn_wrapper: FlashInferWrapper,
         kv_cache: torch.Tensor,
+        input_masks: torch.Tensor,
+        input_features: torch.Tensor,
         **kwargs: Any,
     ) -> torch.Tensor:
         """Forward pass through the model."""
         # remove codebook dimension
         inputs_embeds = self.model.embed_tokens(input_ids[:, 0])
+
+        inputs_embeds = torch.where(input_masks[:, :1], input_features, inputs_embeds)
 
         logits = self.model(
             inputs_embeds=inputs_embeds,
@@ -533,10 +692,11 @@ class StepAudio2Model(BaseLM):
         for i, req in enumerate(requests):
             req.input_tokens = output_ids[i : i + 1]
 
+            req.input_features = req.input_features[:1].zero_()
+            req.input_masks = req.input_masks[:1].zero_()
+
         async def update_req_states():
-            stop_mask = (output_ids[:, 0] == self.stop_token_ids[0]) | \
-                        (output_ids[:, 0] == self.stop_token_ids[1]) | \
-                        (output_ids[:, 0] == self.stop_token_ids[2])
+            stop_mask = output_ids[:, 0] == self.stop_token_id
             audio_mask = output_ids[:, 0] >= self.audio_offset
 
             for i, req in enumerate(requests):
