@@ -1,11 +1,13 @@
+# Adopted from https://github.com/stepfun-ai/Step-Audio2
 
 import math
+import os
+from functools import lru_cache
 from typing import Dict, List, Optional, Tuple, Union
 
 import librosa
 import numpy as np
 import onnxruntime
-import s3tokenizer
 import torch
 import torch.nn.functional as F
 import torchaudio
@@ -15,7 +17,10 @@ from scipy.signal import get_window
 from torch import nn
 from torch.nn.utils import remove_weight_norm
 from torch.nn.utils.parametrizations import weight_norm
+from torch.nn.utils.rnn import pad_sequence
 from torchaudio.compliance import kaldi
+
+from .s3 import S3TokenizerV2
 
 
 def dynamic_range_compression_torch(x, C=1, clip_val=1e-5):
@@ -25,6 +30,120 @@ def dynamic_range_compression_torch(x, C=1, clip_val=1e-5):
 def spectral_normalize_torch(magnitudes):
     output = dynamic_range_compression_torch(magnitudes)
     return output
+
+
+def load_audio(file: str, sr: int = 16000):
+    """
+    Open an audio file and read as mono waveform, resampling as necessary
+
+    Parameters
+    ----------
+    file: str
+        The audio file to open
+
+    sr: int
+        The sample rate to resample the audio if necessary
+
+    Returns
+    -------
+    A torch.Tensor containing the audio waveform, in float32 dtype.
+    """
+    audio, sample_rate = torchaudio.load(file)
+    if sample_rate != sr:
+        audio = torchaudio.transforms.Resample(sample_rate, sr)(audio)
+    audio = audio[0]  # get the first channel
+    return audio
+
+
+@lru_cache(maxsize=None)
+def _mel_filters(device, n_mels: int) -> torch.Tensor:
+    """
+    load the mel filterbank matrix for projecting STFT into a Mel spectrogram.
+    Allows decoupling librosa dependency; saved using:
+
+        np.savez_compressed(
+            "mel_filters.npz",
+            mel_80=librosa.filters.mel(sr=16000, n_fft=400, n_mels=80),
+            mel_128=librosa.filters.mel(sr=16000, n_fft=400, n_mels=128),
+        )
+    """
+    assert n_mels in {80, 128}, f"Unsupported n_mels: {n_mels}"
+
+    filters_path = os.path.join(os.path.dirname(__file__), "assets",
+                                "mel_filters.npz")
+    with np.load(filters_path, allow_pickle=False) as f:
+        return torch.from_numpy(f[f"mel_{n_mels}"]).to(device)
+
+
+def log_mel_spectrogram(
+    audio: Union[str, np.ndarray, torch.Tensor],
+    n_mels: int = 128,
+    padding: int = 0,
+    device: Optional[Union[str, torch.device]] = None,
+):
+    """
+    Compute the log-Mel spectrogram of
+
+    Parameters
+    ----------
+    audio: Union[str, np.ndarray, torch.Tensor], shape = (*)
+        The path to audio or either a NumPy array or Tensor containing the
+        audio waveform in 16 kHz
+
+    n_mels: int
+        The number of Mel-frequency filters, only 80 is supported
+
+    padding: int
+        Number of zero samples to pad to the right
+
+    device: Optional[Union[str, torch.device]]
+        If given, the audio tensor is moved to this device before STFT
+
+    Returns
+    -------
+    torch.Tensor, shape = (128, n_frames)
+        A Tensor that contains the Mel spectrogram
+    """
+    if not torch.is_tensor(audio):
+        if isinstance(audio, str):
+            audio = load_audio(audio)
+
+    if device is not None:
+        audio = audio.to(device)
+    if padding > 0:
+        audio = F.pad(audio, (0, padding))
+    window = torch.hann_window(400).to(audio.device)
+    stft = torch.stft(audio, 400, 160, window=window, return_complex=True)
+    magnitudes = stft[..., :-1].abs()**2
+
+    filters = _mel_filters(audio.device, n_mels)
+    mel_spec = filters @ magnitudes
+
+    log_spec = torch.clamp(mel_spec, min=1e-10).log10()
+    log_spec = torch.maximum(log_spec, log_spec.max() - 8.0)
+    log_spec = (log_spec + 4.0) / 4.0
+    return log_spec
+
+
+def padding(data: List[torch.Tensor]):
+    """ Padding the data into batch data
+
+    Parameters
+    ----------
+        data: List[Tensor], shape of Tensor (128, T)
+
+    Returns:
+    -------
+        feats [B, 128, T_max], feats lengths [B]
+    """
+    sample = data
+    assert isinstance(sample, list)
+    feats_lengths = torch.tensor([s.size(1) for s in sample],
+                                 dtype=torch.int32)
+    feats = [s.t() for s in sample]
+    padded_feats = pad_sequence(feats, batch_first=True, padding_value=0)
+
+    return padded_feats.transpose(1, 2), feats_lengths
 
 
 def mel_spectrogram(y, n_fft=1920, num_mels=80, sampling_rate=24000, hop_size=480,
@@ -2679,51 +2798,13 @@ class StepAudio2Decoder(nn.Module):
             revision=None,
         )
 
-        self.audio_tokenizer = s3tokenizer.load_model(audio_tokenizer_path).to(self.device).eval()
+        # self.audio_tokenizer = s3tokenizer.load_model(audio_tokenizer_path).to(self.device).eval()
+        self.audio_tokenizer = S3TokenizerV2(audio_tokenizer_path)
 
         option = onnxruntime.SessionOptions()
         option.graph_optimization_level = onnxruntime.GraphOptimizationLevel.ORT_ENABLE_ALL
         option.intra_op_num_threads = 1
         self.spk_model = onnxruntime.InferenceSession(spk_model_path, sess_options=option, providers=["CPUExecutionProvider"])
-
-        # with open(f"{model_path}/flow.yaml", "r") as f:
-        #     configs = load_hyperpyyaml(f)
-        #     self.flow = configs['flow']
-
-        # flow: !new:cosyvoice2.flow.flow.CausalMaskedDiffWithXvec
-        #     input_size: 512
-        #     output_size: 80
-        #     spk_embed_dim: 192
-        #     output_type: 'mel'
-        #     vocab_size: 6561
-        #     encoder: !new:cosyvoice2.transformer.upsample_encoder_v2.UpsampleConformerEncoderV2
-        #         input_size: 512
-        #         output_size: 512
-        #         input_layer: 'linear'
-        #         pre_lookahead_len: 3
-        #         num_blocks: 6
-        #         num_up_blocks: 4
-        #         up_stride: 2
-        #         up_scale_factor: 2
-        #         attention_heads: 8
-        #         pos_enc_layer_type: 'rel_pos_espnet'
-        #         selfattention_layer_type: 'rel_selfattn'
-        #         key_bias: true
-        #         linear_units: 2048
-        #         dropout_rate: 0.1
-        #         positional_dropout_rate: 0.1
-        #         attention_dropout_rate: 0.1
-        #         normalize_before: True
-        #     decoder: !new:cosyvoice2.flow.flow_matching.CausalConditionalCFM
-        #         inference_cfg_rate: 0.7
-        #         estimator: !new:cosyvoice2.flow.decoder_dit.DiT
-        #             in_channels: 320
-        #             out_channels: 80
-        #             mlp_ratio: 4.0
-        #             depth: 16
-        #             num_heads: 8
-        #             head_dim: 64
-        #             hidden_size: 512
 
         flow_encoder = UpsampleConformerEncoderV2(
             input_size=512,
@@ -2787,9 +2868,9 @@ class StepAudio2Decoder(nn.Module):
 
 
     def _prepare_prompt(self, prompt_wav):
-        audio = s3tokenizer.load_audio(prompt_wav, sr=16000)  # [T]
-        mels = s3tokenizer.log_mel_spectrogram(audio)
-        mels, mels_lens = s3tokenizer.padding([mels])
+        audio = load_audio(prompt_wav, sr=16000)  # [T]
+        mels = log_mel_spectrogram(audio)
+        mels, mels_lens = padding([mels])
         prompt_speech_tokens, prompt_speech_tokens_lens = self.audio_tokenizer.quantize(mels.to(self.device), mels_lens.to(self.device))
 
         spk_feat = kaldi.fbank(audio.unsqueeze(0), num_mel_bins=80, dither=0, sample_frequency=16000)
