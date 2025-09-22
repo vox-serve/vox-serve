@@ -109,16 +109,16 @@ def _rename_weights(weights_dict: dict):
     A new weight dict containing the weights in pytorch format.
     """
     new_weight_dict = {}
-    for k in weights_dict.keys():
+    for k, v in weights_dict.items():
         if "quantizer" in k:  # vq or fsq
             if k == "/quantizer/rq/model/layers.0/_codebook/Pow_1":
-                new_weight_dict["quantizer._codebook.embed"] = weights_dict[k]
+                new_weight_dict["quantizer._codebook.embed"] = v
             elif "project_down" in k:  # v2
-                new_weight_dict[k] = weights_dict[k]
+                new_weight_dict[k] = v
         elif "positional_embedding" in k:  # positional emb
-            new_weight_dict[k] = weights_dict[k]
+            new_weight_dict[k] = v
         elif "conv" in k:  # 1/2 or 1/4 subsample
-            new_weight_dict[k] = weights_dict[k]
+            new_weight_dict[k] = v
         else:  # transformer blocks
             assert "blocks" in k
             new_k = (
@@ -131,7 +131,7 @@ def _rename_weights(weights_dict: dict):
                 .replace("mlp.mlp", "mlp")
             ).replace("fsmn_block.Conv", "fsmn_block.weight")
 
-            new_weight_dict[f"encoder.{new_k}"] = weights_dict[k]
+            new_weight_dict[f"encoder.{new_k}"] = v
     return new_weight_dict
 
 
@@ -288,7 +288,7 @@ def apply_rotary_emb(
 
 def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
     ndim = x.ndim
-    assert 0 <= 1 < ndim
+    assert 1 < ndim
     assert freqs_cis.shape == (x.shape[1], x.shape[-1])
     shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
     return freqs_cis.view(*shape)

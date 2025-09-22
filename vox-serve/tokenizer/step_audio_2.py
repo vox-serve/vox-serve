@@ -1,7 +1,6 @@
 # Adopted from https://github.com/stepfun-ai/Step-Audio2
 
 import math
-import os
 from functools import lru_cache
 from typing import Dict, List, Optional, Tuple, Union
 
@@ -20,8 +19,9 @@ from torch.nn.utils.parametrizations import weight_norm
 from torch.nn.utils.rnn import pad_sequence
 from torchaudio.compliance import kaldi
 
-from .s3 import S3TokenizerV2
 from ..utils import download_github_file
+from .s3 import S3TokenizerV2
+
 
 def dynamic_range_compression_torch(x, C=1, clip_val=1e-5):
     return torch.log(torch.clamp(x, min=clip_val) * C)
@@ -73,7 +73,7 @@ def _mel_filters(device, n_mels: int) -> torch.Tensor:
     filters_path = download_github_file(
         "xingchensong", "S3Tokenizer", "s3tokenizer/assets/mel_filters.npz",
     )
-    
+
     with np.load(filters_path, allow_pickle=False) as f:
         return torch.from_numpy(f[f"mel_{n_mels}"]).to(device)
 
@@ -153,7 +153,6 @@ hann_window = {}
 def mel_spectrogram(
     y, n_fft=1920, num_mels=80, sampling_rate=24000, hop_size=480, win_size=1920, fmin=0, fmax=8000, center=False
 ):
-    global mel_basis, hann_window  # pylint: disable=global-statement
     if f"{str(fmax)}_{str(y.device)}" not in mel_basis:
         mel = librosa.filters.mel(sr=sampling_rate, n_fft=n_fft, n_mels=num_mels, fmin=fmin, fmax=fmax)
         mel_basis[str(fmax) + "_" + str(y.device)] = torch.from_numpy(mel).float().to(y.device)
@@ -523,8 +522,12 @@ class DiTBlock(nn.Module):
         )
         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
-        approx_gelu = lambda: nn.GELU(approximate="tanh")
-        self.mlp = DiTMLP(in_features=hidden_size, hidden_features=mlp_hidden_dim, act_layer=approx_gelu, drop=0)
+        self.mlp = DiTMLP(
+            in_features=hidden_size,
+            hidden_features=mlp_hidden_dim,
+            act_layer=lambda: nn.GELU(approximate="tanh"),
+            drop=0,
+        )
         self.norm3 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.conv = DiTCausalConvBlock(in_channels=hidden_size, out_channels=hidden_size, kernel_size=3)
         self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(hidden_size, 9 * hidden_size, bias=True))
@@ -663,7 +666,7 @@ class DiT(nn.Module):
         # init cuda graph for streaming forward
         with torch.no_grad():
             for chunk_size in [30, 48, 96]:
-                if chunk_size == 30 or chunk_size == 48:
+                if chunk_size in [30, 48]:
                     max_size = 500
                     self.max_size_chunk[chunk_size] = max_size
                 else:
@@ -2755,7 +2758,7 @@ class HiFTGenerator(nn.Module):
         final_signal = reconstructed_full.squeeze(2).squeeze(1)[:, pad_amount:-pad_amount]
 
         return final_signal
-    
+
     def decode(self, x: torch.Tensor, s: torch.Tensor = torch.zeros(1, 1, 0)) -> torch.Tensor:
         s_stft_real, s_stft_imag = self._stft(s.squeeze(1))
         s_stft = torch.cat([s_stft_real, s_stft_imag], dim=1)
@@ -2904,7 +2907,7 @@ class StepAudio2Decoder(nn.Module):
         # hifigan cache
         self.hift_cache_dict = {}
 
-        # preset audio for now 
+        # preset audio for now
         preset_audio = download_github_file(
             "stepfun-ai", "Step-Audio2", "assets/default_female.wav"
         )
@@ -2946,9 +2949,9 @@ class StepAudio2Decoder(nn.Module):
         self.cache = self._prepare_prompt(prompt_wav)
         prompt_speech_tokens, prompt_speech_tokens_lens, spk_emb, prompt_mels, prompt_mels_lens = self.cache
         self.stream_cache = self.flow.setup_cache(
-            torch.cat([prompt_speech_tokens, prompt_speech_tokens[:, :3]], dim=1).to(self.device), 
-            prompt_mels, 
-            spk_emb, 
+            torch.cat([prompt_speech_tokens, prompt_speech_tokens[:, :3]], dim=1).to(self.device),
+            prompt_mels,
+            spk_emb,
             n_timesteps=10,
         )
 

@@ -192,7 +192,10 @@ class StepAudio2BackboneModel(nn.Module):
         super().__init__()
 
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
-        self.layers = nn.ModuleList([StepAudio2DecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
+        self.layers = nn.ModuleList([
+            StepAudio2DecoderLayer(config, layer_idx)
+            for layer_idx in range(config.num_hidden_layers)
+        ])
         self.norm = StepAudio2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
@@ -605,8 +608,19 @@ class StepAudio2Model(BaseLM):
         )
         input_ids = prompt_ids.view(-1, 1) # add codebook dimension
 
-        input_features = torch.zeros(prompt_ids.shape[0], prompt_ids.shape[1], self.config.text_config.hidden_size, device=self.device, dtype=self.dtype)
-        input_masks = torch.zeros(prompt_ids.shape[0], prompt_ids.shape[1], device=self.device, dtype=torch.bool)
+        input_features = torch.zeros(
+            prompt_ids.shape[0],
+            prompt_ids.shape[1],
+            self.config.text_config.hidden_size,
+            device=self.device,
+            dtype=self.dtype,
+        )
+        input_masks = torch.zeros(
+            prompt_ids.shape[0],
+            prompt_ids.shape[1],
+            device=self.device,
+            dtype=torch.bool,
+        )
 
         if mels is not None:
             out, feat_lens = self.model.encoder(mels, mel_lengths)
