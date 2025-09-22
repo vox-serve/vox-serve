@@ -2954,45 +2954,35 @@ class StepAudio2Decoder(nn.Module):
             spk_emb,
             n_timesteps=10,
         )
+        self.stream_cache["conformer_att_cache"] = self.stream_cache["conformer_att_cache"][:, :, :, -128:, :]
+        self.stream_cache["estimator_att_cache"] = self.stream_cache["estimator_att_cache"][:, :, :, :, -128:, :]
 
         # hift cache
         self.hift_cache_dict = dict(
-            mel=torch.zeros(1, prompt_mels.shape[2], 0, device="cuda"),
-            source=torch.zeros(1, 1, 0, device="cuda"),
-            speech=torch.zeros(1, 0, device="cuda"),
+            mel=torch.zeros(1, prompt_mels.shape[2], self.mel_cache_len, device="cuda"),
+            source=torch.zeros(1, 1, self.source_cache_len, device="cuda"),
+            speech=torch.zeros(1, self.source_cache_len, device="cuda"),
         )
 
+    @torch.inference_mode()
     def forward(self, generated_speech_tokens, last_chunk=False):
-        # if prompt_wav not in self.cache:
-        #     self.cache[prompt_wav] = self._prepare_prompt(prompt_wav)
-        _, _, spk_emb, prompt_mels, _ = self.cache
-
-        # generated_speech_tokens_lens = torch.tensor(
-        #     [generated_speech_tokens.shape[1]], dtype=torch.int32, device="cuda"
-        # )
+        _, _, spk_emb, _, _ = self.cache
 
         if self.stream_cache is None:
             raise ValueError("stream_cache is not set")
 
-        self.stream_cache["conformer_att_cache"] = self.stream_cache["conformer_att_cache"][:, :, :, -128:, :]
-        self.stream_cache["estimator_att_cache"] = self.stream_cache["estimator_att_cache"][:, :, :, :, -128:, :]
-
         with torch.amp.autocast("cuda", dtype=torch.float16 if self.float16 else torch.float32):
-            chunk_mel, self.stream_cache = self.flow.inference_chunk(
+            chunk_mel, new_stream_cache = self.flow.inference_chunk(
                 token=generated_speech_tokens,
                 spk=spk_emb,
                 cache=self.stream_cache,
                 last_chunk=last_chunk,
                 n_timesteps=10,
             )
-        if self.stream_cache["estimator_att_cache"].shape[4] > (prompt_mels.shape[1] + 100):
-            self.stream_cache["estimator_att_cache"] = torch.cat(
-                [
-                    self.stream_cache["estimator_att_cache"][:, :, :, :, : prompt_mels.shape[1]],
-                    self.stream_cache["estimator_att_cache"][:, :, :, :, -100:],
-                ],
-                dim=4,
-            )
+            self.stream_cache["conformer_cnn_cache"][:] = new_stream_cache["conformer_cnn_cache"]
+            self.stream_cache["conformer_att_cache"][:] = new_stream_cache["conformer_att_cache"][:, :, :, -128:, :]
+            self.stream_cache["estimator_cnn_cache"][:] = new_stream_cache["estimator_cnn_cache"]
+            self.stream_cache["estimator_att_cache"][:] = new_stream_cache["estimator_att_cache"][:, :, :, :, -128:, :]
 
         # vocoder cache
         hift_cache_mel = self.hift_cache_dict["mel"]
@@ -3007,18 +2997,11 @@ class StepAudio2Decoder(nn.Module):
             speech = fade_in_out(speech, hift_cache_speech, self.speech_window)
 
         # update vocoder cache
-        self.hift_cache_dict = dict(
-            mel=mel[..., -self.mel_cache_len :].clone().detach(),
-            source=source[:, :, -self.source_cache_len :].clone().detach(),
-            speech=speech[:, -self.source_cache_len :].clone().detach(),
-        )
+        self.hift_cache_dict["mel"][:] = mel[..., -self.mel_cache_len :]
+        self.hift_cache_dict["source"][:] = source[:, :, -self.source_cache_len :]
+        self.hift_cache_dict["speech"][:] = speech[:, -self.source_cache_len :]
+
         if not last_chunk:
             speech = speech[:, : -self.source_cache_len]
 
         return speech
-        # wav_np = speech.cpu().numpy()
-        # # Clip to [-1, 1] to avoid overflow, then scale to int16
-        # wav_np = np.clip(wav_np, -1.0, 1.0)
-        # wav_int16 = (wav_np * 32767.0).astype("<i2")  # 16-bit little-endian PCM
-        # pcm_bytes = wav_int16.tobytes()
-        # return pcm_bytes
