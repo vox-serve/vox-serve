@@ -310,14 +310,10 @@ class StepAudio2Model(BaseLM):
         self.model = StepAudio2ForCausalLM(self.config)
         self.model.load_state_dict(
             load_hf_safetensor_state_dict(repo_id=model_name, revision=None, token=None),
-            strict=False,
+            strict=True,
         )
         self.model.to(dtype).to(device)
 
-        # audio_decoder_repo = "zai-org/glm-4-voice-decoder"
-        # audio_decoder_config_path = hf_hub_download(repo_id=audio_decoder_repo, filename="config.yaml", revision=None)
-        # audio_decoder_flow_path = hf_hub_download(repo_id=audio_decoder_repo, filename="flow.pt", revision=None)
-        # audio_decoder_hift_path = hf_hub_download(repo_id=audio_decoder_repo, filename="hift.pt", revision=None)
         self.audio_decoder = StepAudio2Decoder(
             model_path=model_name,
             device=device,
@@ -329,7 +325,6 @@ class StepAudio2Model(BaseLM):
         self._num_key_value_heads = self.config.text_config.num_key_value_heads
         self._num_hidden_layers = self.config.text_config.num_hidden_layers
         self._hidden_size = self.config.text_config.hidden_size
-        # self.vocab_size = self.config.vocab_size
 
         self.stop_token_id = self.text_tokenizer.convert_tokens_to_ids("<|EOT|>")
         self.audio_offset = 151696
@@ -343,9 +338,6 @@ class StepAudio2Model(BaseLM):
             repetition_window=-1,
             cfg_scale=None,
         )
-
-        # for cuda graph compatibility
-        self.detokenize_token_len = torch.tensor([self.detokenize_interval], dtype=torch.int32, device=self.device)
 
     @property
     def n_codebooks(self):
@@ -375,6 +367,16 @@ class StepAudio2Model(BaseLM):
     @property
     def supports_audio_input(self) -> bool:
         """Indicates if the model accepts audio input."""
+        return True
+
+    @property
+    def needs_input_features(self) -> bool:
+        """Indicates if the model requires input_features."""
+        return True
+
+    @property
+    def needs_input_masks(self) -> bool:
+        """Indicates if the model requires input_masks."""
         return True
 
     @property
@@ -419,25 +421,6 @@ class StepAudio2Model(BaseLM):
         from transformers import AutoTokenizer
 
         return AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
-
-    def _extract_speech_token(self, audio_path: str) -> List[List[int]]:
-        """Extract speech tokens from audio file."""
-        audio, sr = torchaudio.load(audio_path)
-        if sr != 16000:
-            # audio = torchaudio.transforms.Resample(orig_freq=sr, new_freq=16000)[0]
-            audio = torchaudio.functional.resample(audio, orig_freq=sr, new_freq=16000)
-
-        output_tokens = []
-        time_step = 0
-        while time_step * 16000 < audio.shape[0]:
-            audio_segment = audio[0, time_step * 16000 : (time_step + 30) * 16000]
-            tokens = self.audio_encoder.encode(audio_segment)
-
-            output_tokens.extend(tokens.tolist())
-
-            time_step += 30
-
-        return output_tokens
 
     def _mel_filters(self, n_mels: int) -> torch.Tensor:
         """Load the mel filterbank matrix for projecting STFT into a Mel spectrogram."""
@@ -544,7 +527,7 @@ class StepAudio2Model(BaseLM):
                         audio = self._load_audio(item['audio'])
                         for i in range(0, audio.shape[0], 16000 * 25):
                             mel = self._log_mel_spectrogram(audio[i:i+16000*25], n_mels=128, padding=479)
-                            mels.append(mel)
+                            mels.append(mel.to(self.device, dtype=self.dtype))
                             audio_tokens = "<audio_patch>" * self._compute_token_num(mel.shape[1])
                             results.append(f"<audio_start>{audio_tokens}<audio_end>")
                     elif item["type"] == "token":
@@ -609,15 +592,14 @@ class StepAudio2Model(BaseLM):
         input_ids = prompt_ids.view(-1, 1) # add codebook dimension
 
         input_features = torch.zeros(
-            prompt_ids.shape[0],
-            prompt_ids.shape[1],
-            self.config.text_config.hidden_size,
+            input_ids.shape[0],
+            self.hidden_size,
             device=self.device,
             dtype=self.dtype,
         )
         input_masks = torch.zeros(
-            prompt_ids.shape[0],
-            prompt_ids.shape[1],
+            input_ids.shape[0],
+            self.n_codebooks,
             device=self.device,
             dtype=torch.bool,
         )
@@ -630,8 +612,8 @@ class StepAudio2Model(BaseLM):
             insert_location[:, 0] += 1
             for idx in range(len(insert_location)):
                 s, _ = insert_location[idx]
-                input_features[s : s + feat_lens[idx], :] = out[idx][:feat_lens[idx]]
-                input_masks[s : s + feat_lens[idx]] = 1
+                input_features[s : s + feat_lens[idx], :] = out[idx, :feat_lens[idx]]
+                input_masks[s : s + feat_lens[idx], :] = 1
 
         # Create repetition cache if repetition penalty is enabled
         repetition_cache = None
@@ -668,7 +650,7 @@ class StepAudio2Model(BaseLM):
         # remove codebook dimension
         inputs_embeds = self.model.embed_tokens(input_ids[:, 0])
 
-        inputs_embeds = torch.where(input_masks[:, :1], input_features, inputs_embeds)
+        inputs_embeds = torch.where(input_masks, input_features, inputs_embeds)
 
         logits = self.model(
             inputs_embeds=inputs_embeds,
