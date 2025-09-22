@@ -21,7 +21,7 @@ from torch.nn.utils.rnn import pad_sequence
 from torchaudio.compliance import kaldi
 
 from .s3 import S3TokenizerV2
-
+from ..utils import download_github_file
 
 def dynamic_range_compression_torch(x, C=1, clip_val=1e-5):
     return torch.log(torch.clamp(x, min=clip_val) * C)
@@ -69,7 +69,11 @@ def _mel_filters(device, n_mels: int) -> torch.Tensor:
     """
     assert n_mels in {80, 128}, f"Unsupported n_mels: {n_mels}"
 
-    filters_path = os.path.join(os.path.dirname(__file__), "assets", "mel_filters.npz")
+    # filters_path = os.path.join(os.path.dirname(__file__), "assets", "mel_filters.npz")
+    filters_path = download_github_file(
+        "xingchensong", "S3Tokenizer", "s3tokenizer/assets/mel_filters.npz",
+    )
+    
     with np.load(filters_path, allow_pickle=False) as f:
         return torch.from_numpy(f[f"mel_{n_mels}"]).to(device)
 
@@ -143,6 +147,8 @@ def padding(data: List[torch.Tensor]):
 
     return padded_feats.transpose(1, 2), feats_lengths
 
+mel_basis = {}
+hann_window = {}
 
 def mel_spectrogram(
     y, n_fft=1920, num_mels=80, sampling_rate=24000, hop_size=480, win_size=1920, fmin=0, fmax=8000, center=False
@@ -381,7 +387,7 @@ class DiTTimestepEmbedder(nn.Module):
         self.scale = 1000
 
     @staticmethod
-    def timestep_embedding(t, dim, max_period=10000):
+    def timestep_embedding(t, dim, max_period=torch.tensor(10000)):
         """
         Create sinusoidal timestep embeddings.
         :param t: a 1-D Tensor of N indices, one per batch element.
@@ -392,7 +398,11 @@ class DiTTimestepEmbedder(nn.Module):
         """
         # https://github.com/openai/glide-text2im/blob/main/glide_text2im/nn.py
         half = dim // 2
-        freqs = torch.exp(-math.log(max_period) * torch.arange(start=0, end=half) / half).to(t)
+        # freqs = torch.exp(-math.log(max_period) * torch.arange(start=0, end=half) / half).to(t)
+        freqs = torch.exp(
+            -torch.log(max_period)
+            * torch.arange(0, half, device=t.device, dtype=t.dtype) / half
+        )
         args = t[:, None] * freqs[None]
         embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
         if dim % 2:
@@ -2204,7 +2214,7 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
         spk = F.normalize(spk, dim=1)
         spk = self.spk_embed_affine_layer(spk)
 
-        token = self.input_embedding(token)
+        token = self.input_embedding(torch.clamp(token, min=0))
         # if not the last chunk, h is shorter than xs for a length of lookahead_length * stride (6)
         h, conformer_cnn_cache, conformer_att_cache = self.encoder.forward_chunk(
             xs=token,
@@ -2455,7 +2465,8 @@ class SineGen2(torch.nn.Module):
         output uv: tensor(batchsize=1, length, 1)
         """
         # fundamental component
-        fn = torch.multiply(f0, torch.FloatTensor([[range(1, self.harmonic_num + 2)]]).to(f0.device))
+        # fn = torch.multiply(f0, torch.FloatTensor([[range(1, self.harmonic_num + 2)]]).to(f0.device))
+        fn = f0 * torch.arange(1, self.harmonic_num + 2, device=f0.device, dtype=f0.dtype)
 
         # generate sine waveforms
         sine_waves = self._f02sine(fn) * self.sine_amp
@@ -2584,9 +2595,12 @@ class HiFTGenerator(nn.Module):
         source_resblock_dilation_sizes: List[List[int]] = [[1, 3, 5], [1, 3, 5], [1, 3, 5]],  # noqa
         lrelu_slope: float = 0.1,
         audio_limit: float = 0.99,
+        device: torch.device = torch.device("cuda"),
         # f0_predictor: torch.nn.Module = None,
     ):
         super(HiFTGenerator, self).__init__()
+
+        self.device = device
 
         self.out_channels = 1
         self.nb_harmonics = nb_harmonics
@@ -2618,7 +2632,7 @@ class HiFTGenerator(nn.Module):
         for i, (u, k) in enumerate(zip(upsample_rates, upsample_kernel_sizes, strict=False)):
             self.ups.append(
                 weight_norm(  # noqa
-                    nn.ConvDiTTranspose1d(
+                    nn.ConvTranspose1d(
                         base_channels // (2**i),
                         base_channels // (2 ** (i + 1)),
                         k,
@@ -2655,7 +2669,9 @@ class HiFTGenerator(nn.Module):
         self.ups.apply(init_weights)
         self.conv_post.apply(init_weights)
         self.reflection_pad = nn.ReflectionPad1d((1, 0))
-        self.stft_window = torch.from_numpy(get_window("hann", istft_params["n_fft"], fftbins=True).astype(np.float32))
+        self.stft_window = torch.from_numpy(
+            get_window("hann", istft_params["n_fft"], fftbins=True
+        ).astype(np.float32)).to(self.device)
         self.f0_predictor = ConvRNNF0Predictor()  # if f0_predictor is None else f0_predictor
 
     def remove_weight_norm(self):
@@ -2678,7 +2694,7 @@ class HiFTGenerator(nn.Module):
             self.istft_params["n_fft"],
             self.istft_params["hop_len"],
             self.istft_params["n_fft"],
-            window=self.stft_window.to(x.device),
+            window=self.stft_window,
             return_complex=True,
         )
         spec = torch.view_as_real(spec)  # [B, F, TT, 2]
@@ -2688,15 +2704,58 @@ class HiFTGenerator(nn.Module):
         magnitude = torch.clip(magnitude, max=1e2)
         real = magnitude * torch.cos(phase)
         img = magnitude * torch.sin(phase)
-        inverse_transform = torch.istft(
-            torch.complex(real, img),
-            self.istft_params["n_fft"],
-            self.istft_params["hop_len"],
-            self.istft_params["n_fft"],
-            window=self.stft_window.to(magnitude.device),
+        # inverse_transform = torch.istft(
+        #     torch.complex(real, img),
+        #     self.istft_params["n_fft"],
+        #     self.istft_params["hop_len"],
+        #     self.istft_params["n_fft"],
+        #     window=self.stft_window,
+        # )
+        inverse_transform = self._istft_graph_safe(
+            torch.complex(real, img), self.istft_params["n_fft"], self.istft_params["hop_len"], self.stft_window
         )
         return inverse_transform
 
+    def _istft_graph_safe(self, comp_tensor, n_fft, hop_len, window):
+        """A cuda graph-compatible implementation of torch.istft."""
+
+        # Get dimensions from the original spectrogram
+        _, _, n_frames = comp_tensor.shape
+
+        # 1. Calculate the full output signal length before trimming
+        # This is the length that the overlap-add procedure will produce
+        expected_signal_len = n_fft + hop_len * (n_frames - 1)
+
+        # 2. Inverse FFT
+        # Perform iFFT on the original, unpadded spectrogram
+        frames = torch.fft.irfft(comp_tensor.permute(0, 2, 1), n=n_fft)
+
+        # 3. Apply the synthesis window
+        windowed_frames = frames * window
+
+        # 4. Overlap-Add using F.fold
+        frames_for_fold = windowed_frames.permute(0, 2, 1)
+        reconstructed_full = F.fold(
+            frames_for_fold, output_size=(1, expected_signal_len), kernel_size=(1, n_fft), stride=(1, hop_len)
+        )
+
+        # 5. Build the normalization denominator using the squared window
+        win_sq = window.pow(2)
+        ones = torch.ones_like(frames_for_fold)
+        win_sq_padded = ones * win_sq.view(1, -1, 1)
+        denom = F.fold(win_sq_padded, output_size=(1, expected_signal_len), kernel_size=(1, n_fft), stride=(1, hop_len))
+
+        # Apply normalization, avoiding division by zero
+        denom = torch.where(denom > 1e-8, denom, torch.ones_like(denom))
+        reconstructed_full /= denom
+
+        # 6. Trim the ends to match the behavior of `center=True`
+        # This is the correct way to handle the centering logic in the inverse transform
+        pad_amount = n_fft // 2
+        final_signal = reconstructed_full.squeeze(2).squeeze(1)[:, pad_amount:-pad_amount]
+
+        return final_signal
+    
     def decode(self, x: torch.Tensor, s: torch.Tensor = torch.zeros(1, 1, 0)) -> torch.Tensor:
         s_stft_real, s_stft_imag = self._stft(s.squeeze(1))
         s_stft = torch.cat([s_stft_real, s_stft_imag], dim=1)
@@ -2748,6 +2807,7 @@ class HiFTGenerator(nn.Module):
 
 class StepAudio2Decoder(nn.Module):
     def __init__(self, model_path, device, float16=False):
+        super().__init__()
         self.device = device
         self.float16 = float16
 
@@ -2772,8 +2832,7 @@ class StepAudio2Decoder(nn.Module):
             revision=None,
         )
 
-        # self.audio_tokenizer = s3tokenizer.load_model(audio_tokenizer_path).to(self.device).eval()
-        self.audio_tokenizer = S3TokenizerV2(audio_tokenizer_path)
+        self.audio_tokenizer = S3TokenizerV2(audio_tokenizer_path).to(device)
 
         option = onnxruntime.SessionOptions()
         option.graph_optimization_level = onnxruntime.GraphOptimizationLevel.ORT_ENABLE_ALL
@@ -2827,7 +2886,7 @@ class StepAudio2Decoder(nn.Module):
         self.flow.load_state_dict(torch.load(flow_path, map_location="cpu", weights_only=True), strict=True)
         self.flow.to(self.device).eval()
 
-        self.hift = HiFTGenerator()
+        self.hift = HiFTGenerator(device=self.device)
         hift_state_dict = {
             k.replace("generator.", ""): v
             for k, v in torch.load(hift_path, map_location="cpu", weights_only=True).items()
@@ -2835,7 +2894,7 @@ class StepAudio2Decoder(nn.Module):
         self.hift.load_state_dict(hift_state_dict, strict=True)
         self.hift.to(self.device).eval()
 
-        self.cache = {}
+        # self.cache = {}
 
         # stream conf
         self.mel_cache_len = 8  # hard-coded, 160ms
@@ -2844,6 +2903,12 @@ class StepAudio2Decoder(nn.Module):
 
         # hifigan cache
         self.hift_cache_dict = {}
+
+        # preset audio for now 
+        preset_audio = download_github_file(
+            "stepfun-ai", "Step-Audio2", "assets/default_female.wav"
+        )
+        self.set_stream_cache(preset_audio)
 
     def _prepare_prompt(self, prompt_wav):
         audio = load_audio(prompt_wav, sr=16000)  # [T]
@@ -2858,6 +2923,7 @@ class StepAudio2Decoder(nn.Module):
         spk_emb = torch.tensor(
             self.spk_model.run(None, {self.spk_model.get_inputs()[0].name: spk_feat.unsqueeze(dim=0).cpu().numpy()})[0],
             device="cuda",
+            dtype=torch.float16,
         )
 
         audio, sample_rate = torchaudio.load(prompt_wav, backend="soundfile")
@@ -2865,7 +2931,7 @@ class StepAudio2Decoder(nn.Module):
         if sample_rate != 24000:
             audio = torchaudio.transforms.Resample(orig_freq=sample_rate, new_freq=24000)(audio)
         prompt_mel = mel_spectrogram(audio).transpose(1, 2).squeeze(0)  # [T, num_mels]
-        prompt_mels = prompt_mel.unsqueeze(0).to(self.device)
+        prompt_mels = prompt_mel.unsqueeze(0).to(self.device, dtype=torch.float16)
         prompt_mels_lens = torch.tensor([prompt_mels.shape[1]], dtype=torch.int32, device="cuda")
         prompt_mels = torch.nn.functional.pad(
             prompt_mels,
@@ -2875,11 +2941,15 @@ class StepAudio2Decoder(nn.Module):
         return prompt_speech_tokens, prompt_speech_tokens_lens, spk_emb, prompt_mels, prompt_mels_lens
 
     def set_stream_cache(self, prompt_wav):
-        if prompt_wav not in self.cache:
-            self.cache[prompt_wav] = self._prepare_prompt(prompt_wav)
-        prompt_speech_tokens, prompt_speech_tokens_lens, spk_emb, prompt_mels, prompt_mels_lens = self.cache[prompt_wav]
+        # if prompt_wav not in self.cache:
+        #     self.cache[prompt_wav] = self._prepare_prompt(prompt_wav)
+        self.cache = self._prepare_prompt(prompt_wav)
+        prompt_speech_tokens, prompt_speech_tokens_lens, spk_emb, prompt_mels, prompt_mels_lens = self.cache
         self.stream_cache = self.flow.setup_cache(
-            torch.cat([prompt_speech_tokens, prompt_speech_tokens[:, :3]], dim=1), prompt_mels, spk_emb, n_timesteps=10
+            torch.cat([prompt_speech_tokens, prompt_speech_tokens[:, :3]], dim=1).to(self.device), 
+            prompt_mels, 
+            spk_emb, 
+            n_timesteps=10,
         )
 
         # hift cache
@@ -2889,15 +2959,14 @@ class StepAudio2Decoder(nn.Module):
             speech=torch.zeros(1, 0, device="cuda"),
         )
 
-    def stream(self, generated_speech_tokens, prompt_wav, last_chunk=False):
-        if prompt_wav not in self.cache:
-            self.cache[prompt_wav] = self._prepare_prompt(prompt_wav)
-        prompt_speech_tokens, prompt_speech_tokens_lens, spk_emb, prompt_mels, prompt_mels_lens = self.cache[prompt_wav]
+    def forward(self, generated_speech_tokens, last_chunk=False):
+        # if prompt_wav not in self.cache:
+        #     self.cache[prompt_wav] = self._prepare_prompt(prompt_wav)
+        _, _, spk_emb, prompt_mels, _ = self.cache
 
-        generated_speech_tokens = torch.tensor([generated_speech_tokens], dtype=torch.int32, device="cuda")
-        generated_speech_tokens_lens = torch.tensor(
-            [generated_speech_tokens.shape[1]], dtype=torch.int32, device="cuda"
-        )
+        # generated_speech_tokens_lens = torch.tensor(
+        #     [generated_speech_tokens.shape[1]], dtype=torch.int32, device="cuda"
+        # )
 
         if self.stream_cache is None:
             raise ValueError("stream_cache is not set")
@@ -2943,9 +3012,10 @@ class StepAudio2Decoder(nn.Module):
         if not last_chunk:
             speech = speech[:, : -self.source_cache_len]
 
-        wav_np = speech.cpu().numpy()
-        # Clip to [-1, 1] to avoid overflow, then scale to int16
-        wav_np = np.clip(wav_np, -1.0, 1.0)
-        wav_int16 = (wav_np * 32767.0).astype("<i2")  # 16-bit little-endian PCM
-        pcm_bytes = wav_int16.tobytes()
-        return pcm_bytes
+        return speech
+        # wav_np = speech.cpu().numpy()
+        # # Clip to [-1, 1] to avoid overflow, then scale to int16
+        # wav_np = np.clip(wav_np, -1.0, 1.0)
+        # wav_int16 = (wav_np * 32767.0).astype("<i2")  # 16-bit little-endian PCM
+        # pcm_bytes = wav_int16.tobytes()
+        # return pcm_bytes

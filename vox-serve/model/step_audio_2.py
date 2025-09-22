@@ -1,5 +1,5 @@
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 import librosa
@@ -53,8 +53,8 @@ class StepAudio2AudioEncoderConfig:
 
 @dataclass
 class StepAudio2Config:
-    text_config: StepAudio2TextConfig = StepAudio2TextConfig()
-    audio_encoder_config: StepAudio2AudioEncoderConfig = StepAudio2AudioEncoderConfig()
+    text_config: StepAudio2TextConfig = field(default_factory=StepAudio2TextConfig)
+    audio_encoder_config: StepAudio2AudioEncoderConfig = field(default_factory=StepAudio2AudioEncoderConfig)
 
     @classmethod
     def from_dict(cls, config_dict: Dict[str, Any]) -> "StepAudio2Config":
@@ -89,9 +89,9 @@ class StepAudio2MLP(nn.Module):
         self.config = config
         self.hidden_size = config.hidden_size
         self.intermediate_size = config.intermediate_size
-        self.gate_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
-        self.up_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
-        self.down_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+        self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
         self.act_fn = torch.nn.SiLU()
 
     def forward(self, x):
@@ -197,11 +197,13 @@ class StepAudio2BackboneModel(nn.Module):
 
     def forward(
         self,
-        hidden_states: torch.Tensor,
+        inputs_embeds: torch.Tensor,
         position_ids: torch.LongTensor,
         attn_wrapper: FlashInferWrapper,
         kv_cache: torch.Tensor,
     ):
+        hidden_states = inputs_embeds
+
         for i, decoder_layer in enumerate(self.layers):
             hidden_states = decoder_layer(
                 hidden_states=hidden_states,
@@ -265,7 +267,7 @@ class StepAudio2ForCausalLM(nn.Module):
             config.text_config.vocab_size,
             bias=False,
         )
-        self.vocab_size = config.vocab_size
+        self.vocab_size = config.text_config.vocab_size
 
     def embed_tokens(self, input_ids):
         return self.model.embed_tokens(input_ids)
@@ -315,6 +317,7 @@ class StepAudio2Model(BaseLM):
         # audio_decoder_hift_path = hf_hub_download(repo_id=audio_decoder_repo, filename="hift.pt", revision=None)
         self.audio_decoder = StepAudio2Decoder(
             model_path=model_name,
+            device=device,
             float16=True,
         )
         self.audio_decoder.to(device)
@@ -389,7 +392,7 @@ class StepAudio2Model(BaseLM):
     @property
     def output_audio_length(self) -> int:
         """Output audio length (in samples) at each postprocess call."""
-        raise NotImplementedError()
+        return 24000
 
     @property
     def max_tokens(self) -> int:
@@ -535,7 +538,7 @@ class StepAudio2Model(BaseLM):
                     if item["type"] == "text":
                         results.append(f"{item['text']}")
                     elif item["type"] == "audio":
-                        audio = self.load_audio(item['audio'])
+                        audio = self._load_audio(item['audio'])
                         for i in range(0, audio.shape[0], 16000 * 25):
                             mel = self._log_mel_spectrogram(audio[i:i+16000*25], n_mels=128, padding=479)
                             mels.append(mel)
@@ -549,12 +552,12 @@ class StepAudio2Model(BaseLM):
                 results.append(f"<|BOT|>{role}\n")
             else:
                 raise ValueError(f"Unsupported content type: {type(content)}")
-        # print(results)
+
         return results, mels
 
     def _format_prompt(self, input_mode: str, prompt: str | None, audio_path: str | None) -> str:
         # TODO: For now, we fix the system prompt and limit to single-turn conversation
-        if input_mode == "audio":
+        if input_mode == "text":
             messages = [
                 {"role": "system", "content": "You are a helpful assistant."},
                 {"role": "human", "content": prompt},
@@ -631,7 +634,7 @@ class StepAudio2Model(BaseLM):
             )
 
         return PreprocessOutput(
-            input_tokens=input_ids.tolist(),
+            input_tokens=input_ids,
             repetition_cache=repetition_cache,
             input_masks=input_masks,
             input_features=input_features,
@@ -720,5 +723,5 @@ class StepAudio2Model(BaseLM):
         return output_ids, task
 
     def postprocess(self, token_ids: torch.Tensor):
-        audio_tensor = self.audio_decoder(token_ids[:, :, 0] - self.audio_offset, self.detokenize_token_len)
+        audio_tensor = self.audio_decoder(token_ids[:1, :, 0] - self.audio_offset)
         return audio_tensor[:, None, :]  # add channel dimension
