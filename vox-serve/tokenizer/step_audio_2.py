@@ -1,6 +1,7 @@
 # Adopted from https://github.com/stepfun-ai/Step-Audio2
 
 import math
+from dataclasses import dataclass
 from functools import lru_cache
 from typing import Dict, List, Optional, Tuple, Union
 
@@ -20,7 +21,28 @@ from torch.nn.utils.rnn import pad_sequence
 from torchaudio.compliance import kaldi
 
 from ..utils import download_github_file
+from .base import DecoderCache
 from .s3 import S3TokenizerV2
+
+
+@dataclass
+class StepAudio2DecoderCache(DecoderCache):
+    """Cache tensors used by StepAudio2Decoder.
+
+    All tensors are batch-first.
+    """
+    spk_emb: torch.Tensor
+
+    # Flow (encoder/estimator) caches
+    conformer_cnn_cache: torch.Tensor
+    conformer_att_cache: torch.Tensor
+    estimator_cnn_cache: torch.Tensor
+    estimator_att_cache: torch.Tensor
+
+    # HiFT (vocoder) caches
+    hift_mel_cache: torch.Tensor
+    hift_source_cache: torch.Tensor
+    hift_speech_cache: torch.Tensor
 
 
 def dynamic_range_compression_torch(x, C=1, clip_val=1e-5):
@@ -632,8 +654,19 @@ class DiT(nn.Module):
         self.inference_buffers_chunk = {}
         self.max_size_chunk = {}
 
-        self.register_buffer("att_cache_buffer", torch.zeros((16, 2, 8, 1000, 128)), persistent=False)
-        self.register_buffer("cnn_cache_buffer", torch.zeros((16, 2, 1024, 2)), persistent=False)
+        # TODO: propagate max_batch_size from outside
+        self.max_batch_size = 8
+
+        self.register_buffer(
+            "att_cache_buffer",
+            torch.zeros((16, 2 * self.max_batch_size, 8, 1000, 128)),
+            persistent=False,
+        )
+        self.register_buffer(
+            "cnn_cache_buffer",
+            torch.zeros((16, 2 * self.max_batch_size, 1024, 2)),
+            persistent=False,
+        )
 
     def initialize_weights(self):
         # Initialize transformer layers:
@@ -771,6 +804,8 @@ class DiT(nn.Module):
         """
 
         # time
+        batch_size = x.shape[0]
+        t = t.repeat(batch_size // 2)
         t = self.t_embedder(t).unsqueeze(1)  # (b, 1, c)
         x = pack([x, mu], "b * t")[0]
         if spks is not None:
@@ -818,10 +853,16 @@ class DiT(nn.Module):
         else:
             mask = None
             x = self.blocks_forward_chunk(
-                x, t, mask, cnn_cache, att_cache, self.cnn_cache_buffer, self.att_cache_buffer
+                x,
+                t,
+                mask,
+                cnn_cache,
+                att_cache,
+                self.cnn_cache_buffer[:, :batch_size],
+                self.att_cache_buffer[:, :batch_size],
             )
-            new_cnn_cache = self.cnn_cache_buffer
-            new_att_cache = self.att_cache_buffer[:, :, :, : last_att_len + chunk_size, :]
+            new_cnn_cache = self.cnn_cache_buffer[:, :batch_size, :, :]
+            new_att_cache = self.att_cache_buffer[:, :batch_size, :, : last_att_len + chunk_size, :]
 
         return x, new_cnn_cache, new_att_cache
 
@@ -847,11 +888,26 @@ class CausalConditionalCFM(torch.nn.Module):
         self.estimator = estimator
         self.inference_cfg_rate = inference_cfg_rate
         self.out_channels = estimator.out_channels
-        # a maximum of 600s
-        self.register_buffer("rand_noise", torch.randn([1, self.out_channels, 50 * 600]), persistent=False)
 
-        self.register_buffer("cnn_cache_buffer", torch.zeros(16, 16, 2, 1024, 2), persistent=False)
-        self.register_buffer("att_cache_buffer", torch.zeros(16, 16, 2, 8, 1000, 128), persistent=False)
+        # TODO: propagate max_batch_size from outside
+        self.max_batch_size = 8
+
+        # a maximum of 600s
+        self.register_buffer(
+            "rand_noise",
+            torch.randn([self.max_batch_size, self.out_channels, 50 * 600]),
+            persistent=False,
+        )
+        self.register_buffer(
+            "cnn_cache_buffer",
+            torch.zeros(16, 16, 2 * self.max_batch_size, 1024, 2),
+            persistent=False,
+        )
+        self.register_buffer(
+            "att_cache_buffer",
+            torch.zeros(16, 16, 2 * self.max_batch_size, 8, 1000, 128),
+            persistent=False,
+        )
 
     def scatter_cuda_graph(self, enable_cuda_graph: bool):
         if enable_cuda_graph:
@@ -905,7 +961,7 @@ class CausalConditionalCFM(torch.nn.Module):
 
     @torch.inference_mode()
     def forward(self, mu, mask, spks, cond, n_timesteps=10, temperature=1.0):
-        z = self.rand_noise[:, :, : mu.size(2)] * temperature
+        z = self.rand_noise[:mu.size(0), :, : mu.size(2)] * temperature
         t_span = torch.linspace(0, 1, n_timesteps + 1, device=mu.device, dtype=mu.dtype)
         # cosine scheduling
         t_span = 1 - torch.cos(t_span * 0.5 * torch.pi)
@@ -980,11 +1036,11 @@ class CausalConditionalCFM(torch.nn.Module):
             if step < len(t_span) - 1:
                 dt = t_span[step + 1] - t
 
-            self.cnn_cache_buffer[step - 1] = this_new_cnn_cache
-            self.att_cache_buffer[step - 1][:, :, :, : x.shape[2] + last_att_len, :] = this_new_att_cache
+            self.cnn_cache_buffer[step - 1, :, :2 * mu.size(0)] = this_new_cnn_cache
+            self.att_cache_buffer[step - 1][:, :2 * mu.size(0), :, : x.shape[2] + last_att_len, :] = this_new_att_cache
 
-        cnn_cache = self.cnn_cache_buffer
-        att_cache = self.att_cache_buffer[:, :, :, :, : x.shape[2] + last_att_len, :]
+        cnn_cache = self.cnn_cache_buffer[:, :, :2 * mu.size(0), :, :]
+        att_cache = self.att_cache_buffer[:, :, :2 * mu.size(0), :, : x.shape[2] + last_att_len, :]
         return x, cnn_cache, att_cache
 
     @torch.inference_mode()
@@ -1008,7 +1064,7 @@ class CausalConditionalCFM(torch.nn.Module):
         """
         # get offset from att_cache
         offset = att_cache.shape[4] if att_cache is not None else 0
-        z = self.rand_noise[:, :, offset : offset + mu.size(2)] * temperature
+        z = self.rand_noise[:mu.size(0), :, offset : offset + mu.size(2)] * temperature
         t_span = torch.linspace(0, 1, n_timesteps + 1, device=mu.device, dtype=mu.dtype)
         # cosine scheduling
         t_span = 1 - torch.cos(t_span * 0.5 * torch.pi)
@@ -2181,6 +2237,18 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
             att_cache=None,
         )
 
+        # Convert caches to batch-first layout at API boundary
+        # conformer_cnn_cache: (b, c, t) -> unchanged (batch-first already)
+        # conformer_att_cache: (depth, b, nh, t, c) -> (b, depth, nh, t, c)
+        if isinstance(conformer_att_cache, torch.Tensor):
+            conformer_att_cache = conformer_att_cache.permute(1, 0, 2, 3, 4).contiguous()
+        # estimator_cnn_cache: (n_time, depth, b, ch, 2) -> (b, n_time, depth, ch, 2)
+        if isinstance(estimator_cnn_cache, torch.Tensor):
+            estimator_cnn_cache = estimator_cnn_cache.permute(2, 0, 1, 3, 4).contiguous()
+        # estimator_att_cache: (n_time, depth, b, nh, t, d) -> (b, n_time, depth, nh, t, d)
+        if isinstance(estimator_att_cache, torch.Tensor):
+            estimator_att_cache = estimator_att_cache.permute(2, 0, 1, 3, 4, 5).contiguous()
+
         cache = {
             "conformer_cnn_cache": conformer_cnn_cache,
             "conformer_att_cache": conformer_att_cache,
@@ -2207,11 +2275,22 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
                 ...
             }
         """
-        # unpack cache
-        conformer_cnn_cache = cache["conformer_cnn_cache"]
+        # unpack cache (batch-first at API), convert to internal layout
+        conformer_cnn_cache = cache["conformer_cnn_cache"]  # (b, c, t) unchanged
         conformer_att_cache = cache["conformer_att_cache"]
         estimator_cnn_cache = cache["estimator_cnn_cache"]
         estimator_att_cache = cache["estimator_att_cache"]
+
+        # conformer_att_cache: (b, depth, nh, t, c) -> (depth, b, nh, t, c)
+        if isinstance(conformer_att_cache, torch.Tensor):
+            conformer_att_cache = conformer_att_cache.permute(1, 0, 2, 3, 4).contiguous()
+        # estimator caches may be None on first call
+        # estimator_cnn_cache: (b, n_time, depth, ch, 2) -> (n_time, depth, b, ch, 2)
+        if isinstance(estimator_cnn_cache, torch.Tensor):
+            estimator_cnn_cache = estimator_cnn_cache.permute(1, 2, 0, 3, 4).contiguous()
+        # estimator_att_cache: (b, n_time, depth, nh, t, d) -> (n_time, depth, b, nh, t, d)
+        if isinstance(estimator_att_cache, torch.Tensor):
+            estimator_att_cache = estimator_att_cache.permute(1, 2, 0, 3, 4, 5).contiguous()
 
         # xvec projection
         spk = F.normalize(spk, dim=1)
@@ -2228,7 +2307,7 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
         h = self.encoder_proj(h)
 
         cond = torch.zeros_like(h)
-        # forward estimator
+        # forward estimator (internal layout)
         feat, estimator_cnn_cache, estimator_att_cache = self.decoder.forward_chunk(
             mu=h.transpose(1, 2).contiguous(),
             spks=spk,
@@ -2238,6 +2317,17 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
             cnn_cache=estimator_cnn_cache,
             att_cache=estimator_att_cache,
         )
+
+        # Convert caches back to batch-first for API return
+        # conformer_att_cache: (depth, b, nh, t, c) -> (b, depth, nh, t, c)
+        if isinstance(conformer_att_cache, torch.Tensor):
+            conformer_att_cache = conformer_att_cache.permute(1, 0, 2, 3, 4).contiguous()
+        # estimator_cnn_cache: (n_time, depth, b, ch, 2) -> (b, n_time, depth, ch, 2)
+        if isinstance(estimator_cnn_cache, torch.Tensor):
+            estimator_cnn_cache = estimator_cnn_cache.permute(2, 0, 1, 3, 4).contiguous()
+        # estimator_att_cache: (n_time, depth, b, nh, t, d) -> (b, n_time, depth, nh, t, d)
+        if isinstance(estimator_att_cache, torch.Tensor):
+            estimator_att_cache = estimator_att_cache.permute(2, 0, 1, 3, 4, 5).contiguous()
 
         new_cache = {
             "conformer_cnn_cache": conformer_cnn_cache,
@@ -2897,21 +2987,15 @@ class StepAudio2Decoder(nn.Module):
         self.hift.load_state_dict(hift_state_dict, strict=True)
         self.hift.to(self.device).eval()
 
-        # self.cache = {}
-
         # stream conf
         self.mel_cache_len = 8  # hard-coded, 160ms
         self.source_cache_len = int(self.mel_cache_len * 480)  # 50hz mel -> 24kHz wave
         self.speech_window = torch.from_numpy(np.hamming(2 * self.source_cache_len)).to(self.device)
 
-        # hifigan cache
-        self.hift_cache_dict = {}
-
         # preset audio for now
-        preset_audio = download_github_file(
+        self.preset_audio = download_github_file(
             "stepfun-ai", "Step-Audio2", "assets/default_female.wav"
         )
-        self.set_stream_cache(preset_audio)
 
     def _prepare_prompt(self, prompt_wav):
         audio = load_audio(prompt_wav, sr=16000)  # [T]
@@ -2943,65 +3027,136 @@ class StepAudio2Decoder(nn.Module):
         )
         return prompt_speech_tokens, prompt_speech_tokens_lens, spk_emb, prompt_mels, prompt_mels_lens
 
-    def set_stream_cache(self, prompt_wav):
-        # if prompt_wav not in self.cache:
-        #     self.cache[prompt_wav] = self._prepare_prompt(prompt_wav)
+    def init_cache(self, prompt_wav = None) -> StepAudio2DecoderCache:
+        if prompt_wav is None:
+            prompt_wav = self.preset_audio
         self.cache = self._prepare_prompt(prompt_wav)
         prompt_speech_tokens, prompt_speech_tokens_lens, spk_emb, prompt_mels, prompt_mels_lens = self.cache
-        self.stream_cache = self.flow.setup_cache(
+        stream_cache = self.flow.setup_cache(
             torch.cat([prompt_speech_tokens, prompt_speech_tokens[:, :3]], dim=1).to(self.device),
             prompt_mels,
             spk_emb,
             n_timesteps=10,
         )
-        self.stream_cache["conformer_att_cache"] = self.stream_cache["conformer_att_cache"][:, :, :, -128:, :]
-        self.stream_cache["estimator_att_cache"] = self.stream_cache["estimator_att_cache"][:, :, :, :, -128:, :]
+        stream_cache["conformer_att_cache"] = stream_cache["conformer_att_cache"][:, :, :, -128:, :]
+        stream_cache["estimator_att_cache"] = stream_cache["estimator_att_cache"][:, :, :, :, -128:, :]
 
-        # hift cache
-        self.hift_cache_dict = dict(
-            mel=torch.zeros(1, prompt_mels.shape[2], self.mel_cache_len, device="cuda"),
-            source=torch.zeros(1, 1, self.source_cache_len, device="cuda"),
-            speech=torch.zeros(1, self.source_cache_len, device="cuda"),
+        # Normalize flow caches: unflatten CFG duplication (b' = 2 * b) into explicit CFG dim.
+        estimator_cnn_cache = stream_cache.get("estimator_cnn_cache")
+        if isinstance(estimator_cnn_cache, torch.Tensor):
+            if estimator_cnn_cache.dim() == 5 and estimator_cnn_cache.shape[0] % 2 == 0:
+                b = estimator_cnn_cache.shape[0] // 2
+                estimator_cnn_cache = estimator_cnn_cache.view(b, 2, *estimator_cnn_cache.shape[1:])
+
+        estimator_att_cache = stream_cache.get("estimator_att_cache")
+        if isinstance(estimator_att_cache, torch.Tensor):
+            # setup_cache returns (b', n_time, depth, nh, t, d) with b' = 2*b
+            if estimator_att_cache.dim() == 6 and estimator_att_cache.shape[0] % 2 == 0:
+                b = estimator_att_cache.shape[0] // 2
+                estimator_att_cache = estimator_att_cache.view(b, 2, *estimator_att_cache.shape[1:])
+
+        new_cache = StepAudio2DecoderCache(
+            spk_emb=spk_emb,
+            conformer_cnn_cache=stream_cache.get("conformer_cnn_cache"),
+            conformer_att_cache=stream_cache.get("conformer_att_cache"),
+            estimator_cnn_cache=estimator_cnn_cache,
+            estimator_att_cache=estimator_att_cache,
+            hift_mel_cache=torch.zeros(1, prompt_mels.shape[2], self.mel_cache_len, device="cuda"),
+            hift_source_cache=torch.zeros(1, 1, self.source_cache_len, device="cuda"),
+            hift_speech_cache=torch.zeros(1, self.source_cache_len, device="cuda"),
         )
+        return new_cache
 
     @torch.inference_mode()
-    def forward(self, generated_speech_tokens, last_chunk=False):
-        _, _, spk_emb, _, _ = self.cache
+    def forward(
+        self,
+        generated_speech_tokens: torch.Tensor,
+        decoder_cache: StepAudio2DecoderCache,
+        last_chunk: bool = False,
+    ) -> Tuple[torch.Tensor, StepAudio2DecoderCache]:
+        # Flatten CFG dimension for estimator caches before passing to flow model
+        # estimator_cnn_cache: (b, 2, n_time, depth, ch, 2) -> (b*2, n_time, depth, ch, 2)
+        estimator_cnn_cache_flat = decoder_cache.estimator_cnn_cache.view(
+            -1,
+            *decoder_cache.estimator_cnn_cache.shape[2:],
+        ) if decoder_cache.estimator_cnn_cache.dim() > 5 else decoder_cache.estimator_cnn_cache
 
-        if self.stream_cache is None:
-            raise ValueError("stream_cache is not set")
+        # estimator_att_cache: (b, 2, n_time, depth, nh, t, d) -> (b*2, n_time, depth, nh, t, d)
+        estimator_att_cache_flat = decoder_cache.estimator_att_cache.view(
+            -1,
+            *decoder_cache.estimator_att_cache.shape[2:],
+        ) if decoder_cache.estimator_att_cache.dim() > 6 else decoder_cache.estimator_att_cache
+
+        # Pack stream cache tensors into expected dict for flow
+        stream_cache = {
+            "conformer_cnn_cache": decoder_cache.conformer_cnn_cache,
+            "conformer_att_cache": decoder_cache.conformer_att_cache,
+            "estimator_cnn_cache": estimator_cnn_cache_flat,
+            "estimator_att_cache": estimator_att_cache_flat,
+        }
 
         with torch.amp.autocast("cuda", dtype=torch.float16 if self.float16 else torch.float32):
             chunk_mel, new_stream_cache = self.flow.inference_chunk(
                 token=generated_speech_tokens,
-                spk=spk_emb,
-                cache=self.stream_cache,
+                spk=decoder_cache.spk_emb,
+                cache=stream_cache,
                 last_chunk=last_chunk,
                 n_timesteps=10,
             )
-            self.stream_cache["conformer_cnn_cache"][:] = new_stream_cache["conformer_cnn_cache"]
-            self.stream_cache["conformer_att_cache"][:] = new_stream_cache["conformer_att_cache"][:, :, :, -128:, :]
-            self.stream_cache["estimator_cnn_cache"][:] = new_stream_cache["estimator_cnn_cache"]
-            self.stream_cache["estimator_att_cache"][:] = new_stream_cache["estimator_att_cache"][:, :, :, :, -128:, :]
 
-        # vocoder cache
-        hift_cache_mel = self.hift_cache_dict["mel"]
-        hift_cache_source = self.hift_cache_dict["source"]
-        hift_cache_speech = self.hift_cache_dict["speech"]
-        mel = torch.concat([hift_cache_mel, chunk_mel], dim=2)
-
-        speech, source = self.hift(mel, hift_cache_source)
+        # vocoder cache (HiFT)
+        mel = torch.concat([decoder_cache.hift_mel_cache, chunk_mel], dim=2)
+        speech, source = self.hift(mel, decoder_cache.hift_source_cache)
 
         # overlap speech smooth
-        if hift_cache_speech.shape[-1] > 0:
-            speech = fade_in_out(speech, hift_cache_speech, self.speech_window)
+        if decoder_cache.hift_speech_cache.shape[-1] > 0:
+            speech = fade_in_out(speech, decoder_cache.hift_speech_cache, self.speech_window)
 
-        # update vocoder cache
-        self.hift_cache_dict["mel"][:] = mel[..., -self.mel_cache_len :]
-        self.hift_cache_dict["source"][:] = source[:, :, -self.source_cache_len :]
-        self.hift_cache_dict["speech"][:] = speech[:, -self.source_cache_len :]
+        # build updated vocoder cache tensors
+        new_hift_mel_cache = mel[..., -self.mel_cache_len :]
+        new_hift_source_cache = source[:, :, -self.source_cache_len :]
+        new_hift_speech_cache = speech[:, -self.source_cache_len :]
 
         if not last_chunk:
             speech = speech[:, : -self.source_cache_len]
 
-        return speech
+        # For flow caches, keep recent attention window consistent with previous behavior
+        # Expect stream_cache to be batch-first; slice time dims accordingly
+        if isinstance(new_stream_cache.get("conformer_att_cache"), torch.Tensor):
+            new_stream_cache["conformer_att_cache"] = new_stream_cache["conformer_att_cache"][:, :, :, -128:, :]
+        if isinstance(new_stream_cache.get("estimator_att_cache"), torch.Tensor):
+            new_stream_cache["estimator_att_cache"] = new_stream_cache["estimator_att_cache"][:, :, :, :, -128:, :]
+
+        # Unflatten CFG dimension for estimator caches
+        # Get original batch size by dividing flattened batch size by CFG factor (2)
+        estimator_cnn_cache_flat = new_stream_cache.get("estimator_cnn_cache")
+        batch_size = estimator_cnn_cache_flat.shape[0] // 2 if estimator_cnn_cache_flat is not None else -1
+
+        # Unflatten estimator_cnn_cache: (b*2, n_time, depth, ch, 2) -> (b, 2, n_time, depth, ch, 2)
+        estimator_cnn_cache_unflat = new_stream_cache.get("estimator_cnn_cache")
+        if estimator_cnn_cache_unflat is not None and batch_size > 0:
+            estimator_cnn_cache_unflat = estimator_cnn_cache_unflat.view(
+                batch_size, 2, *estimator_cnn_cache_unflat.shape[1:])
+
+        # Unflatten estimator_att_cache: (b*2, n_time, depth, nh, t, d) -> (b, 2, n_time, depth, nh, t, d)
+        estimator_att_cache_unflat = new_stream_cache.get("estimator_att_cache")
+        if estimator_att_cache_unflat is not None and batch_size > 0:
+            estimator_att_cache_unflat = estimator_att_cache_unflat.view(
+                batch_size, 2, *estimator_att_cache_unflat.shape[1:])
+
+        updated_cache = StepAudio2DecoderCache(
+            spk_emb=decoder_cache.spk_emb,
+            conformer_cnn_cache=new_stream_cache.get("conformer_cnn_cache"),
+            conformer_att_cache=new_stream_cache.get("conformer_att_cache"),
+            estimator_cnn_cache=estimator_cnn_cache_unflat
+            if batch_size > 0
+            else new_stream_cache.get("estimator_cnn_cache"),
+            estimator_att_cache=estimator_att_cache_unflat
+                if batch_size > 0
+                else new_stream_cache.get("estimator_att_cache"),
+            hift_mel_cache=new_hift_mel_cache,
+            hift_source_cache=new_hift_source_cache,
+            hift_speech_cache=new_hift_speech_cache,
+        )
+
+        return speech, updated_cache

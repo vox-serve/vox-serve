@@ -14,7 +14,7 @@ from ..encoder.step_audio_2 import StepAudio2Encoder
 from ..flashinfer_utils import FlashInferWrapper, apply_rope_pos_ids, rms_norm
 from ..requests import Request
 from ..sampling import Sampler, SamplingConfig
-from ..tokenizer.step_audio_2 import StepAudio2Decoder
+from ..tokenizer.step_audio_2 import StepAudio2Decoder, StepAudio2DecoderCache
 from ..utils import get_logger, load_hf_safetensor_state_dict
 from .base import BaseLM, PreprocessOutput
 
@@ -320,6 +320,7 @@ class StepAudio2Model(BaseLM):
             float16=True,
         )
         self.audio_decoder.to(device)
+        self._audio_decoder_initial_cache = self.audio_decoder.init_cache()
 
         self._num_attention_heads = self.config.text_config.num_attention_heads
         self._num_key_value_heads = self.config.text_config.num_key_value_heads
@@ -629,11 +630,30 @@ class StepAudio2Model(BaseLM):
                 device=self.device,
             )
 
+        # Initial decoder cache for this request (default cache), sized for batch 1
+        decoder_cache = self.audio_decoder_initial_cache(batch_size=1)
+
         return PreprocessOutput(
             input_tokens=input_ids,
             repetition_cache=repetition_cache,
             input_masks=input_masks,
             input_features=input_features,
+            decoder_cache=decoder_cache,
+        )
+
+    def audio_decoder_initial_cache(self, batch_size: int):
+        base_cache = self._audio_decoder_initial_cache
+
+        # Default: clone per-tensor to create an independent cache instance
+        return StepAudio2DecoderCache(
+            spk_emb=base_cache.spk_emb.repeat(batch_size, 1),
+            conformer_cnn_cache=base_cache.conformer_cnn_cache.repeat(batch_size, 1, 1),
+            conformer_att_cache=base_cache.conformer_att_cache.repeat(batch_size, 1, 1, 1, 1),
+            estimator_cnn_cache=base_cache.estimator_cnn_cache.repeat(batch_size, 1, 1, 1, 1, 1),
+            estimator_att_cache=base_cache.estimator_att_cache.repeat(batch_size, 1, 1, 1, 1, 1, 1),
+            hift_mel_cache=base_cache.hift_mel_cache.repeat(batch_size, 1, 1),
+            hift_source_cache=base_cache.hift_source_cache.repeat(batch_size, 1, 1),
+            hift_speech_cache=base_cache.hift_speech_cache.repeat(batch_size, 1),
         )
 
     def forward(
@@ -718,6 +738,17 @@ class StepAudio2Model(BaseLM):
 
         return output_ids, task
 
-    def postprocess(self, token_ids: torch.Tensor):
-        audio_tensor = self.audio_decoder(token_ids[:1, :, 0] - self.audio_offset)
+    def postprocess(self, token_ids: torch.Tensor, decoder_cache: StepAudio2DecoderCache):
+        audio_tensor, new_decoder_cache = self.audio_decoder(
+            token_ids[:, :, 0] - self.audio_offset,
+            decoder_cache
+        )
+        decoder_cache.spk_emb[:] = new_decoder_cache.spk_emb
+        decoder_cache.conformer_cnn_cache[:] = new_decoder_cache.conformer_cnn_cache
+        decoder_cache.conformer_att_cache[:] = new_decoder_cache.conformer_att_cache
+        decoder_cache.estimator_cnn_cache[:] = new_decoder_cache.estimator_cnn_cache
+        decoder_cache.estimator_att_cache[:] = new_decoder_cache.estimator_att_cache
+        decoder_cache.hift_mel_cache[:] = new_decoder_cache.hift_mel_cache
+        decoder_cache.hift_source_cache[:] = new_decoder_cache.hift_source_cache
+        decoder_cache.hift_speech_cache[:] = new_decoder_cache.hift_speech_cache
         return audio_tensor[:, None, :]  # add channel dimension
