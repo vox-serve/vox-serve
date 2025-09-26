@@ -601,7 +601,7 @@ class CSMModel(BaseLMWithDepth):
             )
 
         return PreprocessOutput(
-            input_tokens=prompt_tokens.tolist(),
+            input_tokens=prompt_tokens,
             input_masks=prompt_tokens_mask,
             repetition_cache=repetition_cache
         )

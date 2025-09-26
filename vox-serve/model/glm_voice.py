@@ -506,7 +506,7 @@ class GLMVoiceModel(BaseLM):
                 device=self.device,
             )
 
-        return PreprocessOutput(input_tokens=input_ids.tolist(), repetition_cache=repetition_cache)
+        return PreprocessOutput(input_tokens=input_ids, repetition_cache=repetition_cache)
 
     def forward(
         self,

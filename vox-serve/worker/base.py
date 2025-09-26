@@ -217,6 +217,10 @@ class ModelWorker:
                 if preprocess_output.repetition_cache is not None:
                     req.repetition_cache = preprocess_output.repetition_cache
 
+                # If model provides an initial decoder cache, keep it on the request
+                if getattr(preprocess_output, "decoder_cache", None) is not None:
+                    req.decoder_cache = preprocess_output.decoder_cache
+
                 # input_ids.append(req.input_tokens.to(self.device, non_blocking=True)) # (seq, codebook)
                 input_ids_list.append(req.input_tokens.to(self.device, non_blocking=True)) # (seq, codebook)
                 position_ids_list.extend([i for i in range(len(req.input_tokens))])

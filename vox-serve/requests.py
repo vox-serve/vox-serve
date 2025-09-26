@@ -5,6 +5,7 @@ from typing import List, Optional, TypedDict
 import torch
 
 from .sampling import SamplingConfig
+from .tokenizer.base import DecoderCache
 
 
 @dataclass
@@ -42,6 +43,9 @@ class Request:
     input_features: torch.Tensor = None
     input_masks: torch.Tensor = None
     repetition_cache: torch.Tensor = None  # Shape: (window_size, n_codebooks, vocab_size)
+
+    # optional per-request decoder cache for models whose postprocess requires it
+    decoder_cache: DecoderCache = None
 
     # progress status
     done_lm_prefill: bool = False

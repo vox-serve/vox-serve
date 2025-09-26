@@ -1,3 +1,4 @@
+import dataclasses
 from typing import Coroutine, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -5,6 +6,7 @@ import torch
 
 from ..flashinfer_utils import FlashInferDecodeWrapper, FlashInferPrefillWrapper
 from ..requests import LMInputs, Request
+from ..tokenizer.base import DecoderCache
 from .base import ModelWorker
 
 
@@ -494,11 +496,15 @@ class CudaGraphWorker(ModelWorker):
             device=self.device,
         )
 
+        # Prepare decoder cache for models that require it
+        detokenize_cache_buffer = self.model.audio_decoder_initial_cache(self.max_batch_size)
+
         # Add detokenization buffers to unified buffer dictionary
         self.cuda_graph_buffers.update(
             {
                 "detokenize_input": detokenize_input_buffer,
                 "detokenize_output": detokenize_output_buffer,
+                "detokenize_cache": detokenize_cache_buffer,
             }
         )
 
@@ -519,13 +525,29 @@ class CudaGraphWorker(ModelWorker):
 
             # Warmup runs for detokenization
             for _ in range(5):
-                audio_output = self.model.postprocess(self.cuda_graph_buffers["detokenize_input"][:batch_size])
+                if self.cuda_graph_buffers["detokenize_cache"] is not None:
+                    audio_output = self.model.postprocess(
+                        self.cuda_graph_buffers["detokenize_input"][:batch_size],
+                        decoder_cache=self.cuda_graph_buffers["detokenize_cache"][:batch_size],
+                    )
+                else:
+                    audio_output = self.model.postprocess(
+                        self.cuda_graph_buffers["detokenize_input"][:batch_size]
+                    )
             torch.cuda.synchronize()
 
             detokenize_graph = torch.cuda.CUDAGraph()
 
             with torch.cuda.graph(detokenize_graph, pool=self.cuda_graph_pool):
-                audio_output = self.model.postprocess(self.cuda_graph_buffers["detokenize_input"][:batch_size])
+                if self.cuda_graph_buffers["detokenize_cache"] is not None:
+                    audio_output = self.model.postprocess(
+                        self.cuda_graph_buffers["detokenize_input"][:batch_size],
+                        decoder_cache=self.cuda_graph_buffers["detokenize_cache"][:batch_size],
+                    )
+                else:
+                    audio_output = self.model.postprocess(
+                        self.cuda_graph_buffers["detokenize_input"][:batch_size]
+                    )
 
                 self.cuda_graph_buffers["detokenize_output"][:batch_size].copy_(audio_output)
 
@@ -1124,6 +1146,7 @@ class CudaGraphWorker(ModelWorker):
 
         # Prepare token_ids for multiple chunks from each request
         token_ids = []
+        decoder_caches: List[DecoderCache] = []
         request_chunk_mapping = []  # Track which request each chunk belongs to
 
         for req_idx, req in enumerate(requests):
@@ -1138,6 +1161,9 @@ class CudaGraphWorker(ModelWorker):
                     new_tokens.extend([new_tokens[-1]] * (self.detokenize_interval - len(new_tokens)))
 
                 token_ids.append(torch.cat(new_tokens, dim=0))
+                if req.decoder_cache is not None:
+                    # Each chunk uses the current decoder cache state of its request
+                    decoder_caches.append(req.decoder_cache)
                 request_chunk_mapping.append((req_idx, chunk_idx))
 
         if not token_ids:
@@ -1154,9 +1180,18 @@ class CudaGraphWorker(ModelWorker):
         )
         # token_ids_tensor = torch.tensor(token_ids, device=self.device, dtype=torch.int32)
 
-        self.cuda_graph_buffers["detokenize_input"][:actual_batch_size].copy_(
-            torch.stack(token_ids, dim=0)
-        )
+        self.cuda_graph_buffers["detokenize_input"][:actual_batch_size].copy_(torch.stack(token_ids, dim=0))
+
+        # If a decoder cache is required, batch-merge request caches and copy into the CUDA buffer
+        if self.cuda_graph_buffers["detokenize_cache"] is not None:
+            # Merge per-request caches along batch dimension
+            batched_cache = DecoderCache.cat(decoder_caches)
+            # Copy data from batched_cache into cache_buffer
+            for field in dataclasses.fields(batched_cache):
+                field_name = field.name
+                src_tensor = getattr(batched_cache, field_name)
+                dst_tensor = getattr(self.cuda_graph_buffers["detokenize_cache"][:actual_batch_size], field_name)
+                dst_tensor[:actual_batch_size].copy_(src_tensor)
 
         graph = self.cuda_graphs_detokenization[padded_batch_size]
 
@@ -1167,6 +1202,15 @@ class CudaGraphWorker(ModelWorker):
 
         # Only take outputs for actual batch size
         audio_tensors = self.cuda_graph_buffers["detokenize_output"][:actual_batch_size]
+
+        # Copy back updated decoder caches to each request
+        if self.cuda_graph_buffers["detokenize_cache"] is not None:
+            for i, (req_idx, _chunk_idx) in enumerate(request_chunk_mapping):
+                req = requests[req_idx]
+                for f in dataclasses.fields(type(req.decoder_cache)):
+                    src = getattr(self.cuda_graph_buffers["detokenize_cache"], f.name)[i : i + 1]
+                    dst = getattr(req.decoder_cache, f.name)
+                    dst.copy_(src)
 
         if self.needs_watermarking:
             for i in range(audio_tensors.shape[0]):

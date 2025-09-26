@@ -813,7 +813,7 @@ class ZonosModel(BaseLM):
             )
 
         return PreprocessOutput(
-            input_tokens=prefix_tokens.tolist(),
+            input_tokens=prefix_tokens,
             input_features=expanded_features,
             input_masks=input_mask,
             repetition_cache=repetition_cache

@@ -7,6 +7,7 @@ from .base import BaseLM, BaseLMWithDepth
 from .csm import CSMModel
 from .glm_voice import GLMVoiceModel
 from .orpheus import OrpheusModel
+from .step_audio_2 import StepAudio2Model
 from .zonos import ZonosModel
 
 # Registry mapping model name patterns to model classes
@@ -19,6 +20,8 @@ MODEL_REGISTRY: Dict[str, Type[BaseLM]] = {
     "Zyphra/Zonos-v0.1-transformer": ZonosModel,
     "glm": GLMVoiceModel,
     "zai-org/glm-4-voice-9b": GLMVoiceModel,
+    "step": StepAudio2Model,
+    "stepfun-ai/Step-Audio-2-mini": StepAudio2Model,
 }
 
 
