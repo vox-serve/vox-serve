@@ -2,6 +2,7 @@ from typing import Any, List, Tuple
 
 import torch
 import torchaudio
+from huggingface_hub import hf_hub_download
 from tokenizers.processors import TemplateProcessing
 from torch import nn
 from transformers import AutoTokenizer, CsmConfig, CsmDepthDecoderConfig, CsmPreTrainedModel, LlamaConfig
@@ -10,6 +11,7 @@ from transformers.activations import ACT2FN
 from ..flashinfer_utils import FlashInferWrapper, apply_rope_pos_ids, rms_norm
 from ..requests import Request
 from ..sampling import Sampler, SamplingConfig
+from ..tokenizer.mimi import MimiDecoder
 from ..utils import get_logger
 from .base import BaseLMWithDepth, PreprocessOutput
 
@@ -322,13 +324,12 @@ class CSMModel(BaseLMWithDepth):
         # Use provided tokenizer path or default to model_name
         self.text_tokenizer = self._load_tokenizer(tokenizer_path)
 
-        import moshi
-        from huggingface_hub import hf_hub_download
-
-        # TODO: drop moshi dependency
-        mimi_weight = hf_hub_download("kyutai/moshiko-pytorch-bf16", "tokenizer-e351c8d8-checkpoint125.safetensors")
-        self.audio_tokenizer = moshi.models.loaders.get_mimi(mimi_weight, device=device)
-        self.audio_tokenizer.set_num_codebooks(32)
+        self.audio_tokenizer = MimiDecoder(
+            model_repo="kyutai/moshiko-pytorch-bf16",
+            model_path="tokenizer-e351c8d8-checkpoint125.safetensors",
+            num_codebooks=32,
+            device=device,
+        )
 
         self._num_attention_heads = self.model.config.num_attention_heads
         self._num_key_value_heads = self.model.config.num_key_value_heads
@@ -482,7 +483,6 @@ class CSMModel(BaseLMWithDepth):
     def _set_default_context(self):
         # Example from https://github.com/SesameAILabs/csm/blob/main/run_csm.py
         # Default prompts are available at https://hf.co/sesame/csm-1b
-        from huggingface_hub import hf_hub_download
 
         prompt_filepath_conversational_a = hf_hub_download(
             repo_id="sesame/csm-1b", filename="prompts/conversational_a.wav"
@@ -663,7 +663,7 @@ class CSMModel(BaseLMWithDepth):
         # so here we allocate output_ids for all codebooks but do sampling only for the first one
         output_ids = Sampler.run_sampling(logits.view(-1, self.vocab_size), config=sampling_params)
         output_ids = output_ids.view(logits.shape[0], logits.shape[1])
-        output_ids = output_ids.expand(-1, self.n_codebooks)  # [bs, 33]
+        output_ids = output_ids.repeat(1, self.n_codebooks)  # [bs, 33]
 
         if repetition_cache is not None:
             Sampler.update_repetition_penalty_cache(
@@ -676,14 +676,17 @@ class CSMModel(BaseLMWithDepth):
         hidden_for_depth = torch.cat([hidden_states[:, None, :], c0_embed[:, None, :]], dim=1) # (bs, 2, hidden_size)
 
         for i, req in enumerate(requests):
+            req.input_tokens = torch.zeros(1, self.n_codebooks, dtype=torch.long, device=self.device)
+            req.input_tokens[0, 0] = output_ids[i, 0].item()
+
             req.input_masks = torch.ones(self.n_codebooks, dtype=torch.bool, device=self.device)[None, :]
             req.input_masks[:, -1] = False  # only the audio streams are used in decode phase
 
             # no additional logic for CSM model
-            req.lm_output_tokens.append(output_ids[i].tolist())
+            req.lm_output_tokens.append(output_ids[i : i + 1])
             if not self.is_stop_id(output_ids[i].tolist()):
                 # Don't add the EOS token to lm_output_audio_tokens
-                req.lm_output_audio_tokens.append(output_ids[i].tolist())
+                req.lm_output_audio_tokens.append(output_ids[i : i + 1])
             elif req.next_position_id > self.max_tokens:
                 req.done_lm_generation = True
                 req.finish_reason = "max_tokens_reached"
@@ -731,8 +734,10 @@ class CSMModel(BaseLMWithDepth):
         ci_embed = self.embed_audio_tokens_single(output_ids, i_iteration)
 
         for i, req in enumerate(requests):
-            req.lm_output_tokens[-1][i_iteration] = output_ids[i].item()
-            req.lm_output_audio_tokens[-1][i_iteration] = output_ids[i].item()
+            token_id = output_ids[i].item()
+            req.input_tokens[0, i_iteration] = token_id
+            req.lm_output_tokens[-1][0, i_iteration] = token_id
+            req.lm_output_audio_tokens[-1][0, i_iteration] = token_id
 
         return output_ids, ci_embed
 
