@@ -44,6 +44,7 @@ def run_scheduler_daemon(
     greedy: bool,
     enable_cuda_graph: bool,
     enable_nvtx: bool,
+    enable_torch_compile: bool,
     async_scheduling: bool,
     log_level: str,
 ) -> None:
@@ -70,6 +71,7 @@ def run_scheduler_daemon(
         greedy=greedy,
         enable_cuda_graph=enable_cuda_graph,
         enable_nvtx=enable_nvtx,
+        enable_torch_compile=enable_torch_compile,
         async_scheduling=async_scheduling,
     )
     logger.info(f"Scheduler started successfully with model: {model_name}")
@@ -97,6 +99,7 @@ class APIServer:
         greedy: bool = False,
         enable_cuda_graph: bool = True,
         enable_nvtx: bool = False,
+        enable_torch_compile: bool = False,
         max_num_pages: int = None,
         page_size: int = 2048,
         async_scheduling: bool = False,
@@ -121,6 +124,7 @@ class APIServer:
         self.greedy = greedy
         self.enable_cuda_graph = enable_cuda_graph
         self.enable_nvtx = enable_nvtx
+        self.enable_torch_compile = enable_torch_compile
         self.max_num_pages = max_num_pages
         self.page_size = page_size
         self.scheduler_type = scheduler_type
@@ -200,6 +204,7 @@ class APIServer:
                     'greedy': self.greedy,
                     'enable_cuda_graph': self.enable_cuda_graph,
                     'enable_nvtx': self.enable_nvtx,
+                    'enable_torch_compile': self.enable_torch_compile,
                     'async_scheduling': self.async_scheduling,
                     'log_level': get_global_log_level(),
                 },
@@ -761,6 +766,11 @@ if __name__ == "__main__":
         action="store_true",
         help="Enable NVTX profiling for performance analysis (default: False)"
     )
+    parser.add_argument(
+        "--enable-torch-compile",
+        action="store_true",
+        help="Enable torch.compile optimization for model inference (default: False)"
+    )
     args = parser.parse_args()
 
     # Set global log level for the entire application
@@ -794,6 +804,7 @@ if __name__ == "__main__":
         greedy=args.greedy,
         enable_cuda_graph=enable_cuda_graph,
         enable_nvtx=args.enable_nvtx,
+        enable_torch_compile=args.enable_torch_compile,
         async_scheduling=args.async_scheduling,
     )
 

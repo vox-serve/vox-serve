@@ -34,10 +34,17 @@ class BaseLM(ABC):
     to work with the ModelWorker and scheduler system.
     """
 
-    def __init__(self, model_name: str, device: str = "cuda", dtype: torch.dtype = torch.bfloat16):
+    def __init__(
+        self,
+        model_name: str,
+        device: str = "cuda",
+        dtype: torch.dtype = torch.bfloat16,
+        enable_torch_compile: bool = False,
+    ):
         self.model_name = model_name
         self.device = device
         self.dtype = dtype
+        self.enable_torch_compile = enable_torch_compile
 
     @property
     @abstractmethod
@@ -259,8 +266,14 @@ class BaseLMWithDepth(BaseLM):
     Base class for language models with depth transformer used in vox-serve.
     """
 
-    def __init__(self, model_name: str, device: str = "cuda", dtype: torch.dtype = torch.bfloat16):
-        super().__init__(model_name, device, dtype)
+    def __init__(
+        self,
+        model_name: str,
+        device: str = "cuda",
+        dtype: torch.dtype = torch.bfloat16,
+        enable_torch_compile: bool = False,
+    ):
+        super().__init__(model_name, device, dtype, enable_torch_compile)
 
     @property
     def has_depth_transformer(self) -> bool:

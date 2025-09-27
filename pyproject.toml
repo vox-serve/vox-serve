@@ -11,7 +11,6 @@ dependencies = [
     "flashinfer-python==0.2.11.post1",
     "huggingface-hub==0.34.0",
     "librosa==0.10.2.post1",
-    # "moshi==0.2.11",
     "numpy==1.26.4",
     "safetensors==0.5.3",
     "scipy==1.11.4",
@@ -29,6 +28,7 @@ dependencies = [
     "aiohttp>=3.12.15",
     "onnxruntime>=1.22.1",
     "onnx>=1.19.0",
+    "tiktoken>=0.11.0",
 ]
 
 [tool.ruff]

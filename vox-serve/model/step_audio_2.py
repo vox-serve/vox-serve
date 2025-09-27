@@ -294,10 +294,10 @@ class StepAudio2ForCausalLM(nn.Module):
 
 
 class StepAudio2Model(BaseLM):
-    def __init__(self, model_name, dtype=torch.bfloat16, device="cuda:0"):
+    def __init__(self, model_name, dtype=torch.bfloat16, device="cuda:0", enable_torch_compile=False):
         if model_name == "step":
             model_name = "stepfun-ai/Step-Audio-2-mini"
-        super().__init__(model_name, device, dtype)
+        super().__init__(model_name, device, dtype, enable_torch_compile)
         self.logger = get_logger(__name__)
         config_path = hf_hub_download(repo_id=model_name, filename="config.json", revision=None)
         self.config = StepAudio2Config.from_dict(json.load(open(config_path)))

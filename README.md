@@ -18,6 +18,9 @@ And call the server like this:
 ```bash
 # Generate audio from text
 curl -X POST "http://localhost:<port-number>/generate" -F "text=Hello world" -F "streaming=true" -o output.wav
+
+# For models supporting audio input
+curl -X POST "http://localhost:<port-number>/generate" -F "text=Hello world" -F "@input.wav" -F "streaming=true" -o output.wav
 ```
 
 We currently support the following TTS and STS models:
@@ -26,6 +29,7 @@ We currently support the following TTS and STS models:
 - `orpheus`: [Orpheus-3B](https://huggingface.co/canopylabs/orpheus-3b-0.1-ft)
 - `zonos`: [Zonos-v0.1](https://huggingface.co/Zyphra/Zonos-v0.1-transformer)
 - `glm`: [GLM-4-Voice-9B](https://huggingface.co/zai-org/glm-4-voice-9b)
+- `step`: [Step-Audio-2-Mini](https://huggingface.co/stepfun-ai/Step-Audio-2-mini)
 
 And we are actively working on expanding the support.
 

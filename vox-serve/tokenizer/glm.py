@@ -2582,7 +2582,7 @@ class GLMHiFTModel(nn.Module):
 
 
 class GLMAudioDecoder(nn.Module):
-    def __init__(self, config_path, flow_path, hift_path, device):
+    def __init__(self, config_path, flow_path, hift_path, device, enable_torch_compile=False):
         super().__init__()
         self.device = device
 
@@ -2601,8 +2601,9 @@ class GLMAudioDecoder(nn.Module):
         self.hift = GLMHiFTModel(f0_predictor=ConvRNNF0Predictor())
         self.hift.load_state_dict(torch.load(hift_path, map_location=self.device))
 
-        # self.flow.inference = torch.compile(self.flow.inference, mode="default")
-        self.hift.inference = torch.compile(self.hift.inference, mode="default")
+        if enable_torch_compile:
+            # self.flow.inference = torch.compile(self.flow.inference, mode="default")
+            self.hift.inference = torch.compile(self.hift.inference, mode="default")
 
     def forward(
         self,

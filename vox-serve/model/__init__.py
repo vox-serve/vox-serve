@@ -67,6 +67,7 @@ def load_model(
     repetition_window: int = None,
     cfg_scale: float = None,
     greedy: bool = False,
+    enable_torch_compile: bool = False,
     **kwargs: Any
 ) -> BaseLM | BaseLMWithDepth:
     """
@@ -85,6 +86,7 @@ def load_model(
         repetition_window: Repetition window size (overrides model default if provided)
         cfg_scale: CFG scale for guidance (overrides model default if provided)
         greedy: Enable greedy sampling (ignores other sampling parameters if True)
+        enable_torch_compile: Enable torch.compile optimization for model inference
         **kwargs: Additional arguments to pass to the model constructor
 
     Returns:
@@ -94,7 +96,13 @@ def load_model(
         ValueError: If no suitable model class is found
     """
     model_class = get_model_class(model_name)
-    model = model_class(model_name=model_name, device=device, dtype=dtype, **kwargs)
+    model = model_class(
+        model_name=model_name,
+        device=device,
+        dtype=dtype,
+        enable_torch_compile=enable_torch_compile,
+        **kwargs,
+    )
 
     # Override default sampling config if CLI parameters are provided
     if any(param is not None for param in [

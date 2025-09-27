@@ -33,6 +33,7 @@ class Scheduler:
         greedy: bool = False,
         enable_cuda_graph: bool = True,
         enable_nvtx: bool = False,
+        enable_torch_compile: bool = False,
         async_scheduling: bool = False,
     ):
         self.device = device
@@ -59,6 +60,7 @@ class Scheduler:
                 max_num_pages=max_num_pages,
                 page_size=page_size,
                 enable_nvtx=enable_nvtx,
+                enable_torch_compile=enable_torch_compile,
             )
         else:
             self.logger.info("Using ModelWorker without CUDA graph optimization")
@@ -77,6 +79,7 @@ class Scheduler:
                 max_num_pages=max_num_pages,
                 page_size=page_size,
                 enable_nvtx=enable_nvtx,
+                enable_torch_compile=enable_torch_compile,
             )
 
         self.active_requests: List[Request] = []

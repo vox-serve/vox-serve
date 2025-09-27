@@ -372,6 +372,7 @@ class SNAC(nn.Module):
         vq_strides=[8, 4, 2, 1],
         noise=True,
         depthwise=True,
+        enable_torch_compile=False,
     ):
         super().__init__()
         self.sampling_rate = sampling_rate
@@ -409,7 +410,8 @@ class SNAC(nn.Module):
             attn_window_size=attn_window_size,
         )
 
-        self.decode = torch.compile(self.decode, mode="max-autotune-no-cudagraphs")
+        if enable_torch_compile:
+            self.decode = torch.compile(self.decode, mode="max-autotune-no-cudagraphs")
 
     def preprocess(self, audio_data):
         length = audio_data.shape[-1]
@@ -439,23 +441,24 @@ class SNAC(nn.Module):
         return audio_hat
 
     @classmethod
-    def from_config(cls, config_path):
+    def from_config(cls, config_path, enable_torch_compile=False):
         with open(config_path, "r") as f:
             config = json.load(f)
+        config["enable_torch_compile"] = enable_torch_compile
         model = cls(**config)
         return model
 
     @classmethod
-    def from_pretrained(cls, repo_id, **kwargs):
+    def from_pretrained(cls, repo_id, enable_torch_compile=False, **kwargs):
         from huggingface_hub import hf_hub_download
 
         if not os.path.isdir(repo_id):
             config_path = hf_hub_download(repo_id=repo_id, filename="config.json", **kwargs)
             model_path = hf_hub_download(repo_id=repo_id, filename="pytorch_model.bin", **kwargs)
-            model = cls.from_config(config_path)
+            model = cls.from_config(config_path, enable_torch_compile=enable_torch_compile)
             state_dict = torch.load(model_path, map_location="cpu")
         else:
-            model = cls.from_config(os.path.join(repo_id, "config.json"))
+            model = cls.from_config(os.path.join(repo_id, "config.json"), enable_torch_compile=enable_torch_compile)
             state_dict = torch.load(os.path.join(repo_id, "pytorch_model.bin"), map_location="cpu")
         model.load_state_dict(state_dict)
         model.eval()
