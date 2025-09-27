@@ -493,12 +493,12 @@ supported_language_codes = [
 
 
 class ZonosForCausalLM(nn.Module):
-    def __init__(self, config: ZonosConfig):
+    def __init__(self, config: ZonosConfig, enable_torch_compile: bool = False):
         super().__init__()
         self.config = config
         dim = config.backbone.d_model
 
-        self.autoencoder = DAC()
+        self.autoencoder = DAC(enable_torch_compile=enable_torch_compile)
 
         self.backbone = ZonosBackboneModel(config.backbone)
         self.embeddings = nn.ModuleList([nn.Embedding(1026, dim) for _ in range(self.autoencoder.num_codebooks)])
@@ -531,17 +531,17 @@ class ZonosForCausalLM(nn.Module):
 
 
 class ZonosModel(BaseLM):
-    def __init__(self, model_name, dtype=torch.bfloat16, device="cuda:0"):
+    def __init__(self, model_name, dtype=torch.bfloat16, device="cuda:0", enable_torch_compile=False):
         # TODO: Zonos hybrid model is not yet supported
         if model_name == "zonos":
             model_name = "Zyphra/Zonos-v0.1-transformer"
-        super().__init__(model_name, device, dtype)
+        super().__init__(model_name, device, dtype, enable_torch_compile)
         self.logger = get_logger(__name__)
         config_path = hf_hub_download(repo_id=model_name, filename="config.json", revision=None)
         model_path = hf_hub_download(repo_id=model_name, filename="model.safetensors", revision=None)
 
         self.config = ZonosConfig.from_dict(json.load(open(config_path)))
-        self.model = ZonosForCausalLM(self.config)
+        self.model = ZonosForCausalLM(self.config, enable_torch_compile=self.enable_torch_compile)
         self.model.to(dtype).to(device)
         self.model.autoencoder.dac.to(dtype).to(device)
         self.speaker_encoder = ZonosSpeakerEmbeddingLDA(device=device)

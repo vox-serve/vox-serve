@@ -6,11 +6,12 @@ from transformers.models.dac import DacModel
 
 
 class DAC:
-    def __init__(self):
+    def __init__(self, enable_torch_compile: bool = False):
         super().__init__()
         self.dac = DacModel.from_pretrained("descript/dac_44khz")
         self.dac.eval().requires_grad_(False)
-        self.dac.decode = torch.compile(self.dac.decode, mode="max-autotune-no-cudagraphs")
+        if enable_torch_compile:
+            self.dac.decode = torch.compile(self.dac.decode, mode="max-autotune-no-cudagraphs")
         self.codebook_size = self.dac.config.codebook_size
         self.num_codebooks = self.dac.quantizer.n_codebooks
         self.sampling_rate = self.dac.config.sampling_rate

@@ -1960,13 +1960,11 @@ class UpsampleConformerEncoderV2(torch.nn.Module):
         self.use_cuda_graph = True
         print("CUDA Graph initialized successfully for encoder and up_encoder")
 
-    # @torch.compile(dynamic=True,backend="eager")
     def _forward_impl_encoder(self, x: torch.Tensor, mask: torch.Tensor, pos_emb: torch.Tensor):
         for layer in self.encoders:
             x, _, _, _ = layer(x, mask, pos_emb)
         return x
 
-    # @torch.compile(dynamic=True,backend="eager")
     def _forward_impl_up_encoder(self, x: torch.Tensor, mask: torch.Tensor, pos_emb: torch.Tensor):
         for layer in self.up_encoders:
             x, _, _, _ = layer(x, mask, pos_emb)
@@ -1975,7 +1973,6 @@ class UpsampleConformerEncoderV2(torch.nn.Module):
     def output_size(self) -> int:
         return self._output_size
 
-    # @torch.compile(dynamic=True,backend="eager")
     def forward(
         self,
         xs: torch.Tensor,
@@ -2019,7 +2016,6 @@ class UpsampleConformerEncoderV2(torch.nn.Module):
             xs = self.after_norm(xs)
         return xs, masks
 
-    # @torch.compile(dynamic=True,backend="eager")
     def forward_chunk(
         self,
         xs: torch.Tensor,

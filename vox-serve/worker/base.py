@@ -29,6 +29,7 @@ class ModelWorker:
         cfg_scale: float = None,
         greedy: bool = False,
         enable_nvtx: bool = False,
+        enable_torch_compile: bool = False,
     ):
         # Load model with sampling parameters
         self.model = load_model(
@@ -43,6 +44,7 @@ class ModelWorker:
             repetition_window=repetition_window,
             cfg_scale=cfg_scale,
             greedy=greedy,
+            enable_torch_compile=enable_torch_compile,
         )
         self.device = "cuda:0"
         self.max_batch_size = max_batch_size

@@ -305,10 +305,10 @@ class GLMVoiceForCausalLM(nn.Module):
 
 
 class GLMVoiceModel(BaseLM):
-    def __init__(self, model_name, dtype=torch.bfloat16, device="cuda:0"):
+    def __init__(self, model_name, dtype=torch.bfloat16, device="cuda:0", enable_torch_compile=False):
         if model_name == "glm":
             model_name = "zai-org/glm-4-voice-9b"
-        super().__init__(model_name, device, dtype)
+        super().__init__(model_name, device, dtype, enable_torch_compile)
         self.logger = get_logger(__name__)
         config_path = hf_hub_download(repo_id=model_name, filename="config.json", revision=None)
         self.config = GLMVoiceConfig.from_dict(json.load(open(config_path)))
@@ -339,6 +339,7 @@ class GLMVoiceModel(BaseLM):
             flow_path=audio_decoder_flow_path,
             hift_path=audio_decoder_hift_path,
             device=device,
+            enable_torch_compile=enable_torch_compile,
         )
         self.audio_decoder.to(device)
 

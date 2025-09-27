@@ -223,11 +223,16 @@ class OrpheusForCausalLM(LlamaPreTrainedModel):
 
 class OrpheusModel(BaseLM):
     def __init__(
-        self, model_name, dtype=torch.bfloat16, device="cuda:0", tokenizer_path="canopylabs/orpheus-3b-0.1-ft"
+        self,
+        model_name,
+        dtype=torch.bfloat16,
+        device="cuda:0",
+        tokenizer_path="canopylabs/orpheus-3b-0.1-ft",
+        enable_torch_compile=False,
     ):
         if model_name == "orpheus":
             model_name = "canopylabs/orpheus-3b-0.1-ft"
-        super().__init__(model_name, device, dtype)
+        super().__init__(model_name, device, dtype, enable_torch_compile)
         self.model_name = model_name
         self.model = OrpheusForCausalLM.from_pretrained(model_name)
         self.model.to(dtype).to(device)
@@ -236,7 +241,10 @@ class OrpheusModel(BaseLM):
 
         # Use provided tokenizer path or default to model_name
         self.text_tokenizer = self._load_tokenizer(tokenizer_path)
-        self.audio_tokenizer = SNAC.from_pretrained("hubertsiuzdak/snac_24khz").eval().to(device)
+        self.audio_tokenizer = SNAC.from_pretrained(
+            "hubertsiuzdak/snac_24khz",
+            enable_torch_compile=enable_torch_compile,
+        ).eval().to(device)
 
         self._num_attention_heads = self.model.config.num_attention_heads
         self._num_key_value_heads = self.model.config.num_key_value_heads
