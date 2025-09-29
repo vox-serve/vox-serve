@@ -1,7 +1,32 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "vox-serve"
 version = "0.0.1"
 description = "A serving system for speech language models."
+readme = "README.md"
+license = {file = "LICENSE"}
+authors = [
+    {name = "VoxServe Team"}
+]
+maintainers = [
+    {name = "VoxServe Team"}
+]
+keywords = ["speech", "language-models", "tts", "speech-to-speech", "inference", "serving"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+]
 requires-python = ">=3.12"
 
 # Your project's direct dependencies go here
@@ -30,6 +55,20 @@ dependencies = [
     "onnx>=1.19.0",
     "tiktoken>=0.11.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/vox-serve/vox-serve"
+Repository = "https://github.com/vox-serve/vox-serve"
+Issues = "https://github.com/vox-serve/vox-serve/issues"
+Documentation = "https://github.com/vox-serve/vox-serve#readme"
+
+[project.scripts]
+vox-serve = "vox_serve.launch:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["vox_serve*"]
+exclude = ["tests*", "benchmark*", "examples*"]
 
 [tool.ruff]
 exclude = [".git", ".ruff_cache", ".venv"] 
