@@ -634,7 +634,8 @@ def signal_handler(signum, frame):
     os._exit(0)  # Force immediate exit
 
 
-if __name__ == "__main__":
+def main():
+    """Main entry point for the CLI command"""
     import argparse
     import multiprocessing as mp
 
@@ -787,6 +788,7 @@ if __name__ == "__main__":
     enable_cuda_graph = args.enable_cuda_graph and not args.disable_cuda_graph
 
     # Initialize API server instance with specified model
+    global api_server
     api_server = APIServer(
         model_name=args.model,
         scheduler_type=args.scheduler_type,
@@ -821,3 +823,7 @@ if __name__ == "__main__":
     finally:
         if api_server is not None:
             api_server.cleanup()
+
+
+if __name__ == "__main__":
+    main()

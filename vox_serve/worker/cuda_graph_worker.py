@@ -41,8 +41,8 @@ class CudaGraphWorker(ModelWorker):
         if self.has_depth_transformer:
             self.depth_kv_cache.zero_()
 
-        _memory_reservoir = torch.empty(16 * 1024 ** 3, dtype=torch.uint8, device=self.device)
-        del _memory_reservoir
+        # _memory_reservoir = torch.empty(16 * 1024 ** 3, dtype=torch.uint8, device=self.device)
+        # del _memory_reservoir
 
     @property
     def available_batch_sizes(self) -> List[int]:

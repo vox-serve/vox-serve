@@ -1,16 +1,24 @@
 # VoxServe: a serving system for SpeechLMs
 
-**⚠️ This project is under heavy construction — interfaces are not stable, and performance tuning is in progress.**
+<!-- **⚠️ This project is under heavy construction — interfaces are not stable, and performance tuning is in progress.** -->
 
 VoxServe is a serving system for Speech Language Models (SpeechLMs). VoxServe provides low-latency & high-throughput inference for language models trained for speech tokens, specifically text-to-speech (TTS) and speech-to-speech (STS) models.
 
 ### Usage
 
-Start the inference server with `launch.py`:
+You can install VoxServe via pip:
 
 ```bash
+pip install vox-serve 
+vox-serve --model <model-name> --port <port-number>
+```
+
+Or, you can clone the code and start the inference server with `launch.py`:
+
+```bash
+git clone https://github.com/vox-serve/vox-serve.git
 cd vox-serve
-python -m vox-serve.launch --model <model-name> --port <port-number>
+python -m vox_serve.launch --model <model-name> --port <port-number>
 ```
 
 And call the server like this:
