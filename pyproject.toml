@@ -29,6 +29,9 @@ dependencies = [
     "onnxruntime>=1.22.1",
     "onnx>=1.19.0",
     "tiktoken>=0.11.0",
+    "vector-quantize-pytorch>=1.0.3",
+    "git+https://github.com/descriptinc/audiotools",
+    "omegaconf>=2.3.0"
 ]
 
 [tool.ruff]

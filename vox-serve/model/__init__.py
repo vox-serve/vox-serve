@@ -1,5 +1,5 @@
 from typing import Any, Dict, Type
-
+from transformers import AutoConfig, AutoModel
 import torch
 
 from ..sampling import SamplingConfig
@@ -9,6 +9,12 @@ from .glm_voice import GLMVoiceModel
 from .orpheus import OrpheusModel
 from .step_audio_2 import StepAudio2Model
 from .zonos import ZonosModel
+from .higgs import HiggsModel, HiggsAudioConfig,HiggsAudioModel
+from ..encoder.higgs import HiggsAudioEncoderConfig
+
+AutoConfig.register("higgs_audio_encoder", HiggsAudioEncoderConfig)
+AutoConfig.register("higgs_audio", HiggsAudioConfig)
+AutoModel.register(HiggsAudioConfig, HiggsAudioModel)
 
 # Registry mapping model name patterns to model classes
 MODEL_REGISTRY: Dict[str, Type[BaseLM]] = {
@@ -22,6 +28,7 @@ MODEL_REGISTRY: Dict[str, Type[BaseLM]] = {
     "zai-org/glm-4-voice-9b": GLMVoiceModel,
     "step": StepAudio2Model,
     "stepfun-ai/Step-Audio-2-mini": StepAudio2Model,
+    "higgs": HiggsModel,
 }
 
 
