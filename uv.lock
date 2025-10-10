@@ -2176,7 +2176,7 @@ wheels = [
 [[package]]
 name = "vox-serve"
 version = "0.0.1"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
     { name = "diffusers" },
