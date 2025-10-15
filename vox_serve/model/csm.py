@@ -764,4 +764,5 @@ class CSMModel(BaseLMWithDepth):
 if __name__ == "__main__":
     model = CSMModel(model_name="sesame/csm-1b", dtype=torch.bfloat16, device="cuda:0")
 
-    model.preprocess("Hello from Sesame.", speaker=0, context=[])
+    preprocess_output = model.preprocess("Hello from Sesame.", speaker=0, context=[])
+
