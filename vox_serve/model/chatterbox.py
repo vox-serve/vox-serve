@@ -1,8 +1,9 @@
 import math
 from typing import Any, List, Optional, Union
 
-from collections import dataclass
+from dataclasses import dataclass
 import librosa
+from safetensors.torch import safe_open
 import torch
 from torch import nn
 from tokenizers import Tokenizer
@@ -13,7 +14,7 @@ from huggingface_hub import hf_hub_download
 from ..flashinfer_utils import FlashInferWrapper, apply_rope_pos_ids, rms_norm
 from ..requests import Request
 from ..sampling import Sampler, SamplingConfig
-from ..encoder.chatterbox import ChatterboxCondEnc
+from ..encoder.chatterbox import ChatterboxCondEnc, T3Cond
 from ..tokenizer.chatterbox import ChatterboxDecoder
 from .base import BaseLM, PreprocessOutput
 
@@ -39,9 +40,34 @@ class ChatterboxConfig:
         self.use_perceiver_resampler = True
         self.emotion_adv = True
 
+        # Arbitrary small number that won't cause problems when loading.
+        # These param are unused due to custom input layers.
+        self.vocab_size=8
+        # default params needed for loading most pretrained 1B weights
+        self.max_position_embeddings=131072
+        self.hidden_size=1024
+        self.intermediate_size=4096
+        self.num_hidden_layers=30
+        self.num_attention_heads=16
+        self.head_dim=64
+        self.hidden_act="silu"
+        self.attention_bias=False
+        self.mlp_bias=False
+        self.num_key_value_heads=16
+        self.rms_norm_eps=1e-05
+        self.rope_scaling=dict(
+            factor=8.0,
+            high_freq_factor=4.0,
+            low_freq_factor=1.0,
+            original_max_position_embeddings=8192,
+            rope_type="llama3",
+        )
+        self.rope_theta=500000.0
+        self.pad_token_id = None
+
     @property
     def n_channels(self):
-        return LLAMA_CONFIGS[self.llama_config_name]["hidden_size"]
+        return 1024
     
     @property
     def is_multilingual(self):
@@ -56,6 +82,41 @@ class ChatterboxConfig:
     def multilingual(cls):
         """Create configuration for multilingual TTS model."""
         return cls(text_tokens_dict_size=2454)
+
+
+@dataclass
+class Conditionals:
+    """
+    Conditionals for T3 and S3Gen
+    - T3 conditionals:
+        - speaker_emb
+        - clap_emb
+        - cond_prompt_speech_tokens
+        - cond_prompt_speech_emb
+        - emotion_adv
+    - S3Gen conditionals:
+        - prompt_token
+        - prompt_token_len
+        - prompt_feat
+        - prompt_feat_len
+        - embedding
+    """
+    t3: T3Cond
+    gen: dict
+
+    def to(self, device):
+        self.t3 = self.t3.to(device=device)
+        for k, v in self.gen.items():
+            if torch.is_tensor(v):
+                self.gen[k] = v.to(device=device)
+        return self
+
+    @classmethod
+    def load(cls, fpath, map_location="cpu"):
+        if isinstance(map_location, str):
+            map_location = torch.device(map_location)
+        kwargs = torch.load(fpath, map_location=map_location, weights_only=True)
+        return cls(T3Cond(**kwargs['t3']), kwargs['gen'])
 
 
 class ChatterboxRMSNorm(nn.Module):
@@ -102,7 +163,6 @@ class ChatterboxAttention(nn.Module):
         self.head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
         self.num_key_value_groups = config.num_attention_heads // config.num_key_value_heads
         self.scaling = self.head_dim**-0.5
-        self.attention_dropout = config.attention_dropout
         self.is_causal = True
 
         self.rope_scale = config.rope_scaling.get("factor", 32.0)
@@ -203,6 +263,7 @@ class ChatterboxBackboneModel(nn.Module):
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
+        # not used
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
         self.layers = nn.ModuleList(
             [ChatterboxDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
@@ -260,8 +321,10 @@ class ChatterboxLearnedPositionEmbeddings(nn.Module):
 
 
 class ChatterboxForCausalLM(nn.Module):
-    def __init__(self, config):
-        super().__init__(config)
+    def __init__(self, config: ChatterboxConfig):
+        super().__init__()
+        self.config = config 
+
         self.tfmr = ChatterboxBackboneModel(config)
         self.cond_enc = ChatterboxCondEnc(config)
 
@@ -269,56 +332,50 @@ class ChatterboxForCausalLM(nn.Module):
         self.speech_emb = nn.Embedding(config.speech_tokens_dict_size, config.hidden_size)
         
         self.text_pos_emb = ChatterboxLearnedPositionEmbeddings(config.max_text_tokens + 2, config.hidden_size)
-        self.speech_pos_emb = ChatterboxLearnedPositionEmbeddings(config.max_text_tokens + 4, config.hidden_size)
+        self.speech_pos_emb = ChatterboxLearnedPositionEmbeddings(config.max_speech_tokens + 4, config.hidden_size)
         
         # self.vocab_size = config.vocab_size
         self.text_head = nn.Linear(config.hidden_size, config.text_tokens_dict_size, bias=False)
         self.speech_head = nn.Linear(config.hidden_size, config.speech_tokens_dict_size, bias=False)
     
-    def prepare_conditioning(self, t3_cond: T3Cond):
-        """
-        Token cond data needs to be embedded, so that needs to be here instead of in `T3CondEnc`.
-        """
-        if t3_cond.cond_prompt_speech_tokens is not None and t3_cond.cond_prompt_speech_emb is None:
-            t3_cond.cond_prompt_speech_emb = self.speech_emb(t3_cond.cond_prompt_speech_tokens) + \
-                self.speech_pos_emb(t3_cond.cond_prompt_speech_tokens)
-        return self.cond_enc(t3_cond)  # (B, len_cond, dim)
+    # def prepare_conditioning(self, t3_cond: T3Cond):
+    #     """
+    #     Token cond data needs to be embedded, so that needs to be here instead of in `T3CondEnc`.
+    #     """
+    #     if t3_cond.cond_prompt_speech_tokens is not None and t3_cond.cond_prompt_speech_emb is None:
+    #         t3_cond.cond_prompt_speech_emb = self.speech_emb(t3_cond.cond_prompt_speech_tokens) + \
+    #             self.speech_pos_emb(t3_cond.cond_prompt_speech_tokens)
+    #     return self.cond_enc(t3_cond)  # (B, len_cond, dim)
 
-    def prepare_input_embeds(
-        self,
-        *,
-        t3_cond: T3Cond,
-        text_tokens: torch.LongTensor,
-        speech_tokens: torch.LongTensor,
-        cfg_weight: float = 0.0,
-    ):
-        # prepare input embeddings (skip backbone tranformer embeddings)
-        cond_emb = self.prepare_conditioning(t3_cond)  # (B, len_cond, dim)
-        text_emb = self.text_emb(text_tokens)  # (B, len_text, dim)
-        if cfg_weight > 0.0:
-            text_emb[1].zero_()  # CFG uncond
+    # def prepare_input_embeds(
+    #     self,
+    #     *,
+    #     t3_cond: T3Cond,
+    #     text_tokens: torch.LongTensor,
+    #     speech_tokens: torch.LongTensor,
+    #     cfg_weight: float = 0.0,
+    # ):
+    #     # prepare input embeddings (skip backbone tranformer embeddings)
+    #     cond_emb = self.prepare_conditioning(t3_cond)  # (B, len_cond, dim)
+    #     text_emb = self.text_emb(text_tokens)  # (B, len_text, dim)
+    #     if cfg_weight > 0.0:
+    #         text_emb[1].zero_()  # CFG uncond
 
-        speech_emb = self.speech_emb(speech_tokens)  # (B, len_speech, dim)
-        if self.hp.input_pos_emb == "learned":
-            text_emb = text_emb + self.text_pos_emb(text_tokens)
-            speech_emb = speech_emb + self.speech_pos_emb(speech_tokens)
-        len_cond = cond_emb.size(1)
+    #     speech_emb = self.speech_emb(speech_tokens)  # (B, len_speech, dim)
+    #     if self.hp.input_pos_emb == "learned":
+    #         text_emb = text_emb + self.text_pos_emb(text_tokens)
+    #         speech_emb = speech_emb + self.speech_pos_emb(speech_tokens)
+    #     len_cond = cond_emb.size(1)
 
-        if cond_emb.size(0) != text_emb.size(0):
-             cond_emb = cond_emb.expand(text_emb.size(0), -1, -1)
+    #     if cond_emb.size(0) != text_emb.size(0):
+    #          cond_emb = cond_emb.expand(text_emb.size(0), -1, -1)
 
-        # concat
-        embeds = torch.stack([
-            torch.cat((ce, te, se))
-            for ce, te, se in zip(cond_emb, text_emb, speech_emb)
-        ])  # (B, length, dim)
-        return embeds, len_cond
-
-    def embed_tokens(self, input_ids):
-        return self.model.embed_tokens(input_ids)
-
-    def get_input_embeddings(self):
-        return self.model.embed_tokens
+    #     # concat
+    #     embeds = torch.stack([
+    #         torch.cat((ce, te, se))
+    #         for ce, te, se in zip(cond_emb, text_emb, speech_emb)
+    #     ])  # (B, length, dim)
+    #     return embeds, len_cond
 
     def forward(
         self,
@@ -351,29 +408,53 @@ class ChatterboxModel(BaseLM):
             model_name = "ResembleAI/chatterbox"
         super().__init__(model_name, device, dtype, enable_torch_compile)
         self.model_name = model_name
-        self.model = ChatterboxForCausalLM.from_pretrained(model_name)
-        self.model.load_state_dict(
-            hf_hub_download(repo_id=model_name, filename="t3_cfg.safetensors", revision=None),
-            strict=True,
-        )
+        self.config = ChatterboxConfig.english_only() if "chatterbox" in model_name else ChatterboxConfig.multilingual()
+        self.model = ChatterboxForCausalLM(self.config)
+        self.audio_tokenizer = ChatterboxDecoder()
+
+        state_dict = {}
+        with safe_open(hf_hub_download(repo_id=model_name, filename="t3_cfg.safetensors", revision=None), framework="pt") as f:
+            for key in f.keys():
+                state_dict[key] = f.get_tensor(key)
+        self.model.load_state_dict(state_dict, strict=True)
         self.model.to(dtype).to(device)
 
-        self.audio_tokenizer = ...
+        detokenizer_state_dict = {}
+        with safe_open(hf_hub_download(repo_id=model_name, filename="s3gen.safetensors", revision=None), framework="pt") as f:
+            for key in f.keys():
+                detokenizer_state_dict[key] = f.get_tensor(key)
+        self.audio_tokenizer.load_state_dict(detokenizer_state_dict, strict=False)
+        self.audio_tokenizer.to(device).eval()
 
         # Use provided tokenizer path or default to model_name
         self.text_tokenizer = self._load_tokenizer(model_name)
+
+        self.default_conds = Conditionals.load(
+            hf_hub_download(repo_id=model_name, filename="conds.pt", revision=None), 
+            map_location=device,
+        )
+        print(f"Loaded default conds: {self.default_conds}")
 
         self._num_attention_heads = self.model.config.num_attention_heads
         self._num_key_value_heads = self.model.config.num_key_value_heads
         self._num_hidden_layers = self.model.config.num_hidden_layers
         self._hidden_size = self.model.config.hidden_size
 
+        self.start_token_id = self.config.start_text_token
+        self.stop_token_id = self.config.stop_text_token
+        self.start_speech_token_id = self.config.start_speech_token
+        self.stop_speech_token_id = self.config.stop_speech_token
+
+        self.speech_vocab_size = 6561
+        self.S3GEN_SR = 24000
+        self.S3_SR = 16000
+
         self.default_sampling_config = SamplingConfig(
             top_k=None,
-            top_p=0.8,
+            top_p=0.95,
             min_p=None,
-            temperature=0.6,
-            repetition_penalty=1.3,
+            temperature=0.8,
+            repetition_penalty=1.2,
             repetition_window=-1,
             cfg_scale=None,
         )
@@ -435,7 +516,7 @@ class ChatterboxModel(BaseLM):
     @property
     def vocab_size(self) -> int:
         """Vocabulary size of the model."""
-        return self.model.config.vocab_size
+        return self.model.config.speech_tokens_dict_size
 
     def is_stop_id(self, token_ids: List[int]) -> bool:
         return token_ids[0] == self.stop_token_id
@@ -488,12 +569,12 @@ class ChatterboxModel(BaseLM):
 
     def _prepare_conditionals(self, wav_fpath, exaggeration=0.5):
         ## Load reference wav
-        s3gen_ref_wav, _sr = librosa.load(wav_fpath, sr=S3GEN_SR)
+        s3gen_ref_wav, _sr = librosa.load(wav_fpath, sr=self.S3GEN_SR)
 
-        ref_16k_wav = librosa.resample(s3gen_ref_wav, orig_sr=S3GEN_SR, target_sr=S3_SR)
+        ref_16k_wav = librosa.resample(s3gen_ref_wav, orig_sr=self.S3GEN_SR, target_sr=self.S3_SR)
 
         s3gen_ref_wav = s3gen_ref_wav[:self.DEC_COND_LEN]
-        s3gen_ref_dict = self.s3gen.embed_ref(s3gen_ref_wav, S3GEN_SR, device=self.device)
+        s3gen_ref_dict = self.s3gen.embed_ref(s3gen_ref_wav, self.S3GEN_SR, device=self.device)
 
         # Speech cond prompt tokens
         if plen := self.t3.hp.speech_cond_prompt_len:
@@ -502,7 +583,7 @@ class ChatterboxModel(BaseLM):
             t3_cond_prompt_tokens = torch.atleast_2d(t3_cond_prompt_tokens).to(self.device)
 
         # Voice-encoder speaker embedding
-        ve_embed = torch.from_numpy(self.ve.embeds_from_wavs([ref_16k_wav], sample_rate=S3_SR))
+        ve_embed = torch.from_numpy(self.ve.embeds_from_wavs([ref_16k_wav], sample_rate=self.S3_SR))
         ve_embed = ve_embed.mean(axis=0, keepdim=True).to(self.device)
 
         t3_cond = T3Cond(
@@ -521,10 +602,22 @@ class ChatterboxModel(BaseLM):
         if audio_path:
             conds = self._prepare_conditionals(audio_path)
         
+        # TODO: exaggeration handling
+        # TODO: cfg handling
+        
         prompt = self._punc_norm(prompt)
         input_ids = self.text_tokenizer.encode(prompt)
-        input_ids = [self.start_token_id] + input_ids.ids + [self.stop_token_id]
+        input_ids = [self.start_token_id] + input_ids.ids + [self.stop_token_id, self.start_speech_token_id]
         input_ids = torch.tensor(input_ids, device=self.device).unsqueeze(0)
+
+        # 1 for audio, 0 for text
+        # For now, only text input
+        input_masks = torch.zeros(
+            input_ids.shape[0],
+            self.n_codebooks,
+            device=self.device,
+            dtype=torch.bool,
+        )
 
         # Create repetition cache if repetition penalty is enabled
         repetition_cache = None
@@ -540,7 +633,11 @@ class ChatterboxModel(BaseLM):
                 device=self.device,
             )
 
-        return PreprocessOutput(input_tokens=input_ids, repetition_cache=repetition_cache)
+        return PreprocessOutput(
+            input_tokens=input_ids, 
+            repetition_cache=repetition_cache,
+            input_masks=input_masks,
+        )
 
     def forward(
         self,
@@ -548,11 +645,14 @@ class ChatterboxModel(BaseLM):
         position_ids: torch.Tensor,
         attn_wrapper: FlashInferWrapper,
         kv_cache: torch.Tensor,
+        input_masks: torch.Tensor,
         **kwargs: Any,
     ) -> torch.Tensor:
         """Forward pass through the model."""
         # remove codebook dimension
-        inputs_embeds = self.model.embed_tokens(input_ids[:, 0])
+        text_embeds = self.model.text_emb(input_ids[:, 0])
+        audio_embeds = self.model.speech_emb(input_ids[:, 0])
+        inputs_embeds = torch.where(input_masks, audio_embeds, text_embeds)
 
         logits = self.model(
             inputs_embeds=inputs_embeds,
@@ -593,23 +693,22 @@ class ChatterboxModel(BaseLM):
         for i, req in enumerate(requests):
             req.input_tokens = output_ids[i : i + 1]
 
+            req.input_masks = req.input_masks[:1].zero_()
+
         async def update_req_states():
-            stop_mask = output_ids[:, 0] == self.stop_token_id
-            stop_indices = torch.nonzero(stop_mask, as_tuple=True)[0]
+            stop_mask = output_ids[:, 0] == self.stop_speech_token_id
+            # SOS: speech_vocab_size, EOS: speech_vocab_size + 1
+            audio_mask = (output_ids[:, 0] != self.speech_vocab_size) & \
+                         (output_ids[:, 0] != self.speech_vocab_size + 1) & \
+                         (output_ids[:, 0] < self.speech_vocab_size)
 
             for i, req in enumerate(requests):
                 req.lm_output_tokens.append(output_ids[i : i + 1])
-                req.lm_output_audio_tokens.append(output_ids[i : i + 1])
-
-            # Remove from stop requests
-            for idx in stop_indices:
-                req = requests[idx.item()]
-                # Remove the EOS token from lm_output_audio_tokens
-                req.lm_output_audio_tokens.pop()
-                req.done_lm_generation = True
-                req.finish_reason = "stop_id_encountered"
-
-            for req in requests:
+                if audio_mask[i] and not stop_mask[i]:
+                    req.lm_output_audio_tokens.append(output_ids[i : i + 1])
+                if stop_mask[i]:
+                    req.done_lm_generation = True
+                    req.finish_reason = "stop_id_encountered"
                 if req.next_position_id > self.max_tokens:
                     req.done_lm_generation = True
                     req.finish_reason = "max_tokens_reached"
@@ -623,11 +722,10 @@ class ChatterboxModel(BaseLM):
 
         return output_ids, task
 
-    def _turn_token_into_id(self, output_ids):
-        """Modoel's output ids to audio ids"""
-        return (output_ids - 128256 - 10) % 4096
-
     def postprocess(self, token_ids: torch.Tensor):
         """Convert token IDs to audio bytes."""
-        audio_tensor = self.audio_tokenizer.decode(token_ids)
+        audio_tensor = self.audio_tokenizer.decode(
+            token_ids,
+            ref_dict=self.default_conds.gen,
+        )
         return audio_tensor

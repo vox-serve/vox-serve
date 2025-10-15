@@ -1,7 +1,7 @@
 import math
 from typing import Any, List, Optional
 
-from collections import dataclass
+from dataclasses import dataclass
 from einops import rearrange
 import torch
 from torch import nn
@@ -247,7 +247,7 @@ class ChatterboxCondEnc(nn.Module):
     Handle all non-text conditioning, like speaker embeddings / prompts, CLAP, emotion, etc.
     """
 
-    def __init__(self, hp: ChatterboxConfig):
+    def __init__(self, hp: "ChatterboxConfig"):
         super().__init__()
         self.hp = hp
         if hp.encoder_type == "voice_encoder":

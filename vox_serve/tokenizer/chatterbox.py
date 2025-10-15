@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import logging
-
+from einops import pack, rearrange, repeat
 import librosa
 import numpy as np
 import torch
@@ -23,21 +23,9 @@ import torch.utils.checkpoint as cp
 import torchaudio.compliance.kaldi as Kaldi
 import torchaudio as ta
 from functools import lru_cache
-from typing import List, Optional, OrderedDict, Tuple
+from typing import List, Optional, OrderedDict, Tuple, Any, Dict, Union
 from .s3 import S3TokenizerV2
-
-def drop_invalid_tokens(x):
-    assert len(x.shape) <= 2 and x.shape[0] == 1, "only batch size of one allowed for now"
-    return x[x < SPEECH_VOCAB_SIZE]
-
-
-# TODO: global resampler cache
-@lru_cache(100)
-def get_resampler(src_sr, dst_sr, device):
-    return ta.transforms.Resample(src_sr, dst_sr).to(device)
-
-
-# Adopted from https://github.com/stepfun-ai/Step-Audio2
+import threading
 
 import math
 from dataclasses import dataclass
@@ -61,27 +49,594 @@ from torchaudio.compliance import kaldi
 
 from ..utils import download_github_file
 from .base import DecoderCache
-from .s3 import S3TokenizerV2
+from .s3 import S3TokenizerV2, ModelConfig as S3ModelConfig
+
+class AttrDict(dict):
+    def __init__(self, *args, **kwargs):
+        super(AttrDict, self).__init__(*args, **kwargs)
+        self.__dict__ = self
+
+def drop_invalid_tokens(x):
+    assert len(x.shape) <= 2 and x.shape[0] == 1, "only batch size of one allowed for now"
+    return x[x < SPEECH_VOCAB_SIZE]
 
 
-@dataclass
-class StepAudio2DecoderCache(DecoderCache):
-    """Cache tensors used by StepAudio2Decoder.
+# TODO: global resampler cache
+@lru_cache(100)
+def get_resampler(src_sr, dst_sr, device):
+    return ta.transforms.Resample(src_sr, dst_sr).to(device)
 
-    All tensors are batch-first.
+# Sampling rate of the inputs to S3TokenizerV2
+S3_SR = 16_000
+S3_HOP = 160  # 100 frames/sec
+S3_TOKEN_HOP = 640  # 25 tokens/sec
+S3_TOKEN_RATE = 25
+SPEECH_VOCAB_SIZE = 6561
+
+
+class S3Tokenizer(S3TokenizerV2):
     """
-    spk_emb: torch.Tensor
+    s3tokenizer.S3TokenizerV2 with the following changes:
+    - a more integrated `forward`
+    - compute `log_mel_spectrogram` using `_mel_filters` and `window` in `register_buffers`
+    """
 
-    # Flow (encoder/estimator) caches
-    conformer_cnn_cache: torch.Tensor
-    conformer_att_cache: torch.Tensor
-    estimator_cnn_cache: torch.Tensor
-    estimator_att_cache: torch.Tensor
+    ignore_state_dict_missing = ("_mel_filters", "window")
 
-    # HiFT (vocoder) caches
-    hift_mel_cache: torch.Tensor
-    hift_source_cache: torch.Tensor
-    hift_speech_cache: torch.Tensor
+    def __init__(
+        self,
+        name: str="speech_tokenizer_v2_25hz",
+        config: S3ModelConfig = S3ModelConfig()
+    ):
+        super().__init__(name, init_from_onnx=False)
+
+        self.n_fft = 400
+        _mel_filters = librosa.filters.mel(
+            sr=S3_SR,
+            n_fft=self.n_fft,
+            n_mels=config.n_mels
+        )
+        self.register_buffer(
+            "_mel_filters",
+            torch.FloatTensor(_mel_filters),
+        )
+
+        self.register_buffer(
+            "window",
+            torch.hann_window(self.n_fft),
+        )
+
+    def pad(self, wavs, sr) -> List[torch.Tensor]:
+        """
+        Given a list of wavs with the same `sample_rate`, pad them so that the length is multiple of 40ms (S3 runs at 25 token/sec).
+        """
+        processed_wavs = []
+        for wav in wavs:
+            if isinstance(wav, np.ndarray):
+                wav = torch.from_numpy(wav)
+            if wav.dim() == 1:
+                wav = wav.unsqueeze(0)
+
+            n_tokens = (wav.shape[1] / sr) * S3_TOKEN_RATE
+            n_tokens = np.ceil(n_tokens)
+            intended_wav_len = n_tokens * (sr / S3_TOKEN_RATE)
+            intended_wav_len = int(intended_wav_len)
+            wav = torch.nn.functional.pad(
+                wav,
+                (0, intended_wav_len - wav.shape[-1]),
+                mode="constant",
+                value=0
+            )
+            processed_wavs.append(wav)
+        return processed_wavs
+
+    def _prepare_audio(self, wavs):
+        """Prepare a list of audios for s3tokenizer processing."""
+        processed_wavs = []
+        for wav in wavs:
+            if isinstance(wav, np.ndarray):
+                wav = torch.from_numpy(wav)
+            if wav.dim() == 1:
+                wav = wav.unsqueeze(0)
+
+            processed_wavs.append(wav)
+        return processed_wavs
+
+    @torch.no_grad()
+    def forward(
+        self,
+        wavs: torch.Tensor,
+        # accelerator: 'Accelerator'=None,
+        max_len: int=None,
+    ) -> Tuple[torch.Tensor, torch.LongTensor]:
+        """
+        NOTE: mel-spec has a hop size of 160 points (100 frame/sec).
+        FIXME: this class inherits `nn.Module` but doesn't accept `torch.Tensor` and handles a list of wavs one by one, which is unexpected.
+
+        Args
+        ----
+        - `wavs`: 16 kHz speech audio
+        - `max_len` max length to truncate the output sequence to (25 token/sec).
+        NOTE: please pad the waveform if longer sequence is needed.
+        """
+        processed_wavs = self._prepare_audio(wavs)
+        mels, mel_lens = [], []
+        for wav in processed_wavs:
+            wav = wav.to(self.device)
+            mel = self.log_mel_spectrogram(wav)  # [B=1, F, T]
+            if max_len is not None:
+                mel = mel[..., :max_len * 4]  # num_mel_frames = 4 * num_tokens
+            mels.append(mel.squeeze(0))
+
+        mels, mel_lens = padding(mels)
+        # if accelerator is None:
+        #     tokenizer = self
+        # else:
+        #     tokenizer = accelerator.unwrap_model(self)
+
+        speech_tokens, speech_token_lens = self.quantize(mels, mel_lens.to(self.device))
+        return (
+            speech_tokens.long().detach(),
+            speech_token_lens.long().detach(),
+        )
+
+    def log_mel_spectrogram(
+        self,
+        audio: torch.Tensor,
+        padding: int = 0,
+    ):
+        """
+        Compute the log-Mel spectrogram of
+
+        Parameters
+        ----------
+        audio: torch.Tensor, shape = (*)
+            The path to audio or either a NumPy array or Tensor containing the
+            audio waveform in 16 kHz
+
+        padding: int
+            Number of zero samples to pad to the right
+
+        Returns
+        -------
+        torch.Tensor, shape = (128, n_frames)
+            A Tensor that contains the Mel spectrogram
+        """
+        if not torch.is_tensor(audio):
+            audio = torch.from_numpy(audio)
+
+        audio = audio.to(self.device)
+        if padding > 0:
+            audio = F.pad(audio, (0, padding))
+        stft = torch.stft(
+            audio, self.n_fft, S3_HOP,
+            window=self.window.to(self.device),
+            return_complex=True
+        )
+        magnitudes = stft[..., :-1].abs()**2
+
+        mel_spec = self._mel_filters.to(self.device) @ magnitudes
+
+        log_spec = torch.clamp(mel_spec, min=1e-10).log10()
+        log_spec = torch.maximum(log_spec, log_spec.max() - 8.0)
+        log_spec = (log_spec + 4.0) / 4.0
+        return log_spec
+
+
+def pad_list(xs, pad_value):
+    """Perform padding for the list of tensors.
+
+    Args:
+        xs (List): List of Tensors [(T_1, `*`), (T_2, `*`), ..., (T_B, `*`)].
+        pad_value (float): Value for padding.
+
+    Returns:
+        Tensor: Padded tensor (B, Tmax, `*`).
+
+    Examples:
+        >>> x = [torch.ones(4), torch.ones(2), torch.ones(1)]
+        >>> x
+        [tensor([1., 1., 1., 1.]), tensor([1., 1.]), tensor([1.])]
+        >>> pad_list(x, 0)
+        tensor([[1., 1., 1., 1.],
+                [1., 1., 0., 0.],
+                [1., 0., 0., 0.]])
+
+    """
+    n_batch = len(xs)
+    max_len = max(x.size(0) for x in xs)
+    pad = xs[0].new(n_batch, max_len, *xs[0].size()[1:]).fill_(pad_value)
+
+    for i in range(n_batch):
+        pad[i, : xs[i].size(0)] = xs[i]
+
+    return pad
+
+
+def extract_feature(audio):
+    features = []
+    feature_times = []
+    feature_lengths = []
+    for au in audio:
+        feature = Kaldi.fbank(au.unsqueeze(0), num_mel_bins=80)
+        feature = feature - feature.mean(dim=0, keepdim=True)
+        features.append(feature)
+        feature_times.append(au.shape[0])
+        feature_lengths.append(feature.shape[0])
+    # padding for batch inference
+    features_padded = pad_list(features, pad_value=0)
+    # features = torch.cat(features)
+    return features_padded, feature_lengths, feature_times
+
+
+class BasicResBlock(torch.nn.Module):
+    expansion = 1
+
+    def __init__(self, in_planes, planes, stride=1):
+        super(BasicResBlock, self).__init__()
+        self.conv1 = torch.nn.Conv2d(
+            in_planes, planes, kernel_size=3, stride=(stride, 1), padding=1, bias=False
+        )
+        self.bn1 = torch.nn.BatchNorm2d(planes)
+        self.conv2 = torch.nn.Conv2d(planes, planes, kernel_size=3, stride=1, padding=1, bias=False)
+        self.bn2 = torch.nn.BatchNorm2d(planes)
+
+        self.shortcut = torch.nn.Sequential()
+        if stride != 1 or in_planes != self.expansion * planes:
+            self.shortcut = torch.nn.Sequential(
+                torch.nn.Conv2d(
+                    in_planes,
+                    self.expansion * planes,
+                    kernel_size=1,
+                    stride=(stride, 1),
+                    bias=False,
+                ),
+                torch.nn.BatchNorm2d(self.expansion * planes),
+            )
+
+    def forward(self, x):
+        out = F.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        out += self.shortcut(x)
+        out = F.relu(out)
+        return out
+
+
+class FCM(torch.nn.Module):
+    def __init__(self, block=BasicResBlock, num_blocks=[2, 2], m_channels=32, feat_dim=80):
+        super(FCM, self).__init__()
+        self.in_planes = m_channels
+        self.conv1 = torch.nn.Conv2d(1, m_channels, kernel_size=3, stride=1, padding=1, bias=False)
+        self.bn1 = torch.nn.BatchNorm2d(m_channels)
+
+        self.layer1 = self._make_layer(block, m_channels, num_blocks[0], stride=2)
+        self.layer2 = self._make_layer(block, m_channels, num_blocks[0], stride=2)
+
+        self.conv2 = torch.nn.Conv2d(
+            m_channels, m_channels, kernel_size=3, stride=(2, 1), padding=1, bias=False
+        )
+        self.bn2 = torch.nn.BatchNorm2d(m_channels)
+        self.out_channels = m_channels * (feat_dim // 8)
+
+    def _make_layer(self, block, planes, num_blocks, stride):
+        strides = [stride] + [1] * (num_blocks - 1)
+        layers = []
+        for stride in strides:
+            layers.append(block(self.in_planes, planes, stride))
+            self.in_planes = planes * block.expansion
+        return torch.nn.Sequential(*layers)
+
+    def forward(self, x):
+        x = x.unsqueeze(1)
+        out = F.relu(self.bn1(self.conv1(x)))
+        out = self.layer1(out)
+        out = self.layer2(out)
+        out = F.relu(self.bn2(self.conv2(out)))
+
+        shape = out.shape
+        out = out.reshape(shape[0], shape[1] * shape[2], shape[3])
+        return out
+
+
+def get_nonlinear(config_str, channels):
+    nonlinear = torch.nn.Sequential()
+    for name in config_str.split("-"):
+        if name == "relu":
+            nonlinear.add_module("relu", torch.nn.ReLU(inplace=True))
+        elif name == "prelu":
+            nonlinear.add_module("prelu", torch.nn.PReLU(channels))
+        elif name == "batchnorm":
+            nonlinear.add_module("batchnorm", torch.nn.BatchNorm1d(channels))
+        elif name == "batchnorm_":
+            nonlinear.add_module("batchnorm", torch.nn.BatchNorm1d(channels, affine=False))
+        else:
+            raise ValueError("Unexpected module ({}).".format(name))
+    return nonlinear
+
+
+def statistics_pooling(x, dim=-1, keepdim=False, unbiased=True, eps=1e-2):
+    mean = x.mean(dim=dim)
+    std = x.std(dim=dim, unbiased=unbiased)
+    stats = torch.cat([mean, std], dim=-1)
+    if keepdim:
+        stats = stats.unsqueeze(dim=dim)
+    return stats
+
+
+class StatsPool(torch.nn.Module):
+    def forward(self, x):
+        return statistics_pooling(x)
+
+
+class TDNNLayer(torch.nn.Module):
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        kernel_size,
+        stride=1,
+        padding=0,
+        dilation=1,
+        bias=False,
+        config_str="batchnorm-relu",
+    ):
+        super(TDNNLayer, self).__init__()
+        if padding < 0:
+            assert (
+                kernel_size % 2 == 1
+            ), "Expect equal paddings, but got even kernel size ({})".format(kernel_size)
+            padding = (kernel_size - 1) // 2 * dilation
+        self.linear = torch.nn.Conv1d(
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride=stride,
+            padding=padding,
+            dilation=dilation,
+            bias=bias,
+        )
+        self.nonlinear = get_nonlinear(config_str, out_channels)
+
+    def forward(self, x):
+        x = self.linear(x)
+        x = self.nonlinear(x)
+        return x
+
+
+class CAMLayer(torch.nn.Module):
+    def __init__(
+        self, bn_channels, out_channels, kernel_size, stride, padding, dilation, bias, reduction=2
+    ):
+        super(CAMLayer, self).__init__()
+        self.linear_local = torch.nn.Conv1d(
+            bn_channels,
+            out_channels,
+            kernel_size,
+            stride=stride,
+            padding=padding,
+            dilation=dilation,
+            bias=bias,
+        )
+        self.linear1 = torch.nn.Conv1d(bn_channels, bn_channels // reduction, 1)
+        self.relu = torch.nn.ReLU(inplace=True)
+        self.linear2 = torch.nn.Conv1d(bn_channels // reduction, out_channels, 1)
+        self.sigmoid = torch.nn.Sigmoid()
+
+    def forward(self, x):
+        y = self.linear_local(x)
+        context = x.mean(-1, keepdim=True) + self.seg_pooling(x)
+        context = self.relu(self.linear1(context))
+        m = self.sigmoid(self.linear2(context))
+        return y * m
+
+    def seg_pooling(self, x, seg_len=100, stype="avg"):
+        if stype == "avg":
+            seg = F.avg_pool1d(x, kernel_size=seg_len, stride=seg_len, ceil_mode=True)
+        elif stype == "max":
+            seg = F.max_pool1d(x, kernel_size=seg_len, stride=seg_len, ceil_mode=True)
+        else:
+            raise ValueError("Wrong segment pooling type.")
+        shape = seg.shape
+        seg = seg.unsqueeze(-1).expand(*shape, seg_len).reshape(*shape[:-1], -1)
+        seg = seg[..., : x.shape[-1]]
+        return seg
+
+
+class CAMDenseTDNNLayer(torch.nn.Module):
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        bn_channels,
+        kernel_size,
+        stride=1,
+        dilation=1,
+        bias=False,
+        config_str="batchnorm-relu",
+        memory_efficient=False,
+    ):
+        super(CAMDenseTDNNLayer, self).__init__()
+        assert kernel_size % 2 == 1, "Expect equal paddings, but got even kernel size ({})".format(
+            kernel_size
+        )
+        padding = (kernel_size - 1) // 2 * dilation
+        self.memory_efficient = memory_efficient
+        self.nonlinear1 = get_nonlinear(config_str, in_channels)
+        self.linear1 = torch.nn.Conv1d(in_channels, bn_channels, 1, bias=False)
+        self.nonlinear2 = get_nonlinear(config_str, bn_channels)
+        self.cam_layer = CAMLayer(
+            bn_channels,
+            out_channels,
+            kernel_size,
+            stride=stride,
+            padding=padding,
+            dilation=dilation,
+            bias=bias,
+        )
+
+    def bn_function(self, x):
+        return self.linear1(self.nonlinear1(x))
+
+    def forward(self, x):
+        if self.training and self.memory_efficient:
+            x = cp.checkpoint(self.bn_function, x)
+        else:
+            x = self.bn_function(x)
+        x = self.cam_layer(self.nonlinear2(x))
+        return x
+
+
+class CAMDenseTDNNBlock(torch.nn.ModuleList):
+    def __init__(
+        self,
+        num_layers,
+        in_channels,
+        out_channels,
+        bn_channels,
+        kernel_size,
+        stride=1,
+        dilation=1,
+        bias=False,
+        config_str="batchnorm-relu",
+        memory_efficient=False,
+    ):
+        super(CAMDenseTDNNBlock, self).__init__()
+        for i in range(num_layers):
+            layer = CAMDenseTDNNLayer(
+                in_channels=in_channels + i * out_channels,
+                out_channels=out_channels,
+                bn_channels=bn_channels,
+                kernel_size=kernel_size,
+                stride=stride,
+                dilation=dilation,
+                bias=bias,
+                config_str=config_str,
+                memory_efficient=memory_efficient,
+            )
+            self.add_module("tdnnd%d" % (i + 1), layer)
+
+    def forward(self, x):
+        for layer in self:
+            x = torch.cat([x, layer(x)], dim=1)
+        return x
+
+
+class TransitLayer(torch.nn.Module):
+    def __init__(self, in_channels, out_channels, bias=True, config_str="batchnorm-relu"):
+        super(TransitLayer, self).__init__()
+        self.nonlinear = get_nonlinear(config_str, in_channels)
+        self.linear = torch.nn.Conv1d(in_channels, out_channels, 1, bias=bias)
+
+    def forward(self, x):
+        x = self.nonlinear(x)
+        x = self.linear(x)
+        return x
+
+
+class DenseLayer(torch.nn.Module):
+    def __init__(self, in_channels, out_channels, bias=False, config_str="batchnorm-relu"):
+        super(DenseLayer, self).__init__()
+        self.linear = torch.nn.Conv1d(in_channels, out_channels, 1, bias=bias)
+        self.nonlinear = get_nonlinear(config_str, out_channels)
+
+    def forward(self, x):
+        if len(x.shape) == 2:
+            x = self.linear(x.unsqueeze(dim=-1)).squeeze(dim=-1)
+        else:
+            x = self.linear(x)
+        x = self.nonlinear(x)
+        return x
+
+# @tables.register("model_classes", "CAMPPlus")
+class CAMPPlus(torch.nn.Module):
+    def __init__(
+        self,
+        feat_dim=80,
+        embedding_size=192,
+        growth_rate=32,
+        bn_size=4,
+        init_channels=128,
+        config_str="batchnorm-relu",
+        memory_efficient=True,
+        output_level="segment",
+        **kwargs,
+    ):
+        super().__init__()
+
+        self.head = FCM(feat_dim=feat_dim)
+        channels = self.head.out_channels
+        self.output_level = output_level
+
+        self.xvector = torch.nn.Sequential(
+            OrderedDict(
+                [
+                    (
+                        "tdnn",
+                        TDNNLayer(
+                            channels,
+                            init_channels,
+                            5,
+                            stride=2,
+                            dilation=1,
+                            padding=-1,
+                            config_str=config_str,
+                        ),
+                    ),
+                ]
+            )
+        )
+        channels = init_channels
+        for i, (num_layers, kernel_size, dilation) in enumerate(
+            zip((12, 24, 16), (3, 3, 3), (1, 2, 2))
+        ):
+            block = CAMDenseTDNNBlock(
+                num_layers=num_layers,
+                in_channels=channels,
+                out_channels=growth_rate,
+                bn_channels=bn_size * growth_rate,
+                kernel_size=kernel_size,
+                dilation=dilation,
+                config_str=config_str,
+                memory_efficient=memory_efficient,
+            )
+            self.xvector.add_module("block%d" % (i + 1), block)
+            channels = channels + num_layers * growth_rate
+            self.xvector.add_module(
+                "transit%d" % (i + 1),
+                TransitLayer(channels, channels // 2, bias=False, config_str=config_str),
+            )
+            channels //= 2
+
+        self.xvector.add_module("out_nonlinear", get_nonlinear(config_str, channels))
+
+        if self.output_level == "segment":
+            self.xvector.add_module("stats", StatsPool())
+            self.xvector.add_module(
+                "dense", DenseLayer(channels * 2, embedding_size, config_str="batchnorm_")
+            )
+        else:
+            assert (
+                self.output_level == "frame"
+            ), "`output_level` should be set to 'segment' or 'frame'. "
+
+        for m in self.modules():
+            if isinstance(m, (torch.nn.Conv1d, torch.nn.Linear)):
+                torch.nn.init.kaiming_normal_(m.weight.data)
+                if m.bias is not None:
+                    torch.nn.init.zeros_(m.bias)
+
+    def forward(self, x):
+        x = x.permute(0, 2, 1)  # (B,T,F) => (B,F,T)
+        x = self.head(x)
+        x = self.xvector(x)
+        if self.output_level == "frame":
+            x = x.transpose(1, 2)
+        return x
+
+    def inference(self, audio_list):
+        speech, speech_lengths, speech_times = extract_feature(audio_list)
+        results = self.forward(speech.to(torch.float32))
+        return results
 
 
 def dynamic_range_compression_torch(x, C=1, clip_val=1e-5):
@@ -284,199 +839,445 @@ def make_pad_mask(lengths: torch.Tensor, max_len: int = 0) -> torch.Tensor:
     return mask
 
 
-class DiTMLP(torch.nn.Module):
-    def __init__(
-        self,
-        in_features: int,
-        hidden_features: Optional[int] = None,
-        out_features: Optional[int] = None,
-        act_layer=nn.GELU,
-        norm_layer=None,
-        bias=True,
-        drop=0.0,
-    ):
+class SinusoidalPosEmb(torch.nn.Module):
+    def __init__(self, dim):
         super().__init__()
-        hidden_features = hidden_features or in_features
-        out_features = out_features or in_features
-        self.fc1 = nn.Linear(in_features, hidden_features, bias=bias)
-        self.act = act_layer()
-        self.drop1 = nn.Dropout(drop)
-        self.norm = norm_layer(hidden_features) if norm_layer is not None else nn.Identity()
-        self.fc2 = nn.Linear(hidden_features, out_features, bias=bias)
-        self.drop2 = nn.Dropout(drop)
+        self.dim = dim
+        assert self.dim % 2 == 0, "SinusoidalPosEmb requires dim to be even"
+
+    def forward(self, x, scale=1000):
+        if x.ndim < 1:
+            x = x.unsqueeze(0)
+        device = x.device
+        half_dim = self.dim // 2
+        emb = math.log(10000) / (half_dim - 1)
+        emb = torch.exp(torch.arange(half_dim, device=device).float() * -emb)
+        emb = scale * x.unsqueeze(1) * emb.unsqueeze(0)
+        emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
+        return emb
+
+
+class Block1D(torch.nn.Module):
+    def __init__(self, dim, dim_out, groups=8):
+        super().__init__()
+        self.block = torch.nn.Sequential(
+            torch.nn.Conv1d(dim, dim_out, 3, padding=1),
+            torch.nn.GroupNorm(groups, dim_out),
+            nn.Mish(),
+        )
 
     def forward(self, x):
-        x = self.fc1(x)
-        x = self.act(x)
-        x = self.drop1(x)
-        x = self.norm(x)
-        x = self.fc2(x)
-        x = self.drop2(x)
-        return x
+        output = self.block(x)
+        return output
 
 
-class DiTAttention(torch.nn.Module):
+class ResnetBlock1D(torch.nn.Module):
+    def __init__(self, dim, dim_out, time_emb_dim, groups=8):
+        super().__init__()
+        self.mlp = torch.nn.Sequential(nn.Mish(), torch.nn.Linear(time_emb_dim, dim_out))
+
+        self.block1 = Block1D(dim, dim_out, groups=groups)
+        self.block2 = Block1D(dim_out, dim_out, groups=groups)
+
+        self.res_conv = torch.nn.Conv1d(dim, dim_out, 1)
+
+    def forward(self, x, time_emb):
+        h = self.block1(x)
+        h += self.mlp(time_emb).unsqueeze(-1)
+        h = self.block2(h)
+        output = h + self.res_conv(x)
+        return output
+
+
+class Downsample1D(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.conv = torch.nn.Conv1d(dim, dim, 3, 2, 1)
+
+    def forward(self, x):
+        return self.conv(x)
+
+
+class TimestepEmbedding(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        time_embed_dim: int,
+        act_fn: str = "silu",
+        out_dim: int = None,
+        post_act_fn: Optional[str] = None,
+        cond_proj_dim=None,
+    ):
+        super().__init__()
+
+        self.linear_1 = nn.Linear(in_channels, time_embed_dim)
+
+        if cond_proj_dim is not None:
+            self.cond_proj = nn.Linear(cond_proj_dim, in_channels, bias=False)
+        else:
+            self.cond_proj = None
+
+        assert act_fn == "silu"
+        self.act = torch.nn.SiLU()
+
+        if out_dim is not None:
+            time_embed_dim_out = out_dim
+        else:
+            time_embed_dim_out = time_embed_dim
+        self.linear_2 = nn.Linear(time_embed_dim, time_embed_dim_out)
+
+        self.post_act = None
+        # if post_act_fn is None:
+        #     self.post_act = None
+        # else:
+        #     self.post_act = get_activation(post_act_fn)
+
+    def forward(self, sample, condition=None):
+        if condition is not None:
+            sample = sample + self.cond_proj(condition)
+        sample = self.linear_1(sample)
+
+        if self.act is not None:
+            sample = self.act(sample)
+
+        sample = self.linear_2(sample)
+
+        if self.post_act is not None:
+            sample = self.post_act(sample)
+        return sample
+
+
+class Upsample1D(nn.Module):
+    """A 1D upsampling layer with an optional convolution.
+
+    Parameters:
+        channels (`int`):
+            number of channels in the inputs and outputs.
+        use_conv (`bool`, default `False`):
+            option to use a convolution.
+        use_conv_transpose (`bool`, default `False`):
+            option to use a convolution transpose.
+        out_channels (`int`, optional):
+            number of output channels. Defaults to `channels`.
+    """
+
+    def __init__(self, channels, use_conv=False, use_conv_transpose=True, out_channels=None, name="conv"):
+        super().__init__()
+        self.channels = channels
+        self.out_channels = out_channels or channels
+        self.use_conv = use_conv
+        self.use_conv_transpose = use_conv_transpose
+        self.name = name
+
+        self.conv = None
+        if use_conv_transpose:
+            self.conv = nn.ConvTranspose1d(channels, self.out_channels, 4, 2, 1)
+        elif use_conv:
+            self.conv = nn.Conv1d(self.channels, self.out_channels, 3, padding=1)
+
+    def forward(self, inputs):
+        assert inputs.shape[1] == self.channels
+        if self.use_conv_transpose:
+            return self.conv(inputs)
+
+        outputs = F.interpolate(inputs, scale_factor=2.0, mode="nearest")
+
+        if self.use_conv:
+            outputs = self.conv(outputs)
+
+        return outputs
+
+
+class DiffusersGELU(nn.Module):
+    r"""
+    GELU activation function with tanh approximation support with `approximate="tanh"`.
+
+    Parameters:
+        dim_in (`int`): The number of channels in the input.
+        dim_out (`int`): The number of channels in the output.
+        approximate (`str`, *optional*, defaults to `"none"`): If `"tanh"`, use tanh approximation.
+        bias (`bool`, defaults to True): Whether to use a bias in the linear layer.
+    """
+
+    def __init__(self, dim_in: int, dim_out: int, approximate: str = "none", bias: bool = True):
+        super().__init__()
+        self.proj = nn.Linear(dim_in, dim_out, bias=bias)
+        self.approximate = approximate
+
+    def gelu(self, gate: torch.Tensor) -> torch.Tensor:
+        # if gate.device.type == "mps" and is_torch_version("<", "2.0.0"):
+        #     # fp16 gelu not supported on mps before torch 2.0
+        #     return F.gelu(gate.to(dtype=torch.float32), approximate=self.approximate).to(dtype=gate.dtype)
+        return F.gelu(gate, approximate=self.approximate)
+
+    def forward(self, hidden_states):
+        hidden_states = self.proj(hidden_states)
+        hidden_states = self.gelu(hidden_states)
+        return hidden_states
+
+
+class BasicTransformeFeedForward(nn.Module):
+    r"""
+    A feed-forward layer.
+
+    Parameters:
+        dim (`int`): The number of channels in the input.
+        dim_out (`int`, *optional*): The number of channels in the output. If not given, defaults to `dim`.
+        mult (`int`, *optional*, defaults to 4): The multiplier to use for the hidden dimension.
+        dropout (`float`, *optional*, defaults to 0.0): The dropout probability to use.
+        activation_fn (`str`, *optional*, defaults to `"geglu"`): Activation function to be used in feed-forward.
+        final_dropout (`bool` *optional*, defaults to False): Apply a final dropout.
+    """
+
     def __init__(
         self,
         dim: int,
-        num_heads: int = 8,
-        head_dim: int = 64,
-        qkv_bias: bool = False,
-        qk_norm: bool = False,
-        attn_drop: float = 0.0,
-        proj_drop: float = 0.0,
-        norm_layer: nn.Module = nn.LayerNorm,
-    ) -> None:
+        dim_out: Optional[int] = None,
+        mult: int = 4,
+        dropout: float = 0.0,
+        activation_fn: str = "gelu",
+        final_dropout: bool = False,
+    ):
         super().__init__()
-        self.num_heads = num_heads
-        self.head_dim = head_dim
-        self.inner_dim = num_heads * head_dim
-        self.scale = head_dim**-0.5
+        inner_dim = int(dim * mult)
+        dim_out = dim_out if dim_out is not None else dim
 
-        self.to_q = nn.Linear(dim, self.inner_dim, bias=qkv_bias)
-        self.to_k = nn.Linear(dim, self.inner_dim, bias=qkv_bias)
-        self.to_v = nn.Linear(dim, self.inner_dim, bias=qkv_bias)
+        assert activation_fn == "gelu"
+        act_fn = DiffusersGELU(dim, inner_dim)
 
-        self.q_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
-        self.k_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
+        # if activation_fn == "gelu":
+        #     act_fn = GELU(dim, inner_dim)
+        # if activation_fn == "gelu-approximate":
+        #     act_fn = GELU(dim, inner_dim, approximate="tanh")
+        # elif activation_fn == "geglu":
+        #     act_fn = GEGLU(dim, inner_dim)
+        # elif activation_fn == "geglu-approximate":
+        #     act_fn = ApproximateGELU(dim, inner_dim)
+        # elif activation_fn == "snakebeta":
+        #     act_fn = SnakeBeta(dim, inner_dim)
 
-        self.attn_drop = nn.Dropout(attn_drop)
-        self.proj_drop = nn.Dropout(proj_drop)
+        self.net = nn.ModuleList([])
+        # project in
+        self.net.append(act_fn)
+        # project dropout
+        self.net.append(nn.Dropout(dropout))
+        # project out
+        self.net.append(nn.Linear(inner_dim, dim_out))
+        # self.net.append(LoRACompatibleLinear(inner_dim, dim_out))
+        # FF as used in Vision Transformer, MLP-Mixer, etc. have a final dropout
+        if final_dropout:
+            self.net.append(nn.Dropout(dropout))
 
-        self.proj = nn.Linear(self.inner_dim, dim)
-
-    def to_heads(self, ts: torch.Tensor):
-        b, t, c = ts.shape
-        # (b, t, nh, c)
-        ts = ts.reshape(b, t, self.num_heads, c // self.num_heads)
-        ts = ts.transpose(1, 2)
-        return ts
-
-    def forward(self, x: torch.Tensor, attn_mask: torch.Tensor) -> torch.Tensor:
-        """Args:
-        x(torch.Tensor): shape (b, t, c)
-        attn_mask(torch.Tensor): shape (b, t, t)
-        """
-        b, t, c = x.shape
-
-        q = self.to_q(x)
-        k = self.to_k(x)
-        v = self.to_v(x)
-
-        q = self.to_heads(q)  # (b, nh, t, c)
-        k = self.to_heads(k)
-        v = self.to_heads(v)
-
-        q = self.q_norm(q)
-        k = self.k_norm(k)
-
-        attn_mask = attn_mask.unsqueeze(1)
-        x = F.scaled_dot_product_attention(
-            q,
-            k,
-            v,
-            attn_mask=attn_mask,
-            dropout_p=self.attn_drop.p if self.training else 0.0,
-        )  # (b, nh, t, c)
-        x = x.transpose(1, 2).reshape(b, t, -1)
-        x = self.proj(x)
-        x = self.proj_drop(x)
-        return x
-
-    def forward_chunk(self, x: torch.Tensor, att_cache: torch.Tensor = None, attn_mask: torch.Tensor = None):
-        """
-        Args:
-            x: shape (b, dt, c)
-            att_cache: shape (b, nh, t, c*2)
-        """
-        b, t, c = x.shape
-
-        q = self.to_q(x)
-        k = self.to_k(x)
-        v = self.to_v(x)
-
-        q = self.to_heads(q)  # (b, nh, t, c)
-        k = self.to_heads(k)
-        v = self.to_heads(v)
-
-        q = self.q_norm(q)
-        k = self.k_norm(k)
-
-        # unpack {k,v}_cache
-        if att_cache is not None:
-            if attn_mask is not None:
-                k_cache, v_cache = att_cache.chunk(2, dim=3)
-                k = torch.cat([k, k_cache], dim=2)
-                v = torch.cat([v, v_cache], dim=2)
-
-            else:
-                k_cache, v_cache = att_cache.chunk(2, dim=3)
-                k = torch.cat([k, k_cache], dim=2)
-                v = torch.cat([v, v_cache], dim=2)
-
-        # new {k,v}_cache
-        new_att_cache = torch.cat([k, v], dim=3)
-        # attn_mask = torch.ones((b, 1, t, t1), dtype=torch.bool, device=x.device)
-        if attn_mask is not None:
-            attn_mask = attn_mask.unsqueeze(1)
-        x = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)  # (b, nh, t, c)
-        x = x.transpose(1, 2).reshape(b, t, -1)
-        x = self.proj(x)
-        x = self.proj_drop(x)
-        return x, new_att_cache
+    def forward(self, hidden_states):
+        for module in self.net:
+            hidden_states = module(hidden_states)
+        return hidden_states
 
 
-def modulate(x, shift, scale):
-    return x * (1 + scale) + shift
+class BasicTransformerBlock(nn.Module):
+    r"""
+    A basic Transformer block.
 
-
-class DiTTimestepEmbedder(nn.Module):
-    """
-    Embeds scalar timesteps into vector representations.
+    Parameters:
+        dim (`int`): The number of channels in the input and output.
+        num_attention_heads (`int`): The number of heads to use for multi-head attention.
+        attention_head_dim (`int`): The number of channels in each head.
+        dropout (`float`, *optional*, defaults to 0.0): The dropout probability to use.
+        cross_attention_dim (`int`, *optional*): The size of the encoder_hidden_states vector for cross attention.
+        only_cross_attention (`bool`, *optional*):
+            Whether to use only cross-attention layers. In this case two cross attention layers are used.
+        double_self_attention (`bool`, *optional*):
+            Whether to use two self-attention layers. In this case no cross attention layers are used.
+        activation_fn (`str`, *optional*, defaults to `"geglu"`): Activation function to be used in feed-forward.
+        num_embeds_ada_norm (:
+            obj: `int`, *optional*): The number of diffusion steps used during training. See `Transformer2DModel`.
+        attention_bias (:
+            obj: `bool`, *optional*, defaults to `False`): Configure if the attentions should contain a bias parameter.
     """
 
-    def __init__(self, hidden_size, frequency_embedding_size=256):
+    def __init__(
+        self,
+        dim: int,
+        num_attention_heads: int,
+        attention_head_dim: int,
+        dropout=0.0,
+        cross_attention_dim: Optional[int] = None,
+        activation_fn: str = "geglu",
+        num_embeds_ada_norm: Optional[int] = None,
+        attention_bias: bool = False,
+        only_cross_attention: bool = False,
+        double_self_attention: bool = False,
+        upcast_attention: bool = False,
+        norm_elementwise_affine: bool = True,
+        norm_type: str = "layer_norm",
+        final_dropout: bool = False,
+    ):
         super().__init__()
-        self.mlp = nn.Sequential(
-            nn.Linear(frequency_embedding_size, hidden_size, bias=True),
-            nn.SiLU(),
-            nn.Linear(hidden_size, hidden_size, bias=True),
+        self.only_cross_attention = only_cross_attention
+
+        self.use_ada_layer_norm_zero = (num_embeds_ada_norm is not None) and norm_type == "ada_norm_zero"
+        self.use_ada_layer_norm = (num_embeds_ada_norm is not None) and norm_type == "ada_norm"
+
+        if norm_type in ("ada_norm", "ada_norm_zero") and num_embeds_ada_norm is None:
+            raise ValueError(
+                f"`norm_type` is set to {norm_type}, but `num_embeds_ada_norm` is not defined. Please make sure to"
+                f" define `num_embeds_ada_norm` if setting `norm_type` to {norm_type}."
+            )
+
+        # Define 3 blocks. Each block has its own normalization layer.
+        # 1. Self-Attn
+        self.norm1 = nn.LayerNorm(dim, elementwise_affine=norm_elementwise_affine)
+        # if self.use_ada_layer_norm:
+        #     self.norm1 = AdaLayerNorm(dim, num_embeds_ada_norm)
+        # elif self.use_ada_layer_norm_zero:
+        #     self.norm1 = AdaLayerNormZero(dim, num_embeds_ada_norm)
+        # else:
+        #     self.norm1 = nn.LayerNorm(dim, elementwise_affine=norm_elementwise_affine)
+        from diffusers.models.attention_processor import Attention as DiffusersAttention
+
+
+        self.attn1 = DiffusersAttention(
+            query_dim=dim,
+            heads=num_attention_heads,
+            dim_head=attention_head_dim,
+            dropout=dropout,
+            bias=attention_bias,
+            cross_attention_dim=cross_attention_dim if only_cross_attention else None,
+            upcast_attention=upcast_attention,
         )
-        self.frequency_embedding_size = frequency_embedding_size
-        # from SinusoidalPosEmb
-        self.scale = 1000
 
-    @staticmethod
-    def timestep_embedding(t, dim, max_period=torch.tensor(10000)):
-        """
-        Create sinusoidal timestep embeddings.
-        :param t: a 1-D Tensor of N indices, one per batch element.
-                          These may be fractional.
-        :param dim: the dimension of the output.
-        :param max_period: controls the minimum frequency of the embeddings.
-        :return: an (N, D) Tensor of positional embeddings.
-        """
-        # https://github.com/openai/glide-text2im/blob/main/glide_text2im/nn.py
-        half = dim // 2
-        # freqs = torch.exp(-math.log(max_period) * torch.arange(start=0, end=half) / half).to(t)
-        freqs = torch.exp(
-            -torch.log(max_period)
-            * torch.arange(0, half, device=t.device, dtype=t.dtype) / half
+        # 2. Cross-Attn
+        self.norm2 = None
+        self.attn2 = None
+        # if cross_attention_dim is not None or double_self_attention:
+        #     # We currently only use AdaLayerNormZero for self attention where there will only be one attention block.
+        #     # I.e. the number of returned modulation chunks from AdaLayerZero would not make sense if returned during
+        #     # the second cross attention block.
+        #     self.norm2 = (
+        #         AdaLayerNorm(dim, num_embeds_ada_norm)
+        #         if self.use_ada_layer_norm
+        #         else nn.LayerNorm(dim, elementwise_affine=norm_elementwise_affine)
+        #     )
+        #     self.attn2 = Attention(
+        #         query_dim=dim,
+        #         cross_attention_dim=cross_attention_dim if not double_self_attention else None,
+        #         heads=num_attention_heads,
+        #         dim_head=attention_head_dim,
+        #         dropout=dropout,
+        #         bias=attention_bias,
+        #         upcast_attention=upcast_attention,
+        #         # scale_qk=False, # uncomment this to not to use flash attention
+        #     )  # is self-attn if encoder_hidden_states is none
+        # else:
+        #     self.norm2 = None
+        #     self.attn2 = None
+
+        # 3. Feed-forward
+        self.norm3 = nn.LayerNorm(dim, elementwise_affine=norm_elementwise_affine)
+        self.ff = BasicTransformeFeedForward(
+            dim, dropout=dropout, activation_fn=activation_fn, final_dropout=final_dropout
         )
-        args = t[:, None] * freqs[None]
-        embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
-        if dim % 2:
-            embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
-        return embedding
 
-    def forward(self, t):
-        t_freq = self.timestep_embedding(t * self.scale, self.frequency_embedding_size)
-        t_emb = self.mlp(t_freq)
-        return t_emb
+        # let chunk size default to None
+        self._chunk_size = None
+        self._chunk_dim = 0
+
+    def set_chunk_feed_forward(self, chunk_size: Optional[int], dim: int):
+        # Sets chunk feed-forward
+        self._chunk_size = chunk_size
+        self._chunk_dim = dim
+
+    def forward(
+        self,
+        hidden_states: torch.FloatTensor,
+        # attention_mask: Optional[torch.FloatTensor] = None,
+        encoder_hidden_states: Optional[torch.FloatTensor] = None,
+        encoder_attention_mask: Optional[torch.FloatTensor] = None,
+        timestep: Optional[torch.LongTensor] = None,
+        cross_attention_kwargs: Dict[str, Any] = None,
+        class_labels: Optional[torch.LongTensor] = None,
+    ):
+        # Notice that normalization is always applied before the real computation in the following blocks.
+        # 1. Self-Attention
+        if self.use_ada_layer_norm:
+            norm_hidden_states = self.norm1(hidden_states, timestep)
+        elif self.use_ada_layer_norm_zero:
+            norm_hidden_states, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.norm1(
+                hidden_states, timestep, class_labels, hidden_dtype=hidden_states.dtype
+            )
+        else:
+            norm_hidden_states = self.norm1(hidden_states)
+
+        cross_attention_kwargs = cross_attention_kwargs if cross_attention_kwargs is not None else {}
+
+        attn_output = self.attn1(
+            norm_hidden_states,
+            encoder_hidden_states=encoder_hidden_states if self.only_cross_attention else None,
+            # attention_mask=encoder_attention_mask if self.only_cross_attention else attention_mask,
+            **cross_attention_kwargs,
+        )
+        if self.use_ada_layer_norm_zero:
+            attn_output = gate_msa.unsqueeze(1) * attn_output
+        hidden_states = attn_output + hidden_states
+
+        # 2. Cross-Attention
+        if self.attn2 is not None:
+            norm_hidden_states = (
+                self.norm2(hidden_states, timestep) if self.use_ada_layer_norm else self.norm2(hidden_states)
+            )
+
+            attn_output = self.attn2(
+                norm_hidden_states,
+                encoder_hidden_states=encoder_hidden_states,
+                attention_mask=encoder_attention_mask,
+                **cross_attention_kwargs,
+            )
+            hidden_states = attn_output + hidden_states
+
+        # 3. Feed-forward
+        norm_hidden_states = self.norm3(hidden_states)
+
+        if self.use_ada_layer_norm_zero:
+            norm_hidden_states = norm_hidden_states * (1 + scale_mlp[:, None]) + shift_mlp[:, None]
+
+        if self._chunk_size is not None:
+            # "feed_forward_chunk_size" can be used to save memory
+            if norm_hidden_states.shape[self._chunk_dim] % self._chunk_size != 0:
+                raise ValueError(
+                    f"`hidden_states` dimension to be chunked: {norm_hidden_states.shape[self._chunk_dim]} "
+                    f"has to be divisible by chunk size: {self._chunk_size}. Make sure to set an "
+                    f"appropriate `chunk_size` when calling `unet.enable_forward_chunking`."
+                )
+
+            num_chunks = norm_hidden_states.shape[self._chunk_dim] // self._chunk_size
+            ff_output = torch.cat(
+                [self.ff(hid_slice) for hid_slice in norm_hidden_states.chunk(num_chunks, dim=self._chunk_dim)],
+                dim=self._chunk_dim,
+            )
+        else:
+            ff_output = self.ff(norm_hidden_states)
+
+        if self.use_ada_layer_norm_zero:
+            ff_output = gate_mlp.unsqueeze(1) * ff_output
+
+        hidden_states = ff_output + hidden_states
+
+        return hidden_states
 
 
-# Convolution related
-class DiTTranspose(torch.nn.Module):
+def mask_to_bias(mask: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+    assert mask.dtype == torch.bool
+    assert dtype in [torch.float32, torch.bfloat16, torch.float16]
+    mask = mask.to(dtype)
+    # attention mask bias
+    # NOTE(Mddct): torch.finfo jit issues
+    #     chunk_masks = (1.0 - chunk_masks) * torch.finfo(dtype).min
+    mask = (1.0 - mask) * -1.0e+10
+    return mask
+
+
+
+class Transpose(torch.nn.Module):
     def __init__(self, dim0: int, dim1: int):
         super().__init__()
         self.dim0 = dim0
@@ -487,470 +1288,559 @@ class DiTTranspose(torch.nn.Module):
         return x
 
 
-class DiTCausalConv1d(torch.nn.Conv1d):
+class CausalBlock1D(Block1D):
+    def __init__(self, dim: int, dim_out: int):
+        super(CausalBlock1D, self).__init__(dim, dim_out)
+        self.block = torch.nn.Sequential(
+            CausalConv1d(dim, dim_out, 3),
+            Transpose(1, 2),
+            nn.LayerNorm(dim_out),
+            Transpose(1, 2),
+            nn.Mish(),
+        )
+
+    def forward(self, x: torch.Tensor, mask: torch.Tensor):
+        output = self.block(x * mask)
+        return output * mask
+
+
+class CausalResnetBlock1D(ResnetBlock1D):
+    def __init__(self, dim: int, dim_out: int, time_emb_dim: int, groups: int = 8):
+        super(CausalResnetBlock1D, self).__init__(dim, dim_out, time_emb_dim, groups)
+        self.block1 = CausalBlock1D(dim, dim_out)
+        self.block2 = CausalBlock1D(dim_out, dim_out)
+
+
+class CausalConv1d(torch.nn.Conv1d):
     def __init__(
         self,
         in_channels: int,
         out_channels: int,
         kernel_size: int,
+        stride: int = 1,
+        dilation: int = 1,
+        groups: int = 1,
+        bias: bool = True,
+        padding_mode: str = 'zeros',
+        device=None,
+        dtype=None
     ) -> None:
-        super(DiTCausalConv1d, self).__init__(in_channels, out_channels, kernel_size)
+        super(CausalConv1d, self).__init__(in_channels, out_channels,
+                                           kernel_size, stride,
+                                           padding=0, dilation=dilation,
+                                           groups=groups, bias=bias,
+                                           padding_mode=padding_mode,
+                                           device=device, dtype=dtype)
+        assert stride == 1
         self.causal_padding = (kernel_size - 1, 0)
 
     def forward(self, x: torch.Tensor):
         x = F.pad(x, self.causal_padding)
-        x = super(DiTCausalConv1d, self).forward(x)
+        x = super(CausalConv1d, self).forward(x)
         return x
 
-    def forward_chunk(self, x: torch.Tensor, cnn_cache: torch.Tensor = None):
-        if cnn_cache is None:
-            cnn_cache = x.new_zeros((x.shape[0], self.in_channels, self.causal_padding[0]))
-        x = torch.cat([cnn_cache, x], dim=2)
-        new_cnn_cache = x[..., -self.causal_padding[0] :]
-        x = super(DiTCausalConv1d, self).forward(x)
-        return x, new_cnn_cache
+
+def subsequent_chunk_mask(
+        size: int,
+        chunk_size: int,
+        num_left_chunks: int = -1,
+        device: torch.device = torch.device("cpu"),
+) -> torch.Tensor:
+    """Create mask for subsequent steps (size, size) with chunk size,
+       this is for streaming encoder
+
+    Args:
+        size (int): size of mask
+        chunk_size (int): size of chunk
+        num_left_chunks (int): number of left chunks
+            <0: use full chunk
+            >=0: use num_left_chunks
+        device (torch.device): "cpu" or "cuda" or torch.Tensor.device
+
+    Returns:
+        torch.Tensor: mask
+
+    Examples:
+        >>> subsequent_chunk_mask(4, 2)
+        [[1, 1, 0, 0],
+         [1, 1, 0, 0],
+         [1, 1, 1, 1],
+         [1, 1, 1, 1]]
+    """
+    # NOTE this modified implementation meets onnx export requirements, but it doesn't support num_left_chunks
+    # actually this is not needed after we have inference cache implemented, will remove it later
+    pos_idx = torch.arange(size, device=device)
+    block_value = (torch.div(pos_idx, chunk_size, rounding_mode='trunc') + 1) * chunk_size
+    ret = pos_idx.unsqueeze(0) < block_value.unsqueeze(1)
+    return ret
 
 
-class DiTCausalConvBlock(nn.Module):
-    def __init__(
-        self,
-        in_channels: int,
-        out_channels: int,
-        kernel_size: int = 3,
-    ):
-        super().__init__()
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        self.kernel_size = kernel_size
+def add_optional_chunk_mask(xs: torch.Tensor,
+                            masks: torch.Tensor,
+                            use_dynamic_chunk: bool,
+                            use_dynamic_left_chunk: bool,
+                            decoding_chunk_size: int,
+                            static_chunk_size: int,
+                            num_decoding_left_chunks: int,
+                            enable_full_context: bool = True):
+    """ Apply optional mask for encoder.
 
-        self.block = torch.nn.Sequential(
-            # norm
-            # conv1
-            DiTTranspose(1, 2),
-            DiTCausalConv1d(in_channels, out_channels, kernel_size),
-            DiTTranspose(1, 2),
-            # norm & act
-            nn.LayerNorm(out_channels),
-            nn.Mish(),
-            # conv2
-            DiTTranspose(1, 2),
-            DiTCausalConv1d(out_channels, out_channels, kernel_size),
-            DiTTranspose(1, 2),
-        )
+    Args:
+        xs (torch.Tensor): padded input, (B, L, D), L for max length
+        mask (torch.Tensor): mask for xs, (B, 1, L)
+        use_dynamic_chunk (bool): whether to use dynamic chunk or not
+        use_dynamic_left_chunk (bool): whether to use dynamic left chunk for
+            training.
+        decoding_chunk_size (int): decoding chunk size for dynamic chunk, it's
+            0: default for training, use random dynamic chunk.
+            <0: for decoding, use full chunk.
+            >0: for decoding, use fixed chunk size as set.
+        static_chunk_size (int): chunk size for static chunk training/decoding
+            if it's greater than 0, if use_dynamic_chunk is true,
+            this parameter will be ignored
+        num_decoding_left_chunks: number of left chunks, this is for decoding,
+            the chunk size is decoding_chunk_size.
+            >=0: use num_decoding_left_chunks
+            <0: use all left chunks
+        enable_full_context (bool):
+            True: chunk size is either [1, 25] or full context(max_len)
+            False: chunk size ~ U[1, 25]
 
-    def forward(self, x: torch.Tensor, mask: torch.Tensor = None):
-        """
-        Args:
-            x: shape (b, t, c)
-            mask: shape (b, t, 1)
-        """
-        if mask is not None:
-            x = x * mask
-        x = self.block(x)
-        if mask is not None:
-            x = x * mask
-        return x
-
-    def forward_chunk(self, x: torch.Tensor, cnn_cache: torch.Tensor = None):
-        """
-        Args:
-            x: shape (b, dt, c)
-            cnn_cache: shape (b, c1+c2, 2)
-        """
-        if cnn_cache is not None:
-            cnn_cache1, cnn_cache2 = cnn_cache.split((self.in_channels, self.out_channels), dim=1)
+    Returns:
+        torch.Tensor: chunk mask of the input xs.
+    """
+    # Whether to use chunk mask or not
+    if use_dynamic_chunk:
+        max_len = xs.size(1)
+        if decoding_chunk_size < 0:
+            chunk_size = max_len
+            num_left_chunks = -1
+        elif decoding_chunk_size > 0:
+            chunk_size = decoding_chunk_size
+            num_left_chunks = num_decoding_left_chunks
         else:
-            cnn_cache1, cnn_cache2 = None, None
-        x = self.block[0](x)
-        x, new_cnn_cache1 = self.block[1].forward_chunk(x, cnn_cache1)
-        x = self.block[2:6](x)
-        x, new_cnn_cache2 = self.block[6].forward_chunk(x, cnn_cache2)
-        x = self.block[7](x)
-        new_cnn_cache = torch.cat((new_cnn_cache1, new_cnn_cache2), dim=1)
-        return x, new_cnn_cache
+            # chunk size is either [1, 25] or full context(max_len).
+            # Since we use 4 times subsampling and allow up to 1s(100 frames)
+            # delay, the maximum frame is 100 / 4 = 25.
+            chunk_size = torch.randint(1, max_len, (1, )).item()
+            num_left_chunks = -1
+            if chunk_size > max_len // 2 and enable_full_context:
+                chunk_size = max_len
+            else:
+                chunk_size = chunk_size % 25 + 1
+                if use_dynamic_left_chunk:
+                    max_left_chunks = (max_len - 1) // chunk_size
+                    num_left_chunks = torch.randint(0, max_left_chunks,
+                                                    (1, )).item()
+        chunk_masks = subsequent_chunk_mask(xs.size(1), chunk_size,
+                                            num_left_chunks,
+                                            xs.device)  # (L, L)
+        chunk_masks = chunk_masks.unsqueeze(0)  # (1, L, L)
+        chunk_masks = masks & chunk_masks  # (B, L, L)
+    elif static_chunk_size > 0:
+        num_left_chunks = num_decoding_left_chunks
+        chunk_masks = subsequent_chunk_mask(xs.size(1), static_chunk_size,
+                                            num_left_chunks,
+                                            xs.device)  # (L, L)
+        chunk_masks = chunk_masks.unsqueeze(0)  # (1, L, L)
+        chunk_masks = masks & chunk_masks  # (B, L, L)
+    else:
+        chunk_masks = masks
+    assert chunk_masks.dtype == torch.bool
+    if (chunk_masks.sum(dim=-1) == 0).sum().item() != 0:
+        logging.warning('get chunk_masks all false at some timestep, force set to true, make sure they are masked in futuer computation!')
+        chunk_masks[chunk_masks.sum(dim=-1)==0] = True
+    return chunk_masks
 
 
-class DiTBlock(nn.Module):
-    """
-    A DiT block with adaptive layer norm zero (adaLN-Zero) conditioning.
-    """
-
-    def __init__(self, hidden_size, num_heads, head_dim, mlp_ratio=4.0, **block_kwargs):
-        super().__init__()
-        self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.attn = DiTAttention(
-            hidden_size, num_heads=num_heads, head_dim=head_dim, qkv_bias=True, qk_norm=True, **block_kwargs
-        )
-        self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        mlp_hidden_dim = int(hidden_size * mlp_ratio)
-        self.mlp = DiTMLP(
-            in_features=hidden_size,
-            hidden_features=mlp_hidden_dim,
-            act_layer=lambda: nn.GELU(approximate="tanh"),
-            drop=0,
-        )
-        self.norm3 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.conv = DiTCausalConvBlock(in_channels=hidden_size, out_channels=hidden_size, kernel_size=3)
-        self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(hidden_size, 9 * hidden_size, bias=True))
-
-    def forward(self, x: torch.Tensor, c: torch.Tensor, attn_mask: torch.Tensor):
-        """Args
-        x: shape (b, t, c)
-        c: shape (b, 1, c)
-        attn_mask: shape (b, t, t), bool type attention mask
-        """
-        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp, shift_conv, scale_conv, gate_conv = (
-            self.adaLN_modulation(c).chunk(9, dim=-1)
-        )
-        # attention
-        x = x + gate_msa * self.attn(modulate(self.norm1(x), shift_msa, scale_msa), attn_mask)
-        # conv
-        x = x + gate_conv * self.conv(modulate(self.norm3(x), shift_conv, scale_conv))
-        # mlp
-        x = x + gate_mlp * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
-        return x
-
-    def forward_chunk(
-        self,
-        x: torch.Tensor,
-        c: torch.Tensor,
-        cnn_cache: torch.Tensor = None,
-        att_cache: torch.Tensor = None,
-        mask: torch.Tensor = None,
-    ):
-        """
-        Args:
-            x: shape (b, dt, c)
-            c: shape (b, 1, c)
-            cnn_cache: shape (b, c1+c2, 2)
-            att_cache: shape (b, nh, t, c * 2)
-        """
-        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp, shift_conv, scale_conv, gate_conv = (
-            self.adaLN_modulation(c).chunk(9, dim=-1)
-        )
-        # attention
-        x_att, new_att_cache = self.attn.forward_chunk(modulate(self.norm1(x), shift_msa, scale_msa), att_cache, mask)
-        x = x + gate_msa * x_att
-        # conv
-        x_conv, new_cnn_cache = self.conv.forward_chunk(modulate(self.norm3(x), shift_conv, scale_conv), cnn_cache)
-        x = x + gate_conv * x_conv
-        # mlp
-        x = x + gate_mlp * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
-        return x, new_cnn_cache, new_att_cache
-
-
-class DiTFinalLayer(nn.Module):
-    """
-    The final layer of DiT.
-    """
-
-    def __init__(self, hidden_size, out_channels):
-        super().__init__()
-        self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(hidden_size, 2 * hidden_size, bias=True))
-        self.norm_final = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.linear = nn.Linear(hidden_size, out_channels, bias=True)
-
-    def forward(self, x, c):
-        shift, scale = self.adaLN_modulation(c).chunk(2, dim=-1)
-        x = modulate(self.norm_final(x), shift, scale)
-        x = self.linear(x)
-        return x
-
-
-class DiT(nn.Module):
-    """
-    Diffusion model with a Transformer backbone.
-    """
-
+class ConditionalDecoder(nn.Module):
     def __init__(
         self,
-        in_channels: int,
-        out_channels: int,
-        mlp_ratio: float = 4.0,
-        depth: int = 28,
-        num_heads: int = 8,
-        head_dim: int = 64,
-        hidden_size: int = 256,
+        in_channels=320,
+        out_channels=80,
+        causal=True,
+        channels=[256],
+        dropout=0.0,
+        attention_head_dim=64,
+        n_blocks=4,
+        num_mid_blocks=12,
+        num_heads=8,
+        act_fn="gelu",
     ):
+        """
+        This decoder requires an input with the same shape of the target. So, if your text content
+        is shorter or longer than the outputs, please re-sampling it before feeding to the decoder.
+        """
         super().__init__()
+        channels = tuple(channels)
         self.in_channels = in_channels
         self.out_channels = out_channels
-        self.t_embedder = DiTTimestepEmbedder(hidden_size)
-
-        self.in_proj = nn.Linear(in_channels, hidden_size)
-
-        self.blocks = nn.ModuleList(
-            [DiTBlock(hidden_size, num_heads, head_dim, mlp_ratio=mlp_ratio) for _ in range(depth)]
+        self.causal = causal
+        self.time_embeddings = SinusoidalPosEmb(in_channels)
+        time_embed_dim = channels[0] * 4
+        self.time_mlp = TimestepEmbedding(
+            in_channels=in_channels,
+            time_embed_dim=time_embed_dim,
+            act_fn="silu",
         )
-        self.final_layer = DiTFinalLayer(hidden_size, self.out_channels)
+        self.down_blocks = nn.ModuleList([])
+        self.mid_blocks = nn.ModuleList([])
+        self.up_blocks = nn.ModuleList([])
 
+        # NOTE jrm: `static_chunk_size` is missing?
+        self.static_chunk_size = 0
+
+        output_channel = in_channels
+        for i in range(len(channels)):  # pylint: disable=consider-using-enumerate
+            input_channel = output_channel
+            output_channel = channels[i]
+            is_last = i == len(channels) - 1
+            resnet = CausalResnetBlock1D(dim=input_channel, dim_out=output_channel, time_emb_dim=time_embed_dim) if self.causal else \
+                ResnetBlock1D(dim=input_channel, dim_out=output_channel, time_emb_dim=time_embed_dim)
+            transformer_blocks = nn.ModuleList(
+                [
+                    BasicTransformerBlock(
+                        dim=output_channel,
+                        num_attention_heads=num_heads,
+                        attention_head_dim=attention_head_dim,
+                        dropout=dropout,
+                        activation_fn=act_fn,
+                    )
+                    for _ in range(n_blocks)
+                ]
+            )
+            downsample = (
+                Downsample1D(output_channel) if not is_last else
+                CausalConv1d(output_channel, output_channel, 3) if self.causal else nn.Conv1d(output_channel, output_channel, 3, padding=1)
+            )
+            self.down_blocks.append(nn.ModuleList([resnet, transformer_blocks, downsample]))
+
+        for _ in range(num_mid_blocks):
+            input_channel = channels[-1]
+            out_channels = channels[-1]
+            resnet = CausalResnetBlock1D(dim=input_channel, dim_out=output_channel, time_emb_dim=time_embed_dim) if self.causal else \
+                ResnetBlock1D(dim=input_channel, dim_out=output_channel, time_emb_dim=time_embed_dim)
+
+            transformer_blocks = nn.ModuleList(
+                [
+                    BasicTransformerBlock(
+                        dim=output_channel,
+                        num_attention_heads=num_heads,
+                        attention_head_dim=attention_head_dim,
+                        dropout=dropout,
+                        activation_fn=act_fn,
+                    )
+                    for _ in range(n_blocks)
+                ]
+            )
+
+            self.mid_blocks.append(nn.ModuleList([resnet, transformer_blocks]))
+
+        channels = channels[::-1] + (channels[0],)
+        for i in range(len(channels) - 1):
+            input_channel = channels[i] * 2
+            output_channel = channels[i + 1]
+            is_last = i == len(channels) - 2
+            resnet = CausalResnetBlock1D(
+                dim=input_channel,
+                dim_out=output_channel,
+                time_emb_dim=time_embed_dim,
+            ) if self.causal else ResnetBlock1D(
+                dim=input_channel,
+                dim_out=output_channel,
+                time_emb_dim=time_embed_dim,
+            )
+            transformer_blocks = nn.ModuleList(
+                [
+                    BasicTransformerBlock(
+                        dim=output_channel,
+                        num_attention_heads=num_heads,
+                        attention_head_dim=attention_head_dim,
+                        dropout=dropout,
+                        activation_fn=act_fn,
+                    )
+                    for _ in range(n_blocks)
+                ]
+            )
+            upsample = (
+                Upsample1D(output_channel, use_conv_transpose=True)
+                if not is_last
+                else CausalConv1d(output_channel, output_channel, 3) if self.causal else nn.Conv1d(output_channel, output_channel, 3, padding=1)
+            )
+            self.up_blocks.append(nn.ModuleList([resnet, transformer_blocks, upsample]))
+        self.final_block = CausalBlock1D(channels[-1], channels[-1]) if self.causal else Block1D(channels[-1], channels[-1])
+        self.final_proj = nn.Conv1d(channels[-1], self.out_channels, 1)
         self.initialize_weights()
 
-        self.enable_cuda_graph = False
-        self.use_cuda_graph = False
-
-        self.graph_chunk = {}
-        self.inference_buffers_chunk = {}
-        self.max_size_chunk = {}
-
-        # TODO: propagate max_batch_size from outside
-        self.max_batch_size = 8
-
-        self.register_buffer(
-            "att_cache_buffer",
-            torch.zeros((16, 2 * self.max_batch_size, 8, 1000, 128)),
-            persistent=False,
-        )
-        self.register_buffer(
-            "cnn_cache_buffer",
-            torch.zeros((16, 2 * self.max_batch_size, 1024, 2)),
-            persistent=False,
-        )
-
     def initialize_weights(self):
-        # Initialize transformer layers:
-        def _basic_init(module):
-            if isinstance(module, nn.Linear):
-                torch.nn.init.xavier_uniform_(module.weight)
-                if module.bias is not None:
-                    nn.init.constant_(module.bias, 0)
-
-        self.apply(_basic_init)
-
-        # Initialize timestep embedding MLP:
-        nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
-        nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
-
-        # Zero-out adaLN modulation layers in DiT blocks:
-        for block in self.blocks:
-            nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
-            nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
-
-        # Zero-out output layers:
-        nn.init.constant_(self.final_layer.adaLN_modulation[-1].weight, 0)
-        nn.init.constant_(self.final_layer.adaLN_modulation[-1].bias, 0)
-        nn.init.constant_(self.final_layer.linear.weight, 0)
-        nn.init.constant_(self.final_layer.linear.bias, 0)
-
-    def _init_cuda_graph_chunk(self):
-        # get dtype, device from registered buffer
-        dtype, device = self.cnn_cache_buffer.dtype, self.cnn_cache_buffer.device
-        # init cuda graph for streaming forward
-        with torch.no_grad():
-            for chunk_size in [30, 48, 96]:
-                if chunk_size in [30, 48]:
-                    max_size = 500
-                    self.max_size_chunk[chunk_size] = max_size
-                else:
-                    max_size = 1000
-                    self.max_size_chunk[chunk_size] = max_size
-                static_x1 = torch.zeros((2, 320, chunk_size), dtype=dtype, device=device)
-                static_t1 = torch.zeros((2, 1, 512), dtype=dtype, device=device)
-                static_mask1 = torch.ones((2, chunk_size, max_size + chunk_size), dtype=torch.bool, device=device)
-                static_att_cache = torch.zeros((16, 2, 8, max_size, 128), dtype=dtype, device=device)
-                static_cnn_cache = torch.zeros((16, 2, 1024, 2), dtype=dtype, device=device)
-                static_inputs1 = [
-                    static_x1,
-                    static_t1,
-                    static_mask1,
-                    static_cnn_cache,
-                    static_att_cache,
-                ]
-                static_new_cnn_cache = torch.zeros((16, 2, 1024, 2), dtype=dtype, device=device)
-                static_new_att_cache = torch.zeros((16, 2, 8, max_size + chunk_size, 128), dtype=dtype, device=device)
-                self.blocks_forward_chunk(
-                    static_inputs1[0],
-                    static_inputs1[1],
-                    static_inputs1[2],
-                    static_inputs1[3],
-                    static_inputs1[4],
-                    static_new_cnn_cache,
-                    static_new_att_cache,
-                )
-                graph_chunk = torch.cuda.CUDAGraph()
-                with torch.cuda.graph(graph_chunk):
-                    static_out1 = self.blocks_forward_chunk(
-                        static_x1,
-                        static_t1,
-                        static_mask1,
-                        static_cnn_cache,
-                        static_att_cache,
-                        static_new_cnn_cache,
-                        static_new_att_cache,
-                    )
-                static_outputs1 = [static_out1, static_new_cnn_cache, static_new_att_cache]
-                self.inference_buffers_chunk[chunk_size] = {
-                    "static_inputs": static_inputs1,
-                    "static_outputs": static_outputs1,
-                }
-                self.graph_chunk[chunk_size] = graph_chunk
-
-    def _init_cuda_graph_all(self):
-        self._init_cuda_graph_chunk()
-        self.use_cuda_graph = True
-        print("CUDA Graph initialized successfully for chunk decoder")
+        for m in self.modules():
+            if isinstance(m, nn.Conv1d):
+                nn.init.kaiming_normal_(m.weight, nonlinearity="relu")
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.GroupNorm):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.Linear):
+                nn.init.kaiming_normal_(m.weight, nonlinearity="relu")
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
 
     def forward(self, x, mask, mu, t, spks=None, cond=None):
-        """Args:
-        x: shape (b, c, t)
-        mask: shape (b, 1, t)
-        t: shape (b,)
-        spks: shape (b, c)
-        cond: shape (b, c, t)
-        """
-        # (sfy) chunk training strategy should not be open-sourced
+        """Forward pass of the UNet1DConditional model.
 
-        # time
-        t = self.t_embedder(t).unsqueeze(1)  # (b, 1, c)
-        x = pack([x, mu], "b * t")[0]
-        if spks is not None:
-            spks = repeat(spks, "b c -> b c t", t=x.shape[-1])
-            x = pack([x, spks], "b * t")[0]
-        if cond is not None:
-            x = pack([x, cond], "b * t")[0]
-
-        return self.blocks_forward(x, t, mask)
-
-    def blocks_forward(self, x, t, mask):
-        x = x.transpose(1, 2)
-        attn_mask = mask.bool()
-        x = self.in_proj(x)
-        for block in self.blocks:
-            x = block(x, t, attn_mask)
-        x = self.final_layer(x, t)
-        x = x.transpose(1, 2)
-        return x
-
-    def forward_chunk(
-        self,
-        x: torch.Tensor,
-        mu: torch.Tensor,
-        t: torch.Tensor,
-        spks: torch.Tensor,
-        cond: torch.Tensor,
-        cnn_cache: torch.Tensor = None,
-        att_cache: torch.Tensor = None,
-    ):
-        """
         Args:
-            x: shape (b, dt, c)
-            mu: shape (b, dt, c)
-            t: shape (b,)
-            spks: shape (b, c)
-            cond: shape (b, dt, c)
-            cnn_cache: shape (depth, b, c1+c2, 2)
-            att_cache: shape (depth, b, nh, t, c * 2)
+            x (torch.Tensor): shape (batch_size, in_channels, time)
+            mask (_type_): shape (batch_size, 1, time)
+            t (_type_): shape (batch_size)
+            spks (_type_, optional): shape: (batch_size, condition_channels). Defaults to None.
+            cond (_type_, optional): placeholder for future use. Defaults to None.
+
+        Raises:
+            ValueError: _description_
+            ValueError: _description_
+
+        Returns:
+            _type_: _description_
         """
 
-        # time
-        batch_size = x.shape[0]
-        t = t.repeat(batch_size // 2)
-        t = self.t_embedder(t).unsqueeze(1)  # (b, 1, c)
+        t = self.time_embeddings(t).to(t.dtype)
+        t = self.time_mlp(t)
+
         x = pack([x, mu], "b * t")[0]
+
         if spks is not None:
             spks = repeat(spks, "b c -> b c t", t=x.shape[-1])
             x = pack([x, spks], "b * t")[0]
         if cond is not None:
             x = pack([x, cond], "b * t")[0]
 
-        # create fake cache
-        if cnn_cache is None:
-            cnn_cache = [None] * len(self.blocks)
-        if att_cache is None:
-            att_cache = [None] * len(self.blocks)
-        if att_cache[0] is not None:
-            last_att_len = att_cache.shape[3]
-        else:
-            last_att_len = 0
-        chunk_size = x.shape[2]
-        mask = torch.ones(x.shape[0], chunk_size, last_att_len + chunk_size, dtype=torch.bool, device=x.device)
-        if (
-            self.use_cuda_graph
-            and att_cache[0] is not None
-            and chunk_size in self.graph_chunk
-            and last_att_len <= self.max_size_chunk[chunk_size]
-        ):
-            padded_mask = torch.zeros(
-                (2, chunk_size, self.max_size_chunk[chunk_size] + chunk_size), dtype=mask.dtype, device=mask.device
-            )
-            padded_mask[:, :, : mask.shape[-1]] = mask
-            padded_att_cache = torch.zeros(
-                (16, 2, 8, self.max_size_chunk[chunk_size], 128), dtype=att_cache.dtype, device=att_cache.device
-            )
-            padded_att_cache[:, :, :, :last_att_len, :] = att_cache
-            self.inference_buffers_chunk[chunk_size]["static_inputs"][0].copy_(x)
-            self.inference_buffers_chunk[chunk_size]["static_inputs"][1].copy_(t)
-            self.inference_buffers_chunk[chunk_size]["static_inputs"][2].copy_(padded_mask)
-            self.inference_buffers_chunk[chunk_size]["static_inputs"][3].copy_(cnn_cache)
-            self.inference_buffers_chunk[chunk_size]["static_inputs"][4].copy_(padded_att_cache)
-            self.graph_chunk[chunk_size].replay()
-            x = self.inference_buffers_chunk[chunk_size]["static_outputs"][0][:, :, :chunk_size]
-            new_cnn_cache = self.inference_buffers_chunk[chunk_size]["static_outputs"][1]
-            new_att_cache = self.inference_buffers_chunk[chunk_size]["static_outputs"][2][
-                :, :, :, : chunk_size + last_att_len, :
-            ]
-        else:
-            mask = None
-            x = self.blocks_forward_chunk(
-                x,
-                t,
-                mask,
-                cnn_cache,
-                att_cache,
-                self.cnn_cache_buffer[:, :batch_size],
-                self.att_cache_buffer[:, :batch_size],
-            )
-            new_cnn_cache = self.cnn_cache_buffer[:, :batch_size, :, :]
-            new_att_cache = self.att_cache_buffer[:, :batch_size, :, : last_att_len + chunk_size, :]
+        hiddens = []
+        masks = [mask]
+        for resnet, transformer_blocks, downsample in self.down_blocks:
+            mask_down = masks[-1]
+            x = resnet(x, mask_down, t)
+            x = rearrange(x, "b c t -> b t c").contiguous()
+            # attn_mask = torch.matmul(mask_down.transpose(1, 2).contiguous(), mask_down)
+            attn_mask = add_optional_chunk_mask(x, mask_down.bool(), False, False, 0, self.static_chunk_size, -1)
+            attn_mask = mask_to_bias(attn_mask == 1, x.dtype)
+            for transformer_block in transformer_blocks:
+                x = transformer_block(
+                    hidden_states=x,
+                    attention_mask=attn_mask,
+                    timestep=t,
+                )
+            x = rearrange(x, "b t c -> b c t").contiguous()
+            hiddens.append(x)  # Save hidden states for skip connections
+            x = downsample(x * mask_down)
+            masks.append(mask_down[:, :, ::2])
+        masks = masks[:-1]
+        mask_mid = masks[-1]
 
-        return x, new_cnn_cache, new_att_cache
+        for resnet, transformer_blocks in self.mid_blocks:
+            x = resnet(x, mask_mid, t)
+            x = rearrange(x, "b c t -> b t c").contiguous()
+            # attn_mask = torch.matmul(mask_mid.transpose(1, 2).contiguous(), mask_mid)
+            attn_mask = add_optional_chunk_mask(x, mask_mid.bool(), False, False, 0, self.static_chunk_size, -1)
+            attn_mask = mask_to_bias(attn_mask == 1, x.dtype)
+            for transformer_block in transformer_blocks:
+                x = transformer_block(
+                    hidden_states=x,
+                    attention_mask=attn_mask,
+                    timestep=t,
+                )
+            x = rearrange(x, "b t c -> b c t").contiguous()
 
-    def blocks_forward_chunk(
-        self, x, t, mask, cnn_cache=None, att_cache=None, cnn_cache_buffer=None, att_cache_buffer=None
+        for resnet, transformer_blocks, upsample in self.up_blocks:
+            mask_up = masks.pop()
+            skip = hiddens.pop()
+            x = pack([x[:, :, :skip.shape[-1]], skip], "b * t")[0]
+            x = resnet(x, mask_up, t)
+            x = rearrange(x, "b c t -> b t c").contiguous()
+            # attn_mask = torch.matmul(mask_up.transpose(1, 2).contiguous(), mask_up)
+            attn_mask = add_optional_chunk_mask(x, mask_up.bool(), False, False, 0, self.static_chunk_size, -1)
+            attn_mask = mask_to_bias(attn_mask == 1, x.dtype)
+            for transformer_block in transformer_blocks:
+                x = transformer_block(
+                    hidden_states=x,
+                    attention_mask=attn_mask,
+                    timestep=t,
+                )
+            x = rearrange(x, "b t c -> b c t").contiguous()
+            x = upsample(x * mask_up)
+        x = self.final_block(x, mask_up)
+        output = self.final_proj(x * mask_up)
+        return output * mask
+
+
+CFM_PARAMS = AttrDict({
+    "sigma_min": 1e-06,
+    "solver": "euler",
+    "t_scheduler": "cosine",
+    "training_cfg_rate": 0.2,
+    "inference_cfg_rate": 0.7,
+    "reg_loss_type": "l1"
+})
+
+
+class BASECFM(torch.nn.Module):
+    def __init__(
+        self,
+        n_feats,
+        cfm_params,
+        n_spks=1,
+        spk_emb_dim=128,
     ):
-        x = x.transpose(1, 2)
-        x = self.in_proj(x)
-        for b_idx, block in enumerate(self.blocks):
-            x, this_new_cnn_cache, this_new_att_cache = block.forward_chunk(
-                x, t, cnn_cache[b_idx], att_cache[b_idx], mask
-            )
-            cnn_cache_buffer[b_idx] = this_new_cnn_cache
-            att_cache_buffer[b_idx][:, :, : this_new_att_cache.shape[2], :] = this_new_att_cache
-        x = self.final_layer(x, t)
-        x = x.transpose(1, 2)
-        return x
-
-
-class CausalConditionalCFM(torch.nn.Module):
-    def __init__(self, estimator: DiT, inference_cfg_rate: float = 0.7):
         super().__init__()
+        self.n_feats = n_feats
+        self.n_spks = n_spks
+        self.spk_emb_dim = spk_emb_dim
+        self.solver = cfm_params.solver
+        if hasattr(cfm_params, "sigma_min"):
+            self.sigma_min = cfm_params.sigma_min
+        else:
+            self.sigma_min = 1e-4
+
+        self.estimator = None
+
+    @torch.inference_mode()
+    def forward(self, mu, mask, n_timesteps, temperature=1.0, spks=None, cond=None):
+        """Forward diffusion
+
+        Args:
+            mu (torch.Tensor): output of encoder
+                shape: (batch_size, n_feats, mel_timesteps)
+            mask (torch.Tensor): output_mask
+                shape: (batch_size, 1, mel_timesteps)
+            n_timesteps (int): number of diffusion steps
+            temperature (float, optional): temperature for scaling noise. Defaults to 1.0.
+            spks (torch.Tensor, optional): speaker ids. Defaults to None.
+                shape: (batch_size, spk_emb_dim)
+            cond: Not used but kept for future purposes
+
+        Returns:
+            sample: generated mel-spectrogram
+                shape: (batch_size, n_feats, mel_timesteps)
+        """
+        z = torch.randn_like(mu) * temperature
+        t_span = torch.linspace(0, 1, n_timesteps + 1, device=mu.device)
+        return self.solve_euler(z, t_span=t_span, mu=mu, mask=mask, spks=spks, cond=cond)
+
+    def solve_euler(self, x, t_span, mu, mask, spks, cond):
+        """
+        Fixed euler solver for ODEs.
+        Args:
+            x (torch.Tensor): random noise
+            t_span (torch.Tensor): n_timesteps interpolated
+                shape: (n_timesteps + 1,)
+            mu (torch.Tensor): output of encoder
+                shape: (batch_size, n_feats, mel_timesteps)
+            mask (torch.Tensor): output_mask
+                shape: (batch_size, 1, mel_timesteps)
+            spks (torch.Tensor, optional): speaker ids. Defaults to None.
+                shape: (batch_size, spk_emb_dim)
+            cond: Not used but kept for future purposes
+        """
+        t, _, dt = t_span[0], t_span[-1], t_span[1] - t_span[0]
+
+        # I am storing this because I can later plot it by putting a debugger here and saving it to a file
+        # Or in future might add like a return_all_steps flag
+        sol = []
+
+        for step in range(1, len(t_span)):
+            dphi_dt = self.estimator(x, mask, mu, t, spks, cond)
+
+            x = x + dt * dphi_dt
+            t = t + dt
+            sol.append(x)
+            if step < len(t_span) - 1:
+                dt = t_span[step + 1] - t
+
+        return sol[-1]
+
+    def compute_loss(self, x1, mask, mu, spks=None, cond=None):
+        """Computes diffusion loss
+
+        Args:
+            x1 (torch.Tensor): Target
+                shape: (batch_size, n_feats, mel_timesteps)
+            mask (torch.Tensor): target mask
+                shape: (batch_size, 1, mel_timesteps)
+            mu (torch.Tensor): output of encoder
+                shape: (batch_size, n_feats, mel_timesteps)
+            spks (torch.Tensor, optional): speaker embedding. Defaults to None.
+                shape: (batch_size, spk_emb_dim)
+
+        Returns:
+            loss: conditional flow matching loss
+            y: conditional flow
+                shape: (batch_size, n_feats, mel_timesteps)
+        """
+        b, _, t = mu.shape
+
+        # random timestep
+        t = torch.rand([b, 1, 1], device=mu.device, dtype=mu.dtype)
+        # sample noise p(x_0)
+        z = torch.randn_like(x1)
+
+        y = (1 - (1 - self.sigma_min) * t) * z + t * x1
+        u = x1 - (1 - self.sigma_min) * z
+
+        loss = F.mse_loss(self.estimator(y, mask, mu, t.squeeze(), spks), u, reduction="sum") / (
+            torch.sum(mask) * u.shape[1]
+        )
+        return loss, y
+
+class ConditionalCFM(BASECFM):
+    def __init__(self, in_channels, cfm_params, n_spks=1, spk_emb_dim=64, estimator: torch.nn.Module = None):
+        super().__init__(
+            n_feats=in_channels,
+            cfm_params=cfm_params,
+            n_spks=n_spks,
+            spk_emb_dim=spk_emb_dim,
+        )
+        self.t_scheduler = cfm_params.t_scheduler
+        self.training_cfg_rate = cfm_params.training_cfg_rate
+        self.inference_cfg_rate = cfm_params.inference_cfg_rate
+        in_channels = in_channels + (spk_emb_dim if n_spks > 0 else 0)
+        # Just change the architecture of the estimator here
         self.estimator = estimator
-        self.inference_cfg_rate = inference_cfg_rate
-        self.out_channels = estimator.out_channels
+        self.lock = threading.Lock()
 
-        # TODO: propagate max_batch_size from outside
-        self.max_batch_size = 8
+    @torch.inference_mode()
+    def forward(self, mu, mask, n_timesteps, temperature=1.0, spks=None, cond=None, prompt_len=0, flow_cache=torch.zeros(1, 80, 0, 2)):
+        """Forward diffusion
 
-        # a maximum of 600s
-        self.register_buffer(
-            "rand_noise",
-            torch.randn([self.max_batch_size, self.out_channels, 50 * 600]),
-            persistent=False,
-        )
-        self.register_buffer(
-            "cnn_cache_buffer",
-            torch.zeros(16, 16, 2 * self.max_batch_size, 1024, 2),
-            persistent=False,
-        )
-        self.register_buffer(
-            "att_cache_buffer",
-            torch.zeros(16, 16, 2 * self.max_batch_size, 8, 1000, 128),
-            persistent=False,
-        )
+        Args:
+            mu (torch.Tensor): output of encoder
+                shape: (batch_size, n_feats, mel_timesteps)
+            mask (torch.Tensor): output_mask
+                shape: (batch_size, 1, mel_timesteps)
+            n_timesteps (int): number of diffusion steps
+            temperature (float, optional): temperature for scaling noise. Defaults to 1.0.
+            spks (torch.Tensor, optional): speaker ids. Defaults to None.
+                shape: (batch_size, spk_emb_dim)
+            cond: Not used but kept for future purposes
 
-    def scatter_cuda_graph(self, enable_cuda_graph: bool):
-        if enable_cuda_graph:
-            self.estimator._init_cuda_graph_all()
+        Returns:
+            sample: generated mel-spectrogram
+                shape: (batch_size, n_feats, mel_timesteps)
+        """
+
+        z = torch.randn_like(mu).to(mu.device).to(mu.dtype) * temperature
+        cache_size = flow_cache.shape[2]
+        # fix prompt and overlap part mu and z
+        if cache_size != 0:
+            z[:, :, :cache_size] = flow_cache[:, :, :, 0]
+            mu[:, :, :cache_size] = flow_cache[:, :, :, 1]
+        z_cache = torch.concat([z[:, :, :prompt_len], z[:, :, -34:]], dim=2)
+        mu_cache = torch.concat([mu[:, :, :prompt_len], mu[:, :, -34:]], dim=2)
+        flow_cache = torch.stack([z_cache, mu_cache], dim=-1)
+
+        t_span = torch.linspace(0, 1, n_timesteps + 1, device=mu.device, dtype=mu.dtype)
+        if self.t_scheduler == 'cosine':
+            t_span = 1 - torch.cos(t_span * 0.5 * torch.pi)
+        return self.solve_euler(z, t_span=t_span, mu=mu, mask=mask, spks=spks, cond=cond), flow_cache
 
     def solve_euler(self, x, t_span, mu, mask, spks, cond):
         """
@@ -969,154 +1859,136 @@ class CausalConditionalCFM(torch.nn.Module):
         """
         t, _, dt = t_span[0], t_span[-1], t_span[1] - t_span[0]
         t = t.unsqueeze(dim=0)
-        assert self.inference_cfg_rate > 0, "inference_cfg_rate better > 0"
 
-        # constant during denoising
-        mask_in = torch.cat([mask, mask], dim=0)
-        mu_in = torch.cat([mu, torch.zeros_like(mu)], dim=0)
-        spks_in = torch.cat([spks, torch.zeros_like(spks)], dim=0)
-        cond_in = torch.cat([cond, torch.zeros_like(cond)], dim=0)
+        # I am storing this because I can later plot it by putting a debugger here and saving it to a file
+        # Or in future might add like a return_all_steps flag
+        sol = []
 
+        # Do not use concat, it may cause memory format changed and trt infer with wrong results!
+        x_in = torch.zeros([2, 80, x.size(2)], device=x.device, dtype=x.dtype)
+        mask_in = torch.zeros([2, 1, x.size(2)], device=x.device, dtype=x.dtype)
+        mu_in = torch.zeros([2, 80, x.size(2)], device=x.device, dtype=x.dtype)
+        t_in = torch.zeros([2], device=x.device, dtype=x.dtype)
+        spks_in = torch.zeros([2, 80], device=x.device, dtype=x.dtype)
+        cond_in = torch.zeros([2, 80, x.size(2)], device=x.device, dtype=x.dtype)
         for step in range(1, len(t_span)):
-            x_in = torch.cat([x, x], dim=0)
-            t_in = torch.cat([t, t], dim=0)
-
-            dphi_dt = self.estimator.forward(
-                x_in,
-                mask_in,
-                mu_in,
-                t_in,
+            # Classifier-Free Guidance inference introduced in VoiceBox
+            x_in[:] = x
+            mask_in[:] = mask
+            mu_in[0] = mu
+            t_in[:] = t.unsqueeze(0)
+            spks_in[0] = spks
+            cond_in[0] = cond
+            dphi_dt = self.forward_estimator(
+                x_in, mask_in,
+                mu_in, t_in,
                 spks_in,
-                cond_in,
+                cond_in
             )
             dphi_dt, cfg_dphi_dt = torch.split(dphi_dt, [x.size(0), x.size(0)], dim=0)
-            dphi_dt = (1.0 + self.inference_cfg_rate) * dphi_dt - self.inference_cfg_rate * cfg_dphi_dt
+            dphi_dt = ((1.0 + self.inference_cfg_rate) * dphi_dt - self.inference_cfg_rate * cfg_dphi_dt)
             x = x + dt * dphi_dt
             t = t + dt
+            sol.append(x)
             if step < len(t_span) - 1:
                 dt = t_span[step + 1] - t
 
-        return x
+        return sol[-1].float()
+
+    def forward_estimator(self, x, mask, mu, t, spks, cond):
+        if isinstance(self.estimator, torch.nn.Module):
+            return self.estimator.forward(x, mask, mu, t, spks, cond)
+        else:
+            with self.lock:
+                self.estimator.set_input_shape('x', (2, 80, x.size(2)))
+                self.estimator.set_input_shape('mask', (2, 1, x.size(2)))
+                self.estimator.set_input_shape('mu', (2, 80, x.size(2)))
+                self.estimator.set_input_shape('t', (2,))
+                self.estimator.set_input_shape('spks', (2, 80))
+                self.estimator.set_input_shape('cond', (2, 80, x.size(2)))
+                # run trt engine
+                self.estimator.execute_v2([x.contiguous().data_ptr(),
+                                           mask.contiguous().data_ptr(),
+                                           mu.contiguous().data_ptr(),
+                                           t.contiguous().data_ptr(),
+                                           spks.contiguous().data_ptr(),
+                                           cond.contiguous().data_ptr(),
+                                           x.data_ptr()])
+            return x
+
+    def compute_loss(self, x1, mask, mu, spks=None, cond=None):
+        """Computes diffusion loss
+
+        Args:
+            x1 (torch.Tensor): Target
+                shape: (batch_size, n_feats, mel_timesteps)
+            mask (torch.Tensor): target mask
+                shape: (batch_size, 1, mel_timesteps)
+            mu (torch.Tensor): output of encoder
+                shape: (batch_size, n_feats, mel_timesteps)
+            spks (torch.Tensor, optional): speaker embedding. Defaults to None.
+                shape: (batch_size, spk_emb_dim)
+
+        Returns:
+            loss: conditional flow matching loss
+            y: conditional flow
+                shape: (batch_size, n_feats, mel_timesteps)
+        """
+        b, _, t = mu.shape
+
+        # random timestep
+        t = torch.rand([b, 1, 1], device=mu.device, dtype=mu.dtype)
+        if self.t_scheduler == 'cosine':
+            t = 1 - torch.cos(t * 0.5 * torch.pi)
+        # sample noise p(x_0)
+        z = torch.randn_like(x1)
+
+        y = (1 - (1 - self.sigma_min) * t) * z + t * x1
+        u = x1 - (1 - self.sigma_min) * z
+
+        # during training, we randomly drop condition to trade off mode coverage and sample fidelity
+        if self.training_cfg_rate > 0:
+            cfg_mask = torch.rand(b, device=x1.device) > self.training_cfg_rate
+            mu = mu * cfg_mask.view(-1, 1, 1)
+            spks = spks * cfg_mask.view(-1, 1)
+            cond = cond * cfg_mask.view(-1, 1, 1)
+
+        pred = self.estimator(y, mask, mu, t.squeeze(), spks, cond)
+        loss = F.mse_loss(pred * mask, u * mask, reduction="sum") / (torch.sum(mask) * u.shape[1])
+        return loss, y
+
+
+class CausalConditionalCFM(ConditionalCFM):
+    def __init__(self, in_channels=240, cfm_params=CFM_PARAMS, n_spks=1, spk_emb_dim=80, estimator=None):
+        super().__init__(in_channels, cfm_params, n_spks, spk_emb_dim, estimator)
+        self.rand_noise = torch.randn([1, 80, 50 * 300])
 
     @torch.inference_mode()
-    def forward(self, mu, mask, spks, cond, n_timesteps=10, temperature=1.0):
-        z = self.rand_noise[:mu.size(0), :, : mu.size(2)] * temperature
-        t_span = torch.linspace(0, 1, n_timesteps + 1, device=mu.device, dtype=mu.dtype)
-        # cosine scheduling
-        t_span = 1 - torch.cos(t_span * 0.5 * torch.pi)
-        return self.solve_euler(z, t_span, mu, mask, spks, cond)
+    def forward(self, mu, mask, n_timesteps, temperature=1.0, spks=None, cond=None):
+        """Forward diffusion
 
-    def solve_euler_chunk(
-        self,
-        x: torch.Tensor,
-        t_span: torch.Tensor,
-        mu: torch.Tensor,
-        spks: torch.Tensor,
-        cond: torch.Tensor,
-        cnn_cache: torch.Tensor = None,
-        att_cache: torch.Tensor = None,
-    ):
-        """
-        Fixed euler solver for ODEs.
         Args:
-            x (torch.Tensor): random noise
-            t_span (torch.Tensor): n_timesteps interpolated
-                shape: (n_timesteps + 1,)
             mu (torch.Tensor): output of encoder
                 shape: (batch_size, n_feats, mel_timesteps)
             mask (torch.Tensor): output_mask
                 shape: (batch_size, 1, mel_timesteps)
+            n_timesteps (int): number of diffusion steps
+            temperature (float, optional): temperature for scaling noise. Defaults to 1.0.
             spks (torch.Tensor, optional): speaker ids. Defaults to None.
                 shape: (batch_size, spk_emb_dim)
             cond: Not used but kept for future purposes
-            cnn_cache: shape (n_time, depth, b, c1+c2, 2)
-            att_cache: shape (n_time, depth, b, nh, t, c * 2)
+
+        Returns:
+            sample: generated mel-spectrogram
+                shape: (batch_size, n_feats, mel_timesteps)
         """
-        assert self.inference_cfg_rate > 0, "cfg rate should be > 0"
 
-        t, _, dt = t_span[0], t_span[-1], t_span[1] - t_span[0]
-        t = t.unsqueeze(dim=0)  # (b,)
-
-        # setup initial cache
-        if cnn_cache is None:
-            cnn_cache = [None for _ in range(len(t_span) - 1)]
-        if att_cache is None:
-            att_cache = [None for _ in range(len(t_span) - 1)]
-        # next chunk's cache at each timestep
-
-        if att_cache[0] is not None:
-            last_att_len = att_cache.shape[4]
-        else:
-            last_att_len = 0
-
-        # constant during denoising
-        mu_in = torch.cat([mu, torch.zeros_like(mu)], dim=0)
-        spks_in = torch.cat([spks, torch.zeros_like(spks)], dim=0)
-        cond_in = torch.cat([cond, torch.zeros_like(cond)], dim=0)
-        for step in range(1, len(t_span)):
-            # torch.cuda.memory._record_memory_history(max_entries=100000)
-            # torch.cuda.memory._record_memory_history(max_entries=100000)
-            this_att_cache = att_cache[step - 1]
-            this_cnn_cache = cnn_cache[step - 1]
-
-            dphi_dt, this_new_cnn_cache, this_new_att_cache = self.estimator.forward_chunk(
-                x=x.repeat(2, 1, 1),
-                mu=mu_in,
-                t=t.repeat(2),
-                spks=spks_in,
-                cond=cond_in,
-                cnn_cache=this_cnn_cache,
-                att_cache=this_att_cache,
-            )
-            dphi_dt, cfg_dphi_dt = dphi_dt.chunk(2, dim=0)
-            dphi_dt = (1.0 + self.inference_cfg_rate) * dphi_dt - self.inference_cfg_rate * cfg_dphi_dt
-            x = x + dt * dphi_dt
-            t = t + dt
-            if step < len(t_span) - 1:
-                dt = t_span[step + 1] - t
-
-            self.cnn_cache_buffer[step - 1, :, :2 * mu.size(0)] = this_new_cnn_cache
-            self.att_cache_buffer[step - 1][:, :2 * mu.size(0), :, : x.shape[2] + last_att_len, :] = this_new_att_cache
-
-        cnn_cache = self.cnn_cache_buffer[:, :, :2 * mu.size(0), :, :]
-        att_cache = self.att_cache_buffer[:, :, :2 * mu.size(0), :, : x.shape[2] + last_att_len, :]
-        return x, cnn_cache, att_cache
-
-    @torch.inference_mode()
-    def forward_chunk(
-        self,
-        mu: torch.Tensor,
-        spks: torch.Tensor,
-        cond: torch.Tensor,
-        n_timesteps: int = 10,
-        temperature: float = 1.0,
-        cnn_cache: torch.Tensor = None,
-        att_cache: torch.Tensor = None,
-    ):
-        """
-        Args:
-            mu(torch.Tensor): shape (b, c, t)
-            spks(torch.Tensor): shape (b, 192)
-            cond(torch.Tensor): shape (b, c, t)
-            cnn_cache: shape (n_time, depth, b, c1+c2, 2)
-            att_cache: shape (n_time, depth, b, nh, t, c * 2)
-        """
-        # get offset from att_cache
-        offset = att_cache.shape[4] if att_cache is not None else 0
-        z = self.rand_noise[:mu.size(0), :, offset : offset + mu.size(2)] * temperature
+        z = self.rand_noise[:, :, :mu.size(2)].to(mu.device).to(mu.dtype) * temperature
+        # fix prompt and overlap part mu and z
         t_span = torch.linspace(0, 1, n_timesteps + 1, device=mu.device, dtype=mu.dtype)
-        # cosine scheduling
-        t_span = 1 - torch.cos(t_span * 0.5 * torch.pi)
-        x, new_cnn_cache, new_att_cache = self.solve_euler_chunk(
-            x=z,
-            t_span=t_span,
-            mu=mu,
-            spks=spks,
-            cond=cond,
-            att_cache=att_cache,
-            cnn_cache=cnn_cache,
-        )
-        return x, new_cnn_cache, new_att_cache
+        if self.t_scheduler == 'cosine':
+            t_span = 1 - torch.cos(t_span * 0.5 * torch.pi)
+        return self.solve_euler(z, t_span=t_span, mu=mu, mask=mask, spks=spks, cond=cond), None
 
 
 class ConformerEncoderLayer(nn.Module):
@@ -1831,7 +2703,7 @@ class PreLookaheadLayer(nn.Module):
         return outputs, new_cache
 
 
-class UpsampleConformerEncoderV2(torch.nn.Module):
+class UpsampleConformerEncoder(torch.nn.Module):
     def __init__(
         self,
         # input & output
@@ -2140,238 +3012,107 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
         output_size: int = 80,
         spk_embed_dim: int = 192,
         output_type: str = "mel",
-        vocab_size: int = 5121,
-        encoder: UpsampleConformerEncoderV2 = None,
-        decoder: CausalConditionalCFM = None,
-        input_embedding: torch.nn.Module = None,
+        vocab_size: int = 6561,
+        input_frame_rate: int = 25,
+        only_mask_loss: bool = True,
+        token_mel_ratio: int = 2,
+        pre_lookahead_len: int = 3,
+        encoder: torch.nn.Module = None,
+        decoder: torch.nn.Module = None,
+        decoder_conf: Dict = {
+            'in_channels': 240,
+            'out_channel': 80,
+            'spk_emb_dim': 80,
+            'n_spks': 1,
+            'cfm_params': CFM_PARAMS,
+            'decoder_params': {
+                'channels': [256, 256],
+                'dropout': 0.0,
+                'attention_head_dim': 64,
+                'n_blocks': 4,
+                'num_mid_blocks': 12,
+                'num_heads': 8,
+                'act_fn': 'gelu',
+            }
+        },
+        mel_feat_conf: Dict = {
+            'n_fft': 1024,
+            'num_mels': 80,
+            'sampling_rate': 22050,
+            'hop_size': 256,
+            'win_size': 1024,
+            'fmin': 0,
+            'fmax': 8000
+        }
     ):
         super().__init__()
         self.input_size = input_size
         self.output_size = output_size
+        self.decoder_conf = decoder_conf
+        self.mel_feat_conf = mel_feat_conf
         self.vocab_size = vocab_size
         self.output_type = output_type
-        self.pre_lookahead_len = int(encoder.pre_lookahead_layer.pre_lookahead_len)
-        self.up_rate = int(encoder.up_layer.stride)
-        if input_embedding is None:
-            self.input_embedding = nn.Embedding(vocab_size, input_size)
-        else:
-            self.input_embedding = input_embedding
+        self.input_frame_rate = input_frame_rate
+        logging.info(f"input frame rate={self.input_frame_rate}")
+        self.input_embedding = nn.Embedding(vocab_size, input_size)
         self.spk_embed_affine_layer = torch.nn.Linear(spk_embed_dim, output_size)
         self.encoder = encoder
         self.encoder_proj = torch.nn.Linear(self.encoder.output_size(), output_size)
         self.decoder = decoder
+        self.only_mask_loss = only_mask_loss
+        self.token_mel_ratio = token_mel_ratio
+        self.pre_lookahead_len = pre_lookahead_len
 
-        # xvec projection with CUDA Graph optimization
-        # 初始化 CUDA Graph 相关变量
-        self.enable_cuda_graph = False
-        self.static_embedding = None
-        self.static_output = None
-        self.graph = None
-        self.embedding_shape = None
-
-    def scatter_cuda_graph(self, enable_cuda_graph: bool):
-        self.enable_cuda_graph = enable_cuda_graph
-        if self.enable_cuda_graph:
-            # self.encoder.scatter_cuda_graph(enable_cuda_graph)
-            self.decoder.scatter_cuda_graph(enable_cuda_graph)
+        # FIXME: this was missing - just putting it in as false
+        self.fp16 = False
 
     @torch.inference_mode()
-    def inference(
-        self,
-        token,
-        token_len,
-        prompt_token,
-        prompt_token_len,
-        prompt_feat,
-        prompt_feat_len,
-        embedding,
-        n_timesteps: int = 10,
-    ):
-        assert token.shape[0] == 1
+    def inference(self,
+                  token,
+                  token_len,
+                  prompt_token,
+                  prompt_token_len,
+                  prompt_feat,
+                  prompt_feat_len,
+                  embedding,
+                  finalize):
+        if self.fp16 is True:
+            prompt_feat = prompt_feat.half()
+            embedding = embedding.half()
 
+        assert token.shape[0] == 1
         # xvec projection
         embedding = F.normalize(embedding, dim=1)
         embedding = self.spk_embed_affine_layer(embedding)
 
         # concat text and prompt_text
-        token_len = prompt_token_len + token_len
-        token = torch.concat([prompt_token, token], dim=1)
-
+        token, token_len = torch.concat([prompt_token, token], dim=1), prompt_token_len + token_len
         mask = (~make_pad_mask(token_len)).unsqueeze(-1).to(embedding)
-        token = self.input_embedding(torch.clamp(token, min=0)) * mask
+        token = self.input_embedding(torch.clamp(token, min=0, max=self.input_embedding.num_embeddings-1)) * mask
 
-        # token encode
-        h, _ = self.encoder.forward(token, token_len)
+        # text encode
+        h, h_lengths = self.encoder(token, token_len)
+        if finalize is False:
+            h = h[:, :-self.pre_lookahead_len * self.token_mel_ratio]
+        mel_len1, mel_len2 = prompt_feat.shape[1], h.shape[1] - prompt_feat.shape[1]
         h = self.encoder_proj(h)
 
-        # condition
-        mel_len1 = prompt_feat.shape[1]
-        mel_len2 = h.shape[1] - prompt_feat.shape[1]
-
-        conds = torch.zeros_like(h)
+        # get conditions
+        conds = torch.zeros([1, mel_len1 + mel_len2, self.output_size], device=token.device).to(h.dtype)
         conds[:, :mel_len1] = prompt_feat
-        conds = conds.transpose(1, 2).contiguous()
+        conds = conds.transpose(1, 2)
 
         mask = (~make_pad_mask(torch.tensor([mel_len1 + mel_len2]))).to(h)
-
-        feat = self.decoder.forward(
+        feat, _ = self.decoder(
             mu=h.transpose(1, 2).contiguous(),
             mask=mask.unsqueeze(1),
             spks=embedding,
             cond=conds,
-            n_timesteps=n_timesteps,
+            n_timesteps=10
         )
-
         feat = feat[:, :, mel_len1:]
         assert feat.shape[2] == mel_len2
-        return feat
-
-    @torch.inference_mode()
-    def setup_cache(
-        self,
-        token: torch.Tensor,
-        mel: torch.Tensor,
-        spk: torch.Tensor,
-        n_timesteps: int = 10,
-    ):
-        """
-        Args:
-            token: shape (b, t), with look ahead tokens
-            mel: shape (b, t, c), groundtruth mel
-            spk: shape (b, 192), speaker embedding
-        Returns:
-            cache: dict {
-                'conformer': {'cnn_cache': xxx, 'att_cache': xxx},
-                'estimator': {'cnn_cache': xxx, 'att_cache': xxx}
-            }
-        """
-        # check if look ahead token included
-        assert (token.shape[1] - self.pre_lookahead_len) * self.up_rate == mel.shape[1], (token.shape, mel.shape)
-
-        # xvec projection
-        spk = F.normalize(spk, dim=1)
-        spk = self.spk_embed_affine_layer(spk)
-
-        token = self.input_embedding(token)
-        # NOTE encoder.forward_chunk will strip the look ahead part
-        h, conformer_cnn_cache, conformer_att_cache = self.encoder.forward_chunk(
-            xs=token,
-            last_chunk=False,
-            cnn_cache=None,
-            att_cache=None,
-        )
-        h = self.encoder_proj(h)
-
-        feat, estimator_cnn_cache, estimator_att_cache = self.decoder.forward_chunk(
-            mu=h.transpose(1, 2).contiguous(),
-            spks=spk,
-            cond=mel.transpose(1, 2).contiguous(),
-            n_timesteps=n_timesteps,
-            temperature=1.0,
-            cnn_cache=None,
-            att_cache=None,
-        )
-
-        # Convert caches to batch-first layout at API boundary
-        # conformer_cnn_cache: (b, c, t) -> unchanged (batch-first already)
-        # conformer_att_cache: (depth, b, nh, t, c) -> (b, depth, nh, t, c)
-        if isinstance(conformer_att_cache, torch.Tensor):
-            conformer_att_cache = conformer_att_cache.permute(1, 0, 2, 3, 4).contiguous()
-        # estimator_cnn_cache: (n_time, depth, b, ch, 2) -> (b, n_time, depth, ch, 2)
-        if isinstance(estimator_cnn_cache, torch.Tensor):
-            estimator_cnn_cache = estimator_cnn_cache.permute(2, 0, 1, 3, 4).contiguous()
-        # estimator_att_cache: (n_time, depth, b, nh, t, d) -> (b, n_time, depth, nh, t, d)
-        if isinstance(estimator_att_cache, torch.Tensor):
-            estimator_att_cache = estimator_att_cache.permute(2, 0, 1, 3, 4, 5).contiguous()
-
-        cache = {
-            "conformer_cnn_cache": conformer_cnn_cache,
-            "conformer_att_cache": conformer_att_cache,
-            "estimator_cnn_cache": estimator_cnn_cache,
-            "estimator_att_cache": estimator_att_cache,
-        }
-        return cache
-
-    @torch.inference_mode()
-    def inference_chunk(
-        self,
-        token: torch.Tensor,
-        spk: torch.Tensor,
-        cache: dict,
-        last_chunk: bool = False,
-        n_timesteps: int = 10,
-    ):
-        """
-        Args:
-            token: shape (b, t), with look ahead tokens
-            spk: shape (b, 192), speaker embedding
-            cache: dict {
-                'conformer_cnn_cache': xxx,
-                ...
-            }
-        """
-        # unpack cache (batch-first at API), convert to internal layout
-        conformer_cnn_cache = cache["conformer_cnn_cache"]  # (b, c, t) unchanged
-        conformer_att_cache = cache["conformer_att_cache"]
-        estimator_cnn_cache = cache["estimator_cnn_cache"]
-        estimator_att_cache = cache["estimator_att_cache"]
-
-        # conformer_att_cache: (b, depth, nh, t, c) -> (depth, b, nh, t, c)
-        if isinstance(conformer_att_cache, torch.Tensor):
-            conformer_att_cache = conformer_att_cache.permute(1, 0, 2, 3, 4).contiguous()
-        # estimator caches may be None on first call
-        # estimator_cnn_cache: (b, n_time, depth, ch, 2) -> (n_time, depth, b, ch, 2)
-        if isinstance(estimator_cnn_cache, torch.Tensor):
-            estimator_cnn_cache = estimator_cnn_cache.permute(1, 2, 0, 3, 4).contiguous()
-        # estimator_att_cache: (b, n_time, depth, nh, t, d) -> (n_time, depth, b, nh, t, d)
-        if isinstance(estimator_att_cache, torch.Tensor):
-            estimator_att_cache = estimator_att_cache.permute(1, 2, 0, 3, 4, 5).contiguous()
-
-        # xvec projection
-        spk = F.normalize(spk, dim=1)
-        spk = self.spk_embed_affine_layer(spk)
-
-        token = self.input_embedding(torch.clamp(token, min=0))
-        # if not the last chunk, h is shorter than xs for a length of lookahead_length * stride (6)
-        h, conformer_cnn_cache, conformer_att_cache = self.encoder.forward_chunk(
-            xs=token,
-            last_chunk=last_chunk,
-            cnn_cache=conformer_cnn_cache,
-            att_cache=conformer_att_cache,
-        )
-        h = self.encoder_proj(h)
-
-        cond = torch.zeros_like(h)
-        # forward estimator (internal layout)
-        feat, estimator_cnn_cache, estimator_att_cache = self.decoder.forward_chunk(
-            mu=h.transpose(1, 2).contiguous(),
-            spks=spk,
-            cond=cond.transpose(1, 2).contiguous(),
-            n_timesteps=n_timesteps,
-            temperature=1.0,
-            cnn_cache=estimator_cnn_cache,
-            att_cache=estimator_att_cache,
-        )
-
-        # Convert caches back to batch-first for API return
-        # conformer_att_cache: (depth, b, nh, t, c) -> (b, depth, nh, t, c)
-        if isinstance(conformer_att_cache, torch.Tensor):
-            conformer_att_cache = conformer_att_cache.permute(1, 0, 2, 3, 4).contiguous()
-        # estimator_cnn_cache: (n_time, depth, b, ch, 2) -> (b, n_time, depth, ch, 2)
-        if isinstance(estimator_cnn_cache, torch.Tensor):
-            estimator_cnn_cache = estimator_cnn_cache.permute(2, 0, 1, 3, 4).contiguous()
-        # estimator_att_cache: (n_time, depth, b, nh, t, d) -> (b, n_time, depth, nh, t, d)
-        if isinstance(estimator_att_cache, torch.Tensor):
-            estimator_att_cache = estimator_att_cache.permute(2, 0, 1, 3, 4, 5).contiguous()
-
-        new_cache = {
-            "conformer_cnn_cache": conformer_cnn_cache,
-            "conformer_att_cache": conformer_att_cache,
-            "estimator_cnn_cache": estimator_cnn_cache,
-            "estimator_att_cache": estimator_att_cache,
-        }
-
-        return feat, new_cache
+        return feat.float(), None  # NOTE jrm: why are they returning None here?
 
 
 def init_weights(m, mean=0.0, std=0.01):
@@ -2724,7 +3465,7 @@ class HiFTGenerator(nn.Module):
         lrelu_slope: float = 0.1,
         audio_limit: float = 0.99,
         device: torch.device = torch.device("cuda"),
-        # f0_predictor: torch.nn.Module = None,
+        f0_predictor: torch.nn.Module = None,
     ):
         super(HiFTGenerator, self).__init__()
 
@@ -2800,7 +3541,7 @@ class HiFTGenerator(nn.Module):
         self.stft_window = torch.from_numpy(
             get_window("hann", istft_params["n_fft"], fftbins=True
         ).astype(np.float32)).to(self.device)
-        self.f0_predictor = ConvRNNF0Predictor()  # if f0_predictor is None else f0_predictor
+        self.f0_predictor = f0_predictor
 
     def remove_weight_norm(self):
         print("Removing weight norm...")
@@ -2939,6 +3680,8 @@ class ChatterboxDecoder(nn.Module):
     The decoder of CosyVoice2 is a concat of token-to-mel (CFM) and a mel-to-waveform (HiFiGAN) modules.
     """
 
+    S3GEN_SR = 24000
+
     def __init__(self):
         super().__init__()
         self.tokenizer = S3Tokenizer("speech_tokenizer_v2_25hz")
@@ -2958,8 +3701,8 @@ class ChatterboxDecoder(nn.Module):
             pos_enc_layer_type='rel_pos_espnet',
             selfattention_layer_type='rel_selfattn',
             input_size=512,
-            use_cnn_module=False,
-            macaron_style=False,
+            # use_cnn_module=False,
+            # macaron_style=False,
         )
 
         estimator = ConditionalDecoder(
@@ -2974,10 +3717,9 @@ class ChatterboxDecoder(nn.Module):
             num_heads=8,
             act_fn='gelu',
         )
-        cfm_params = CFM_PARAMS
         decoder = CausalConditionalCFM(
             spk_emb_dim=80,
-            cfm_params=cfm_params,
+            cfm_params=CFM_PARAMS,
             estimator=estimator,
         )
 
@@ -2990,7 +3732,7 @@ class ChatterboxDecoder(nn.Module):
 
         f0_predictor = ConvRNNF0Predictor()
         self.mel2wav = HiFTGenerator(
-            sampling_rate=S3GEN_SR,
+            sampling_rate=self.S3GEN_SR,
             upsample_rates=[8, 5, 3],
             upsample_kernel_sizes=[16, 11, 7],
             source_resblock_kernel_sizes=[7, 7, 11],
@@ -2999,7 +3741,7 @@ class ChatterboxDecoder(nn.Module):
         )
 
         # silence out a few ms and fade audio in to reduce artifacts
-        n_trim = S3GEN_SR // 50  # 20ms = half of a frame
+        n_trim = self.S3GEN_SR // 50  # 20ms = half of a frame
         trim_fade = torch.zeros(2 * n_trim)
         trim_fade[n_trim:] = (torch.cos(torch.linspace(torch.pi, 0, n_trim)) + 1) / 2
         self.register_buffer("trim_fade", trim_fade, persistent=False) # (buffers get automatic device casting)
@@ -3030,8 +3772,8 @@ class ChatterboxDecoder(nn.Module):
             print("WARNING: cosydec received ref longer than 10s")
 
         ref_wav_24 = ref_wav
-        if ref_sr != S3GEN_SR:
-            ref_wav_24 = get_resampler(ref_sr, S3GEN_SR, device)(ref_wav)
+        if ref_sr != self.S3GEN_SR:
+            ref_wav_24 = get_resampler(ref_sr, self.S3GEN_SR, device)(ref_wav)
 
         ref_mels_24 = self.mel_extractor(ref_wav_24).transpose(1, 2).to(device)
         ref_mels_24_len = None
@@ -3061,12 +3803,13 @@ class ChatterboxDecoder(nn.Module):
             embedding=ref_x_vector,
         )
     
-    def forward(
+    @torch.inference_mode()
+    def decode(
         self,
         speech_tokens,
         # locally-computed ref embedding (mutex with ref_dict)
-        ref_wav: Optional[torch.Tensor],
-        ref_sr: Optional[int],
+        ref_wav: Optional[torch.Tensor] = None,
+        ref_sr: Optional[int] = None,
         # pre-computed ref embedding (prod API)
         ref_dict: Optional[dict] = None,
         finalize: bool = False
@@ -3097,51 +3840,12 @@ class ChatterboxDecoder(nn.Module):
         )
 
         # TODO jrm: ignoring the speed control (mel interpolation) and the HiFTGAN caching mechanisms for now.
-        hift_cache_source = torch.zeros(1, 1, 0).to(self.device)
+        cache_source = torch.zeros(1, 1, 0).to(self.device)
 
-        output_wavs, *_ = self.mel2wav.inference(speech_feat=output_mels, cache_source=hift_cache_source)
-
-        if not self.training:
-            # NOTE: ad-hoc method to reduce "spillover" from the reference clip.
-            output_wavs[:, :len(self.trim_fade)] *= self.trim_fade
-
-        return output_wavs
-
-    @torch.inference_mode()
-    def flow_inference(
-        self,
-        speech_tokens,
-        # locally-computed ref embedding (mutex with ref_dict)
-        ref_wav: Optional[torch.Tensor] = None,
-        ref_sr: Optional[int] = None,
-        # pre-computed ref embedding (prod API)
-        ref_dict: Optional[dict] = None,
-        finalize: bool = False,
-    ):
-        return super().forward(speech_tokens, ref_wav=ref_wav, ref_sr=ref_sr, ref_dict=ref_dict, finalize=finalize)
-
-    @torch.inference_mode()
-    def hift_inference(self, speech_feat, cache_source: torch.Tensor = None):
-        if cache_source is None:
-            cache_source = torch.zeros(1, 1, 0).to(self.device)
-        return self.mel2wav.inference(speech_feat=speech_feat, cache_source=cache_source)
-
-    @torch.inference_mode()
-    def inference(
-        self,
-        speech_tokens,
-        # locally-computed ref embedding (mutex with ref_dict)
-        ref_wav: Optional[torch.Tensor] = None,
-        ref_sr: Optional[int] = None,
-        # pre-computed ref embedding (prod API)
-        ref_dict: Optional[dict] = None,
-        cache_source: torch.Tensor = None, # NOTE: this arg is for streaming, it can probably be removed here
-        finalize: bool = True,
-    ):
-        output_mels = self.flow_inference(speech_tokens, ref_wav=ref_wav, ref_sr=ref_sr, ref_dict=ref_dict, finalize=finalize)
         output_wavs, output_sources = self.hift_inference(output_mels, cache_source)
 
         # NOTE: ad-hoc method to reduce "spillover" from the reference clip.
         output_wavs[:, :len(self.trim_fade)] *= self.trim_fade
 
-        return output_wavs, output_sources
+        return output_wavs
+   
