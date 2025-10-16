@@ -433,7 +433,6 @@ class ChatterboxModel(BaseLM):
             hf_hub_download(repo_id=model_name, filename="conds.pt", revision=None), 
             map_location=device,
         )
-        print(f"Loaded default conds: {self.default_conds}")
 
         self._num_attention_heads = self.model.config.num_attention_heads
         self._num_key_value_heads = self.model.config.num_key_value_heads
@@ -487,12 +486,12 @@ class ChatterboxModel(BaseLM):
     @property
     def detokenize_interval(self) -> int:
         """Interval at which to detokenize outputs."""
-        return 28
+        return 25
 
     @property
     def detokenize_overlap(self) -> int:
         """Overlap size for detokenization."""
-        return 21
+        return 3
 
     @property
     def max_tokens(self) -> int:
@@ -511,7 +510,7 @@ class ChatterboxModel(BaseLM):
     @property
     def output_audio_length(self) -> int:
         """Output audio length (in samples) at each postprocess call."""
-        return 2048  # Based on slice [2048:4096] in postprocess
+        return 171840  # Based on slice [2048:4096] in postprocess
 
     @property
     def vocab_size(self) -> int:
@@ -530,7 +529,7 @@ class ChatterboxModel(BaseLM):
         assert "[STOP]" in tokenizer.get_vocab()
         return tokenizer
 
-    def _punc_norm(text: str) -> str:
+    def _punc_norm(self, text: str) -> str:
         if len(text) == 0:
             return "You need to add some text for me to talk."
 
@@ -608,7 +607,7 @@ class ChatterboxModel(BaseLM):
         prompt = self._punc_norm(prompt)
         input_ids = self.text_tokenizer.encode(prompt)
         input_ids = [self.start_token_id] + input_ids.ids + [self.stop_token_id, self.start_speech_token_id]
-        input_ids = torch.tensor(input_ids, device=self.device).unsqueeze(0)
+        input_ids = torch.tensor(input_ids, device=self.device).view(-1, 1)
 
         # 1 for audio, 0 for text
         # For now, only text input
@@ -650,8 +649,8 @@ class ChatterboxModel(BaseLM):
     ) -> torch.Tensor:
         """Forward pass through the model."""
         # remove codebook dimension
-        text_embeds = self.model.text_emb(input_ids[:, 0])
-        audio_embeds = self.model.speech_emb(input_ids[:, 0])
+        text_embeds = self.model.text_emb(torch.clamp(input_ids[:, 0], 0, self.model.config.text_tokens_dict_size - 1))
+        audio_embeds = self.model.speech_emb(torch.clamp(input_ids[:, 0], 0, self.model.config.speech_tokens_dict_size - 1))
         inputs_embeds = torch.where(input_masks, audio_embeds, text_embeds)
 
         logits = self.model(
@@ -725,7 +724,8 @@ class ChatterboxModel(BaseLM):
     def postprocess(self, token_ids: torch.Tensor):
         """Convert token IDs to audio bytes."""
         audio_tensor = self.audio_tokenizer.decode(
-            token_ids,
+            token_ids[:, :, 0],
+            speech_token_lens=self.detokenize_interval,
             ref_dict=self.default_conds.gen,
         )
-        return audio_tensor
+        return audio_tensor[:, None, :]
