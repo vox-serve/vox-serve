@@ -416,3 +416,94 @@ class BaseLMWithDepth(BaseLM):
             input feature for the next iteration. Shape: (batch_size, hidden_size)
         """
         pass
+
+
+class BaseLatentLM(BaseLM):
+    """
+    Minimal extension of BaseLM for continuous latent generators.
+    """
+
+    is_latent: bool = True
+
+    @property
+    def n_codebooks(self) -> int:
+        return 1
+
+    @property
+    def num_attention_heads(self) -> int:
+        return 1
+
+    @property
+    def num_key_value_heads(self) -> int:
+        return 1
+
+    @property
+    def num_hidden_layers(self) -> int:
+        return 1
+
+    @property
+    def hidden_size(self) -> int:
+        return 1
+
+    @property
+    def detokenize_interval(self) -> int:
+        return 1
+
+    @property
+    def detokenize_overlap(self) -> int:
+        return 0
+
+    @property
+    def max_tokens(self) -> int:
+        return 1
+
+    @property
+    def vocab_size(self) -> int:
+        return 1
+
+    def is_stop_id(self, token_ids: List[int]) -> bool:  # pragma: no cover
+        return True
+
+    @property
+    def n_channels(self) -> int:  # pragma: no cover - unused for latent path
+        return 1
+
+    @property
+    def output_audio_length(self) -> int:  # pragma: no cover - unused for latent path
+        # Placeholder value; unused by latent one-shot path
+        return 24_000
+
+    def preprocess(self, *args, **kwargs):  # pragma: no cover
+        raise NotImplementedError("Latent models bypass preprocess in the token worker.")
+
+    def forward(self, *args, **kwargs):  # pragma: no cover
+        raise NotImplementedError("Latent models bypass forward in the token worker.")
+
+    def sampling(self, *args, **kwargs):  # pragma: no cover
+        raise NotImplementedError("Latent models bypass sampling in the token worker.")
+
+    def postprocess(self, *args, **kwargs):  # pragma: no cover
+        raise NotImplementedError("Latent models bypass postprocess in the token worker.")
+
+    def generate_latents(
+        self,
+        text: str,
+        *,
+        prompt_wav: str,
+        language: str = "zh",
+        patch_size: int = 5,
+        cfg: float = 2.0,
+        max_frames: Optional[int] = None,
+        progress: bool = False,
+        **kwargs,
+    ) -> torch.Tensor:
+        raise NotImplementedError
+
+    def decode_latents_to_audio(
+        self,
+        latents: torch.Tensor,
+        *,
+        target_sr: int = 24_000,
+        **kwargs,
+    ) -> torch.Tensor:
+        raise NotImplementedError

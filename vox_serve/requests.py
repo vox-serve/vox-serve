@@ -17,6 +17,8 @@ class Request:
     request_id: str
     prompt: str = None
     audio_path: str = None
+    prompt_text: str = ""
+    language: str = "en"
     sampling_config: SamplingConfig = None
 
     # next_position_id == len(input_tokens) + len(lm_output_tokens) + 1

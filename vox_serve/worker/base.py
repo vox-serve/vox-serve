@@ -181,6 +181,41 @@ class ModelWorker:
         if len(lm_requests) == 0:
             return None
 
+        if getattr(self.model, "is_latent", False):
+            completed_requests = []
+            for req in lm_requests:
+                if req.done_all:
+                    continue
+
+                try:
+                    latents = self.model.generate_latents(
+                        text=req.prompt,
+                        prompt_wav=req.audio_path,
+                        prompt_text=req.prompt_text,
+                        language=getattr(req, "language", "en"),
+                    )
+                    waveform = self.model.decode_latents_to_audio(latents)
+                    audio_np = waveform[0, 0].detach().cpu().numpy()
+                    audio_int16 = (audio_np * 32767.0).clip(-32768, 32767).astype(np.int16)
+                    req.output_audio.put(audio_int16.tobytes())
+
+                    req.done_lm_prefill = True
+                    req.done_lm_generation = True
+                    req.done_all = True
+                    req.finish_reason = "completed"
+                    completed_requests.append(req)
+                except Exception as exc:  # pragma: no cover - best effort fallback
+                    self.logger.error("Latent generation failed for request %s: %s", req.request_id, exc)
+                    req.done_lm_prefill = True
+                    req.done_lm_generation = True
+                    req.done_all = True
+                    req.finish_reason = "error"
+                    completed_requests.append(req)
+
+            if completed_requests:
+                return {"latent_requests": completed_requests}
+            return None
+
         # flashinfer inputs
         qo_indptr = [0]
         paged_kv_indptr = [0]

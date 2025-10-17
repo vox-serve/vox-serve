@@ -176,6 +176,12 @@ cython_debug/
 # nsys profiling files
 *.nsys-rep
 
-# audio files 
+# audio files
 *.wav
 *.mp3
+
+# Claude Code and MCP configuration files
+.claude/
+.mcp.json
+*/.claude/
+*/.mcp.json

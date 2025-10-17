@@ -7,6 +7,7 @@ import torch
 import zmq
 import zmq.asyncio
 
+from ..model import get_model_class
 from ..requests import Request
 from ..utils import get_logger
 from ..worker import CudaGraphWorker, ModelWorker
@@ -42,8 +43,33 @@ class Scheduler:
         self.logger = get_logger(__name__)
         self.logger.info(f"Using {'async' if async_scheduling else 'sync'} scheduling mode")
 
-        # Switch between CudaGraphWorker and ModelWorker based on user input
-        if enable_cuda_graph:
+        needs_latent_worker = False
+        try:
+            model_class = get_model_class(model_name_or_path)
+            needs_latent_worker = getattr(model_class, "IS_LATENT_MODEL", False)
+        except ValueError:
+            needs_latent_worker = "ming" in model_name_or_path.lower()
+
+        if needs_latent_worker:
+            self.logger.info("Using ModelWorker for latent-generation model (FlashInfer bypassed)")
+            self.model_worker = ModelWorker(
+                model_name_or_path,
+                max_batch_size=max_batch_size,
+                top_p=top_p,
+                top_k=top_k,
+                min_p=min_p,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                repetition_penalty=repetition_penalty,
+                repetition_window=repetition_window,
+                cfg_scale=cfg_scale,
+                greedy=greedy,
+                max_num_pages=max_num_pages,
+                page_size=page_size,
+                enable_nvtx=enable_nvtx,
+                enable_torch_compile=enable_torch_compile,
+            )
+        elif enable_cuda_graph:
             self.logger.info("Using CudaGraphWorker with CUDA graph optimization")
             self.model_worker = CudaGraphWorker(
                 model_name_or_path,
@@ -138,6 +164,13 @@ class Scheduler:
 
         # return results to clients
         self._send_responses(detokenize_requests)
+
+        if getattr(self.model_worker.model, "is_latent", False):
+            if lm_inputs and "latent_requests" in lm_inputs:
+                latent_requests = lm_inputs["latent_requests"]
+                self._send_responses(latent_requests)
+                self.active_requests = [req for req in self.active_requests if not req.done_all]
+            return
 
         if lm_inputs is not None and lm_inputs["is_prefill"]:
             task = self.model_worker.run_lm_prefill(lm_requests, lm_inputs)
@@ -387,6 +420,8 @@ class Scheduler:
                 request_id=request_dict["request_id"],
                 prompt=request_dict["prompt"],
                 audio_path=request_dict.get("audio_path") if self.model_worker.supports_audio_input else None,
+                prompt_text=request_dict.get("prompt_text", ""),
+                language=request_dict.get("language", "en"),
                 is_streaming=request_dict.get("is_streaming", False),
                 is_pressing=request_dict.get("is_streaming", False), # at first, streaming requests are pressing
             )
@@ -444,4 +479,3 @@ class Scheduler:
 
         # Filter out completed requests
         self.active_requests = [req for req in self.active_requests if not req.done_all]
-
