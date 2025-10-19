@@ -1,11 +1,12 @@
 import json
 import logging
 import os
+import shutil
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Optional
 
 import requests
 import torch
@@ -198,3 +199,184 @@ def setup_logger(name: str, level: str = None) -> logging.Logger:
 def get_logger(name: str, level: str = None) -> logging.Logger:
     """Get or create a logger with the given name using the global log level by default."""
     return setup_logger(name, level)
+
+
+# ---------------------------------------------------------------------------
+# Ming-UniAudio dynamic code resolver (HF-only, no Git clone required)
+# ---------------------------------------------------------------------------
+MING_CODE_REPO_DEFAULT = os.environ.get("MING_CODE_REPO", "inclusionAI/Ming-UniAudio")
+MING_CODE_REV_DEFAULT = os.environ.get("MING_CODE_REV", "main")
+MING_CODE_CACHE_ROOT = Path(
+    os.environ.get(
+        "MING_CODE_CACHE_DIR",
+        Path.home() / ".cache" / "vox-serve" / "ming_code",
+    )
+)
+MING_CODE_REQUIRED: tuple[str, ...] = (
+    "configuration_bailingmm.py",
+    "modeling_bailingmm.py",
+    "modeling_utils.py",
+    "audio_tokenizer/modeling_audio_vae.py",
+    "fm/flowloss.py",
+    "tokenizer_config.json",
+    "tokenizer.json",
+    "tokenization_bailing.py",
+)
+MING_CODE_ALLOW_PATTERNS: tuple[str, ...] = (
+    "configuration_bailingmm.py",
+    "configuration_bailing_moe.py",
+    "configuration_glm.py",
+    "modeling_bailingmm.py",
+    "modeling_bailing_moe.py",
+    "modeling_utils.py",
+    "audio_processing_bailingmm.py",
+    "bailingmm_utils.py",
+    "chat_format.py",
+    "audio_tokenizer/*",
+    "fm/*",
+    "processing_bailingmm.py",
+    "tokenization_bailing.py",
+    "tokenizer_config.json",
+    "tokenizer.json",
+    "special_tokens_map.json",
+)
+MING_CODE_COPY_ITEMS: tuple[str, ...] = (
+    "configuration_bailingmm.py",
+    "configuration_bailing_moe.py",
+    "modeling_bailingmm.py",
+    "modeling_bailing_moe.py",
+    "modeling_utils.py",
+    "audio_processing_bailingmm.py",
+    "bailingmm_utils.py",
+    "chat_format.py",
+    "tokenization_bailing.py",
+    "processing_bailingmm.py",
+    "tokenizer_config.json",
+    "tokenizer.json",
+    "special_tokens_map.json",
+    "audio_tokenizer",
+    "fm",
+)
+
+
+def _ming_contains_all(root: Path) -> bool:
+    return all((root / relative).exists() for relative in MING_CODE_REQUIRED)
+
+
+def _ming_candidate_dirs(model_path: str | Path | None) -> Iterable[Path]:
+    vendor_dir = Path(__file__).resolve().parents[1] / "Ming-UniAudio"
+    if vendor_dir.exists():
+        yield vendor_dir
+
+    explicit = os.environ.get("MING_CODE_DIR")
+    if explicit:
+        path = Path(explicit)
+        if path.exists():
+            yield path
+
+    if model_path:
+        mp = Path(model_path)
+        if mp.exists():
+            yield mp
+
+
+def ensure_ming_code_available(model_path: str | Path | None) -> Path:
+    """
+    Guarantee the Ming-UniAudio dynamic Python modules are importable.
+
+    The resolver prefers existing modules, then local directories (model snapshot,
+    explicit overrides, vendored copy), and finally downloads a whitelist of files
+    from Hugging Face Hub into a local cache.
+    """
+    try:
+        import configuration_bailingmm  # type: ignore  # noqa: F401
+        import modeling_bailingmm  # type: ignore  # noqa: F401
+        return Path(configuration_bailingmm.__file__).resolve().parent  # type: ignore[attr-defined]
+    except Exception:
+        pass
+
+    for candidate in _ming_candidate_dirs(model_path):
+        if _ming_contains_all(candidate):
+            candidate_str = str(candidate.resolve())
+            if candidate_str not in sys.path:
+                sys.path.insert(0, candidate_str)
+            get_logger(__name__).info("Using Ming code from %s", candidate_str)
+            return candidate.resolve()
+
+    repo_id = os.environ.get("MING_CODE_REPO", MING_CODE_REPO_DEFAULT)
+    revision = os.environ.get("MING_CODE_REV", MING_CODE_REV_DEFAULT)
+    try:
+        snapshot_path = Path(
+            snapshot_download(
+                repo_id=repo_id,
+                revision=revision,
+                allow_patterns=list(MING_CODE_ALLOW_PATTERNS),
+                cache_dir=str(MING_CODE_CACHE_ROOT),
+            )
+        )
+    except Exception as exc:  # pragma: no cover - hub error
+        get_logger(__name__).warning(
+            "Failed to download Ming code from %s@%s: %s",
+            repo_id,
+            revision,
+            exc,
+        )
+        snapshot_path = None
+
+    if snapshot_path and _ming_contains_all(snapshot_path):
+        cache_str = str(snapshot_path.resolve())
+        if cache_str not in sys.path:
+            sys.path.insert(0, cache_str)
+        get_logger(__name__).info("Using Ming code from cached directory %s", cache_str)
+        return snapshot_path.resolve()
+
+    missing = "\n".join(f"  - {name}" for name in MING_CODE_WHITELIST)
+    raise RuntimeError(
+        "Unable to locate Ming-UniAudio dynamic Python modules. "
+        "Ensure the following files are present in either the model directory, "
+        "MING_CODE_DIR, or available via Hugging Face under the repo "
+        f"{repo_id}@{revision} with allow_patterns {MING_CODE_ALLOW_PATTERNS}.\n"
+        f"Missing entries:\n{missing}"
+    )
+
+
+def materialize_ming_code(model_dir: Path, code_source: Path) -> None:
+    """
+    Ensure essential Ming code files exist inside `model_dir` by copying them from `code_source`.
+    """
+    if not model_dir.exists():
+        return
+
+    # If the source of code is exactly the same directory as model_dir,
+    # nothing to materialize.
+    try:
+        if model_dir.resolve() == code_source.resolve():
+            return
+    except Exception:
+        # Best-effort: if resolve() fails (permissions, etc.), continue with file-level checks.
+        pass
+
+    for relative in MING_CODE_COPY_ITEMS:
+        src = code_source / relative
+        dst = model_dir / relative
+        if not src.exists():
+            continue
+        if src.is_dir():
+            # Avoid copying a directory onto itself
+            try:
+                if dst.exists() and dst.resolve() == src.resolve():
+                    continue
+            except Exception:
+                pass
+            shutil.copytree(src, dst, dirs_exist_ok=True)
+        else:
+            # Skip if destination already exists or is the same file
+            if dst.exists():
+                try:
+                    if os.path.samefile(src, dst):
+                        continue
+                except Exception:
+                    # If samefile fails, fall back to a conservative skip when file exists
+                    continue
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)

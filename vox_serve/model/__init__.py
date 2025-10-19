@@ -8,6 +8,7 @@ from .csm import CSMModel
 from .glm_voice import GLMVoiceModel
 from .orpheus import OrpheusModel
 from .step_audio_2 import StepAudio2Model
+from .ming_latent import MingUniAudioNative
 from .zonos import ZonosModel
 
 # Registry mapping model name patterns to model classes
@@ -22,6 +23,8 @@ MODEL_REGISTRY: Dict[str, Type[BaseLM]] = {
     "zai-org/glm-4-voice-9b": GLMVoiceModel,
     "step": StepAudio2Model,
     "stepfun-ai/Step-Audio-2-mini": StepAudio2Model,
+    "ming": MingUniAudioNative,
+    "inclusionai/ming-uniaudio-16b-a3b": MingUniAudioNative,
 }
 
 

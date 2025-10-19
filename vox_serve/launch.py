@@ -83,9 +83,9 @@ class APIServer:
         self,
         model_name: str = "canopylabs/orpheus-3b-0.1-ft",
         scheduler_type: str = "base",
-        request_socket_path: str = "/tmp/vox_serve_request.ipc",
-        result_socket_path: str = "/tmp/vox_serve_result.ipc",
-        output_dir: str = "/tmp/vox_serve_audio",
+        request_socket_path: str = "/tmp/vox_serve_request_twen.ipc",
+        result_socket_path: str = "/tmp/vox_serve_result_twen.ipc",
+        output_dir: str = "/home/twen/src_code/vox-serve/audio_output",
         timeout_seconds: float = 600.0,
         max_batch_size: int = 8,
         top_p: float = None,
@@ -333,7 +333,22 @@ class APIServer:
                 if self.running:
                     self.logger.error(f"Sender loop error: {e}")
 
-    def start_streaming_request(self, text: str = None, audio_path: str = None) -> str:
+    def start_streaming_request(
+        self,
+        text: str = None,
+        audio_path: str = None,
+        language: str = "en",
+        prompt_text: str = "",
+    ) -> str:
+        """
+        Enqueue a request for streaming playback and return the request_id.
+
+        TODO(streaming-v2): this method only wires up the request quickly and relies on
+        chunked WAV framing from the handler. It does not implement fine-grained
+        backpressure, late header fixup, or partial retries. Once we introduce
+        true streaming for latent models, revisit this to coordinate incremental
+        latent → VAE decode and proper WAV framing with durations.
+        """
         """
         Create and enqueue a streaming request immediately and return its request_id.
 
@@ -358,6 +373,8 @@ class APIServer:
             "prompt": text,
             "audio_path": audio_path,
             "is_streaming": True,
+            "language": language,
+            "prompt_text": prompt_text,
         }
         request_json = json.dumps(request_dict)
         message = f"{request_json}|audio_data_placeholder".encode("utf-8")
@@ -414,7 +431,13 @@ class APIServer:
             # Small async sleep to avoid busy-waiting
             await asyncio.sleep(0.001)
 
-    def generate_audio(self, text: str = None, audio_path: str = None) -> str:
+    def generate_audio(
+        self,
+        text: str = None,
+        audio_path: str = None,
+        language: str = "en",
+        prompt_text: str = "",
+    ) -> str:
         """
         Generate audio from text and return path to the audio file.
 
@@ -443,6 +466,8 @@ class APIServer:
                 "prompt": text,
                 "audio_path": audio_path,
                 "is_streaming": False,
+                "language": language,
+                "prompt_text": prompt_text,
             }
 
             request_json = json.dumps(request_dict)
@@ -526,7 +551,9 @@ api_server = None
 async def generate(
     text: str = Form(...),
     audio: Optional[UploadFile] = File(None),
-    streaming: bool = Form(True)
+    streaming: bool = Form(True),
+    language: str = Form("en"),
+    prompt_text: str = Form(""),
 ):
     """
     Generate speech from text and return audio file or streaming response.
@@ -555,7 +582,7 @@ async def generate(
     try:
         if streaming:
             # Streaming response: enqueue request immediately, then stream asynchronously
-            request_id = api_server.start_streaming_request(text, audio_path)
+            request_id = api_server.start_streaming_request(text, audio_path, language, prompt_text)
 
             async def audio_stream():
                 # WAV header for 24kHz mono 16-bit audio
@@ -587,7 +614,7 @@ async def generate(
             )
         else:
             # Non-streaming response
-            audio_file = await run_in_threadpool(api_server.generate_audio, text, audio_path)
+            audio_file = await run_in_threadpool(api_server.generate_audio, text, audio_path, language, prompt_text)
             request_id = Path(audio_file).stem
 
             return FileResponse(path=audio_file, media_type="audio/wav", filename=f"{request_id}.wav")
