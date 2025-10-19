@@ -421,6 +421,12 @@ class BaseLMWithDepth(BaseLM):
 class BaseLatentLM(BaseLM):
     """
     Minimal extension of BaseLM for continuous latent generators.
+
+    Notes for reviewers:
+    - Latent models do not participate in the token/KV/FlashInfer path. Scheduler detects
+      `is_latent=True` and short-circuits the whole token pipeline.
+    - The token-oriented methods below intentionally raise to surface accidental usage.
+      Subclasses should only implement `generate_latents()` and `decode_latents_to_audio()`.
     """
 
     is_latent: bool = True
@@ -485,6 +491,7 @@ class BaseLatentLM(BaseLM):
     def postprocess(self, *args, **kwargs):  # pragma: no cover
         raise NotImplementedError("Latent models bypass postprocess in the token worker.")
 
+    @abstractmethod
     def generate_latents(
         self,
         text: str,
@@ -497,8 +504,10 @@ class BaseLatentLM(BaseLM):
         progress: bool = False,
         **kwargs,
     ) -> torch.Tensor:
-        raise NotImplementedError
+        """Generate latent sequence [1, T, D] from text + reference audio."""
+        pass
 
+    @abstractmethod
     def decode_latents_to_audio(
         self,
         latents: torch.Tensor,
@@ -506,4 +515,5 @@ class BaseLatentLM(BaseLM):
         target_sr: int = 24_000,
         **kwargs,
     ) -> torch.Tensor:
-        raise NotImplementedError
+        """Decode latent sequence to float32 audio tensor [1, 1, S] at `target_sr`."""
+        pass

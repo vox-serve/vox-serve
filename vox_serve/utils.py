@@ -347,14 +347,36 @@ def materialize_ming_code(model_dir: Path, code_source: Path) -> None:
     if not model_dir.exists():
         return
 
+    # If the source of code is exactly the same directory as model_dir,
+    # nothing to materialize.
+    try:
+        if model_dir.resolve() == code_source.resolve():
+            return
+    except Exception:
+        # Best-effort: if resolve() fails (permissions, etc.), continue with file-level checks.
+        pass
+
     for relative in MING_CODE_COPY_ITEMS:
         src = code_source / relative
         dst = model_dir / relative
         if not src.exists():
             continue
         if src.is_dir():
+            # Avoid copying a directory onto itself
+            try:
+                if dst.exists() and dst.resolve() == src.resolve():
+                    continue
+            except Exception:
+                pass
             shutil.copytree(src, dst, dirs_exist_ok=True)
         else:
-            if not dst.exists():
-                dst.parent.mkdir(parents=True, exist_ok=True)
+            # Skip if destination already exists or is the same file
+            if dst.exists():
+                try:
+                    if os.path.samefile(src, dst):
+                        continue
+                except Exception:
+                    # If samefile fails, fall back to a conservative skip when file exists
+                    continue
+            dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dst)

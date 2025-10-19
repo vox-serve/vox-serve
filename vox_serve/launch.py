@@ -341,6 +341,15 @@ class APIServer:
         prompt_text: str = "",
     ) -> str:
         """
+        Enqueue a request for streaming playback and return the request_id.
+
+        TODO(streaming-v2): this method only wires up the request quickly and relies on
+        chunked WAV framing from the handler. It does not implement fine-grained
+        backpressure, late header fixup, or partial retries. Once we introduce
+        true streaming for latent models, revisit this to coordinate incremental
+        latent → VAE decode and proper WAV framing with durations.
+        """
+        """
         Create and enqueue a streaming request immediately and return its request_id.
 
         Scheduling is moved out of the streaming generator to avoid deferred start under load.
