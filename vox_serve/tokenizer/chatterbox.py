@@ -13,50 +13,37 @@
 # limitations under the License.
 
 import logging
-from einops import pack, rearrange, repeat
+from functools import lru_cache
+from typing import List, Optional, OrderedDict, Tuple, Union
+
 import librosa
 import numpy as np
 import torch
-import torch.nn as nn 
 import torch.nn.functional as F
 import torch.utils.checkpoint as cp
-import torchaudio.compliance.kaldi as Kaldi
-import torchaudio as ta
-from functools import lru_cache
-from typing import List, Optional, OrderedDict, Tuple, Any, Dict, Union
-from .s3 import S3TokenizerV2
-import threading
-
-import math
-from dataclasses import dataclass
-from functools import lru_cache
-from typing import Dict, List, Optional, Tuple, Union
-
-import librosa
-import numpy as np
-import onnxruntime
-import torch
-import torch.nn.functional as F
 import torchaudio
-from einops import pack, repeat
-from huggingface_hub import hf_hub_download
-from scipy.signal import get_window
+import torchaudio as ta
+import torchaudio.compliance.kaldi as Kaldi
 from torch import nn
-from torch.nn.utils import remove_weight_norm
-from torch.nn.utils.parametrizations import weight_norm
 from torch.nn.utils.rnn import pad_sequence
-from torchaudio.compliance import kaldi
 
 from ..utils import download_github_file
-from .base import DecoderCache
-from .s3 import S3TokenizerV2, ModelConfig as S3ModelConfig
-from .hifigan import HiFTGenerator, ConvRNNF0Predictor
-from .cosyvoice_flow import CausalConditionalDecoder, UpsampleConformerEncoder, CausalConditionalCFM, CausalMaskedDiffWithXvec
+from .cosyvoice_flow import (
+    CausalConditionalCFM,
+    CausalConditionalDecoder,
+    CausalMaskedDiffWithXvec,
+    UpsampleConformerEncoder,
+)
+from .hifigan import ConvRNNF0Predictor, HiFTGenerator
+from .s3 import ModelConfig as S3ModelConfig
+from .s3 import S3TokenizerV2
+
 
 class AttrDict(dict):
     def __init__(self, *args, **kwargs):
         super(AttrDict, self).__init__(*args, **kwargs)
         self.__dict__ = self
+
 
 def drop_invalid_tokens(x):
     assert len(x.shape) <= 2 and x.shape[0] == 1, "only batch size of one allowed for now"
@@ -67,6 +54,7 @@ def drop_invalid_tokens(x):
 @lru_cache(100)
 def get_resampler(src_sr, dst_sr, device):
     return ta.transforms.Resample(src_sr, dst_sr).to(device)
+
 
 # Sampling rate of the inputs to S3TokenizerV2
 S3_SR = 16_000
@@ -85,19 +73,11 @@ class S3Tokenizer(S3TokenizerV2):
 
     ignore_state_dict_missing = ("_mel_filters", "window")
 
-    def __init__(
-        self,
-        name: str="speech_tokenizer_v2_25hz",
-        config: S3ModelConfig = S3ModelConfig()
-    ):
+    def __init__(self, name: str = "speech_tokenizer_v2_25hz", config: S3ModelConfig = S3ModelConfig()):
         super().__init__(name, init_from_onnx=False)
 
         self.n_fft = 400
-        _mel_filters = librosa.filters.mel(
-            sr=S3_SR,
-            n_fft=self.n_fft,
-            n_mels=config.n_mels
-        )
+        _mel_filters = librosa.filters.mel(sr=S3_SR, n_fft=self.n_fft, n_mels=config.n_mels)
         self.register_buffer(
             "_mel_filters",
             torch.FloatTensor(_mel_filters),
@@ -123,12 +103,7 @@ class S3Tokenizer(S3TokenizerV2):
             n_tokens = np.ceil(n_tokens)
             intended_wav_len = n_tokens * (sr / S3_TOKEN_RATE)
             intended_wav_len = int(intended_wav_len)
-            wav = torch.nn.functional.pad(
-                wav,
-                (0, intended_wav_len - wav.shape[-1]),
-                mode="constant",
-                value=0
-            )
+            wav = torch.nn.functional.pad(wav, (0, intended_wav_len - wav.shape[-1]), mode="constant", value=0)
             processed_wavs.append(wav)
         return processed_wavs
 
@@ -149,7 +124,7 @@ class S3Tokenizer(S3TokenizerV2):
         self,
         wavs: torch.Tensor,
         # accelerator: 'Accelerator'=None,
-        max_len: int=None,
+        max_len: int = None,
     ) -> Tuple[torch.Tensor, torch.LongTensor]:
         """
         NOTE: mel-spec has a hop size of 160 points (100 frame/sec).
@@ -167,7 +142,7 @@ class S3Tokenizer(S3TokenizerV2):
             wav = wav.to(self.device)
             mel = self.log_mel_spectrogram(wav)  # [B=1, F, T]
             if max_len is not None:
-                mel = mel[..., :max_len * 4]  # num_mel_frames = 4 * num_tokens
+                mel = mel[..., : max_len * 4]  # num_mel_frames = 4 * num_tokens
             mels.append(mel.squeeze(0))
 
         mels, mel_lens = padding(mels)
@@ -210,12 +185,8 @@ class S3Tokenizer(S3TokenizerV2):
         audio = audio.to(self.device)
         if padding > 0:
             audio = F.pad(audio, (0, padding))
-        stft = torch.stft(
-            audio, self.n_fft, S3_HOP,
-            window=self.window.to(self.device),
-            return_complex=True
-        )
-        magnitudes = stft[..., :-1].abs()**2
+        stft = torch.stft(audio, self.n_fft, S3_HOP, window=self.window.to(self.device), return_complex=True)
+        magnitudes = stft[..., :-1].abs() ** 2
 
         mel_spec = self._mel_filters.to(self.device) @ magnitudes
 
@@ -276,9 +247,7 @@ class BasicResBlock(torch.nn.Module):
 
     def __init__(self, in_planes, planes, stride=1):
         super(BasicResBlock, self).__init__()
-        self.conv1 = torch.nn.Conv2d(
-            in_planes, planes, kernel_size=3, stride=(stride, 1), padding=1, bias=False
-        )
+        self.conv1 = torch.nn.Conv2d(in_planes, planes, kernel_size=3, stride=(stride, 1), padding=1, bias=False)
         self.bn1 = torch.nn.BatchNorm2d(planes)
         self.conv2 = torch.nn.Conv2d(planes, planes, kernel_size=3, stride=1, padding=1, bias=False)
         self.bn2 = torch.nn.BatchNorm2d(planes)
@@ -314,9 +283,7 @@ class FCM(torch.nn.Module):
         self.layer1 = self._make_layer(block, m_channels, num_blocks[0], stride=2)
         self.layer2 = self._make_layer(block, m_channels, num_blocks[0], stride=2)
 
-        self.conv2 = torch.nn.Conv2d(
-            m_channels, m_channels, kernel_size=3, stride=(2, 1), padding=1, bias=False
-        )
+        self.conv2 = torch.nn.Conv2d(m_channels, m_channels, kernel_size=3, stride=(2, 1), padding=1, bias=False)
         self.bn2 = torch.nn.BatchNorm2d(m_channels)
         self.out_channels = m_channels * (feat_dim // 8)
 
@@ -384,9 +351,7 @@ class TDNNLayer(torch.nn.Module):
     ):
         super(TDNNLayer, self).__init__()
         if padding < 0:
-            assert (
-                kernel_size % 2 == 1
-            ), "Expect equal paddings, but got even kernel size ({})".format(kernel_size)
+            assert kernel_size % 2 == 1, "Expect equal paddings, but got even kernel size ({})".format(kernel_size)
             padding = (kernel_size - 1) // 2 * dilation
         self.linear = torch.nn.Conv1d(
             in_channels,
@@ -406,9 +371,7 @@ class TDNNLayer(torch.nn.Module):
 
 
 class CAMLayer(torch.nn.Module):
-    def __init__(
-        self, bn_channels, out_channels, kernel_size, stride, padding, dilation, bias, reduction=2
-    ):
+    def __init__(self, bn_channels, out_channels, kernel_size, stride, padding, dilation, bias, reduction=2):
         super(CAMLayer, self).__init__()
         self.linear_local = torch.nn.Conv1d(
             bn_channels,
@@ -458,9 +421,7 @@ class CAMDenseTDNNLayer(torch.nn.Module):
         memory_efficient=False,
     ):
         super(CAMDenseTDNNLayer, self).__init__()
-        assert kernel_size % 2 == 1, "Expect equal paddings, but got even kernel size ({})".format(
-            kernel_size
-        )
+        assert kernel_size % 2 == 1, "Expect equal paddings, but got even kernel size ({})".format(kernel_size)
         padding = (kernel_size - 1) // 2 * dilation
         self.memory_efficient = memory_efficient
         self.nonlinear1 = get_nonlinear(config_str, in_channels)
@@ -549,6 +510,7 @@ class DenseLayer(torch.nn.Module):
         x = self.nonlinear(x)
         return x
 
+
 # @tables.register("model_classes", "CAMPPlus")
 class CAMPPlus(torch.nn.Module):
     def __init__(
@@ -588,9 +550,7 @@ class CAMPPlus(torch.nn.Module):
             )
         )
         channels = init_channels
-        for i, (num_layers, kernel_size, dilation) in enumerate(
-            zip((12, 24, 16), (3, 3, 3), (1, 2, 2))
-        ):
+        for i, (num_layers, kernel_size, dilation) in enumerate(zip((12, 24, 16), (3, 3, 3), (1, 2, 2), strict=False)):
             block = CAMDenseTDNNBlock(
                 num_layers=num_layers,
                 in_channels=channels,
@@ -613,13 +573,9 @@ class CAMPPlus(torch.nn.Module):
 
         if self.output_level == "segment":
             self.xvector.add_module("stats", StatsPool())
-            self.xvector.add_module(
-                "dense", DenseLayer(channels * 2, embedding_size, config_str="batchnorm_")
-            )
+            self.xvector.add_module("dense", DenseLayer(channels * 2, embedding_size, config_str="batchnorm_"))
         else:
-            assert (
-                self.output_level == "frame"
-            ), "`output_level` should be set to 'segment' or 'frame'. "
+            assert self.output_level == "frame", "`output_level` should be set to 'segment' or 'frame'. "
 
         for m in self.modules():
             if isinstance(m, (torch.nn.Conv1d, torch.nn.Linear)):
@@ -689,7 +645,9 @@ def _mel_filters(device, n_mels: int) -> torch.Tensor:
 
     # filters_path = os.path.join(os.path.dirname(__file__), "assets", "mel_filters.npz")
     filters_path = download_github_file(
-        "xingchensong", "S3Tokenizer", "s3tokenizer/assets/mel_filters.npz",
+        "xingchensong",
+        "S3Tokenizer",
+        "s3tokenizer/assets/mel_filters.npz",
     )
 
     with np.load(filters_path, allow_pickle=False) as f:
@@ -765,8 +723,10 @@ def padding(data: List[torch.Tensor]):
 
     return padded_feats.transpose(1, 2), feats_lengths
 
+
 mel_basis = {}
 hann_window = {}
+
 
 def mel_spectrogram(
     y, n_fft=1920, num_mels=80, sampling_rate=24000, hop_size=480, win_size=1920, fmin=0, fmax=8000, center=False
@@ -814,7 +774,7 @@ class ChatterboxDecoder(nn.Module):
     def __init__(self):
         super().__init__()
         self.tokenizer = S3Tokenizer("speech_tokenizer_v2_25hz")
-        self.mel_extractor = mel_spectrogram # TODO: make it a torch module?
+        self.mel_extractor = mel_spectrogram  # TODO: make it a torch module?
         self.speaker_encoder = CAMPPlus()  # use default args
 
         encoder = UpsampleConformerEncoder(
@@ -844,7 +804,7 @@ class ChatterboxDecoder(nn.Module):
             n_blocks=4,
             num_mid_blocks=12,
             num_heads=8,
-            act_fn='gelu',
+            act_fn="gelu",
         )
         decoder = CausalConditionalCFM(
             in_channels=240,
@@ -853,10 +813,7 @@ class ChatterboxDecoder(nn.Module):
             estimator=estimator,
         )
 
-        self.flow = CausalMaskedDiffWithXvec(
-            encoder=encoder,
-            decoder=decoder
-        )
+        self.flow = CausalMaskedDiffWithXvec(encoder=encoder, decoder=decoder)
 
         self.resamplers = {}
 
@@ -874,7 +831,7 @@ class ChatterboxDecoder(nn.Module):
         n_trim = self.S3GEN_SR // 50  # 20ms = half of a frame
         trim_fade = torch.zeros(2 * n_trim)
         trim_fade[n_trim:] = (torch.cos(torch.linspace(torch.pi, 0, n_trim)) + 1) / 2
-        self.register_buffer("trim_fade", trim_fade, persistent=False) # (buffers get automatic device casting)
+        self.register_buffer("trim_fade", trim_fade, persistent=False)  # (buffers get automatic device casting)
 
     @property
     def device(self):
@@ -919,10 +876,8 @@ class ChatterboxDecoder(nn.Module):
 
         # Make sure mel_len = 2 * stoken_len (happens when the input is not padded to multiple of 40ms)
         if ref_mels_24.shape[1] != 2 * ref_speech_tokens.shape[1]:
-            logging.warning(
-                "Reference mel length is not equal to 2 * reference token length.\n"
-            )
-            ref_speech_tokens = ref_speech_tokens[:, :ref_mels_24.shape[1] // 2]
+            logging.warning("Reference mel length is not equal to 2 * reference token length.\n")
+            ref_speech_tokens = ref_speech_tokens[:, : ref_mels_24.shape[1] // 2]
             ref_speech_token_lens[0] = ref_speech_tokens.shape[1]
 
         return dict(
@@ -932,7 +887,7 @@ class ChatterboxDecoder(nn.Module):
             prompt_feat_len=ref_mels_24_len,
             embedding=ref_x_vector,
         )
-    
+
     @torch.inference_mode()
     def decode(
         self,
@@ -943,9 +898,11 @@ class ChatterboxDecoder(nn.Module):
         ref_sr: Optional[int] = None,
         # pre-computed ref embedding (prod API)
         ref_dict: Optional[dict] = None,
-        finalize: bool = False
+        finalize: bool = False,
     ):
-        assert (ref_wav is None) ^ (ref_dict is None), f"Must provide exactly one of ref_wav or ref_dict (got {ref_wav} and {ref_dict})"
+        assert (ref_wav is None) ^ (ref_dict is None), (
+            f"Must provide exactly one of ref_wav or ref_dict (got {ref_wav} and {ref_dict})"
+        )
 
         if ref_dict is None:
             ref_dict = self.embed_ref(ref_wav, ref_sr)
@@ -962,7 +919,9 @@ class ChatterboxDecoder(nn.Module):
 
         # assert speech_tokens.shape[0] == 1, "only batch size of one allowed for now"
         speech_tokens = torch.concat([ref_dict["prompt_token"].repeat(speech_tokens.size(0), 1), speech_tokens], dim=1)
-        speech_token_lens = torch.ones(speech_tokens.size(0), device=self.device, dtype=torch.long) * (ref_dict["prompt_token_len"] + speech_token_lens)
+        speech_token_lens = torch.ones(speech_tokens.size(0), device=self.device, dtype=torch.long) * (
+            ref_dict["prompt_token_len"] + speech_token_lens
+        )
 
         output_mels, _ = self.flow(
             token=speech_tokens,
@@ -973,7 +932,7 @@ class ChatterboxDecoder(nn.Module):
             streaming=True,
             finalize=finalize,
         )
-        output_mels = output_mels[:, :, ref_dict["prompt_feat_len"]:]
+        output_mels = output_mels[:, :, ref_dict["prompt_feat_len"] :]
 
         # TODO jrm: ignoring the speed control (mel interpolation) and the HiFTGAN caching mechanisms for now.
         cache_source = torch.zeros(1, 1, 0).to(self.device)
@@ -984,4 +943,3 @@ class ChatterboxDecoder(nn.Module):
         # output_wavs[:, :len(self.trim_fade)] *= self.trim_fade
 
         return output_wavs
-   

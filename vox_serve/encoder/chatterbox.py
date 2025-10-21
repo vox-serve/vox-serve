@@ -1,11 +1,11 @@
 import math
-from typing import Any, List, Optional
-
 from dataclasses import dataclass
-from einops import rearrange
+from typing import Optional
+
 import torch
-from torch import nn
 import torch.nn.functional as F
+from einops import rearrange
+from torch import nn
 
 
 @dataclass

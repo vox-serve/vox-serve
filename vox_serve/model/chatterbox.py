@@ -1,20 +1,19 @@
-import math
-from typing import Any, List, Optional, Union
-
 from dataclasses import dataclass
+from typing import Any, List, Union
+
 import librosa
-from safetensors.torch import safe_open
 import torch
-from torch import nn
+from huggingface_hub import hf_hub_download
+from safetensors.torch import safe_open
 from tokenizers import Tokenizer
+from torch import nn
 from transformers import LlamaConfig
 from transformers.activations import ACT2FN
-from huggingface_hub import hf_hub_download
 
+from ..encoder.chatterbox import ChatterboxCondEnc, T3Cond
 from ..flashinfer_utils import FlashInferWrapper, apply_rope_pos_ids, rms_norm
 from ..requests import Request
 from ..sampling import Sampler, SamplingConfig
-from ..encoder.chatterbox import ChatterboxCondEnc, T3Cond
 from ..tokenizer.chatterbox import ChatterboxDecoder
 from .base import BaseLM, PreprocessOutput
 
@@ -68,7 +67,7 @@ class ChatterboxConfig:
     @property
     def n_channels(self):
         return 1024
-    
+
     @property
     def is_multilingual(self):
         return self.text_tokens_dict_size == 2454
@@ -77,8 +76,8 @@ class ChatterboxConfig:
     def english_only(cls):
         """Create configuration for English-only TTS model."""
         return cls(text_tokens_dict_size=704)
-    
-    @classmethod 
+
+    @classmethod
     def multilingual(cls):
         """Create configuration for multilingual TTS model."""
         return cls(text_tokens_dict_size=2454)
@@ -327,21 +326,21 @@ class ChatterboxLearnedPositionEmbeddings(nn.Module):
 class ChatterboxForCausalLM(nn.Module):
     def __init__(self, config: ChatterboxConfig):
         super().__init__()
-        self.config = config 
+        self.config = config
 
         self.tfmr = ChatterboxBackboneModel(config)
         self.cond_enc = ChatterboxCondEnc(config)
 
         self.text_emb = nn.Embedding(config.text_tokens_dict_size, config.hidden_size)
         self.speech_emb = nn.Embedding(config.speech_tokens_dict_size, config.hidden_size)
-        
+
         self.text_pos_emb = ChatterboxLearnedPositionEmbeddings(config.max_text_tokens + 2, config.hidden_size)
         self.speech_pos_emb = ChatterboxLearnedPositionEmbeddings(config.max_speech_tokens + 4, config.hidden_size)
-        
+
         # self.vocab_size = config.vocab_size
         self.text_head = nn.Linear(config.hidden_size, config.text_tokens_dict_size, bias=False)
         self.speech_head = nn.Linear(config.hidden_size, config.speech_tokens_dict_size, bias=False)
-    
+
     # def prepare_conditioning(self, t3_cond: T3Cond):
     #     """
     #     Token cond data needs to be embedded, so that needs to be here instead of in `T3CondEnc`.
@@ -434,7 +433,7 @@ class ChatterboxModel(BaseLM):
         self.text_tokenizer = self._load_tokenizer(model_name)
 
         self.default_conds = Conditionals.load(
-            hf_hub_download(repo_id=model_name, filename="conds.pt", revision=None), 
+            hf_hub_download(repo_id=model_name, filename="conds.pt", revision=None),
             map_location=device,
         )
 
@@ -515,7 +514,7 @@ class ChatterboxModel(BaseLM):
     def output_audio_length(self) -> int:
         """Output audio length (in samples) at each postprocess call."""
         return 21120
-    
+
     @property
     def supports_audio_input(self) -> bool:
         """Indicates if the model accepts audio input."""
@@ -628,7 +627,7 @@ class ChatterboxModel(BaseLM):
             raise NotImplementedError("Audio conditioning not implemented yet.")
         else:
             conds = self.default_conds.t3.to(dtype=self.dtype)
-        
+
         # TODO: exaggeration handling
         # TODO: cfg handling
 
@@ -639,12 +638,12 @@ class ChatterboxModel(BaseLM):
                 )
 
         cond_emb = self.model.cond_enc(conds)[0]
-        
+
         prompt = self._punc_norm(prompt)
         prompt = prompt.replace(" ", "[SPACE]")
         input_ids = self.text_tokenizer.encode(prompt)
         input_ids = [0] * cond_emb.shape[0] + [self.start_token_id] + input_ids.ids + [
-            self.stop_token_id, 
+            self.stop_token_id,
             self.start_speech_token_id,
             self.start_speech_token_id, # following official implementation
         ]
@@ -693,7 +692,7 @@ class ChatterboxModel(BaseLM):
             )
 
         return PreprocessOutput(
-            input_tokens=input_ids, 
+            input_tokens=input_ids,
             repetition_cache=repetition_cache,
             input_masks=input_masks,
             input_features=input_features,
@@ -712,7 +711,7 @@ class ChatterboxModel(BaseLM):
         """Forward pass through the model."""
         # text_embeds = self.model.text_emb(torch.clamp(input_ids[:, 0], 0, self.model.config.text_tokens_dict_size - 1))
         # text_embeds = text_embeds + self.model.text_pos_emb(position_ids)
-        
+
         audio_embeds = self.model.speech_emb(torch.clamp(input_ids[:, 0], 0, self.model.config.speech_tokens_dict_size - 1))
         audio_embeds = audio_embeds + self.model.speech_pos_emb(torch.clamp(position_ids, 0, self.model.config.max_speech_tokens))
         # NOTE (keisuke): the position id here is not actually correct. For TTS task, we should do use position_ids - prompt_len,
