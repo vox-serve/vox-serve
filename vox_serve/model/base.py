@@ -92,6 +92,11 @@ class BaseLM(ABC):
         return False
 
     @property
+    def watermarker_type(self) -> str:
+        """Indicates the watermarker type to use."""
+        return None
+
+    @property
     def needs_input_features(self) -> bool:
         """Indicates if the model requires input_features."""
         return False

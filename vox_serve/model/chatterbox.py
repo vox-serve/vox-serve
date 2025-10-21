@@ -529,7 +529,12 @@ class ChatterboxModel(BaseLM):
     @property
     def needs_watermarking(self) -> bool:
         """Indicates if the model requires watermarking."""
-        return False # TODO!!
+        return True
+
+    @property
+    def watermarker_type(self) -> str:
+        """Indicates the watermarker type to use."""
+        return "parth"
 
     @property
     def needs_input_features(self) -> bool:

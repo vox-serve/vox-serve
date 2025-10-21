@@ -9,7 +9,6 @@ from ..flashinfer_utils import FlashInferDecodeWrapper, FlashInferPrefillWrapper
 from ..model import load_model
 from ..requests import LMInputs, Request
 from ..utils import get_logger
-from ..watermarker import silentcipher
 
 
 class ModelWorker:
@@ -76,12 +75,20 @@ class ModelWorker:
 
         self.needs_watermarking = self.model.needs_watermarking
         if self.needs_watermarking:
-            self.watermark_model = silentcipher.get_model(
-                model_type="44.1k",
-                device=self.device,
-            )
-            # TODO: This should be specified at server start time
-            self.watermark_key = [11, 91, 60, 147, 209]
+            self.watermarker_type = self.model.watermarker_type
+            if self.watermarker_type == "silentcipher":
+                from ..watermarker import silentcipher
+                self.watermark_model = silentcipher.get_model(
+                    model_type="44.1k",
+                    device=self.device,
+                )
+                # TODO: This should be specified at server start time
+                self.watermark_key = [11, 91, 60, 147, 209]
+            elif self.watermarker_type == "parth":
+                from ..watermarker.perth import PerthImplicitWatermarker
+                self.watermark_model = PerthImplicitWatermarker(device=self.device)
+            else:
+                raise ValueError(f"Unknown watermarker type: {self.watermarker_type}")
 
         self._prepare_attention_wrappers()
 
@@ -581,16 +588,52 @@ class ModelWorker:
         """
         assert self.needs_watermarking
 
-        audio_array_44khz = torchaudio.functional.resample(audio_tensor, orig_freq=orig_sr, new_freq=44100)
+        if self.watermarker_type == "silentcipher":
+            audio_array_44khz = torchaudio.functional.resample(
+                audio_tensor,
+                orig_freq=orig_sr,
+                new_freq=self.watermark_model.sr,
+            )
 
-        # Run watermarking
-        encoded, _ = self.watermark_model.encode_wav(
-            audio_array_44khz, 44100, self.watermark_key, calc_sdr=False, message_sdr=36
-        )
+            # Run watermarking
+            encoded = self.watermark_model.encode_wav(
+                audio_array_44khz,
+                self.watermark_model.sr,
+                self.watermark_key,
+            )
 
-        encoded = torchaudio.functional.resample(encoded, orig_freq=44100, new_freq=orig_sr)
+            encoded = torchaudio.functional.resample(
+                encoded,
+                orig_freq=self.watermark_model.sr,
+                new_freq=orig_sr,
+            )
 
-        return encoded
+            return encoded
+        elif self.watermarker_type == "parth":
+            # Resample to Perth's expected sample rate if needed
+            audio_array_32khz = torchaudio.functional.resample(
+                audio_tensor,
+                orig_freq=orig_sr,
+                new_freq=self.watermark_model.sr,
+            )
+
+            # Run watermarking
+            encoded = self.watermark_model.encode_wav(
+                audio_array_32khz,
+                self.watermark_model.sr,
+            )
+
+            # Convert back to torch tensor and resample to original sample rate
+            encoded = torch.from_numpy(encoded).to(audio_tensor.device)
+            encoded = torchaudio.functional.resample(
+                encoded,
+                orig_freq=self.watermark_model.sr,
+                new_freq=orig_sr,
+            )
+
+            return encoded
+        else:
+            raise ValueError(f"Unknown watermarker type: {self.watermarker_type}")
 
     def nvtx_range_push(self, name: str):
         """

@@ -418,6 +418,11 @@ class CSMModel(BaseLMWithDepth):
         return True
 
     @property
+    def watermarker_type(self) -> str:
+        """Indicates the watermarker type to use."""
+        return "silentcipher"
+
+    @property
     def needs_input_masks(self) -> bool:
         """Indicates if the model requires input_masks."""
         return True
