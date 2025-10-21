@@ -726,11 +726,11 @@ class ChatterboxModel(BaseLM):
             torch.clamp(input_ids[:, 0], 0, self.model.config.speech_tokens_dict_size - 1)
         )
         audio_embeds = audio_embeds + self.model.speech_pos_emb(
-            torch.clamp(position_ids, 0, self.model.config.max_speech_tokens)
+            torch.clamp(position_ids - 45, 0, self.model.config.max_speech_tokens)
         )
-        # NOTE (keisuke): the position id here is not actually correct. For TTS task,
-        # we should do use position_ids - prompt_len,
+        # NOTE (keisuke): subtracting the length of default prompt (45) from position_ids
         # since the position id count is independent for text and speech tokens in Chatterbox model.
+        # To support custom prompts, we need a way to adjust position ids dynamically.
 
         inputs_embeds = torch.where(input_masks, audio_embeds, input_features)
 
