@@ -961,10 +961,8 @@ class ChatterboxDecoder(nn.Module):
             speech_tokens = speech_tokens.unsqueeze(0)
 
         # assert speech_tokens.shape[0] == 1, "only batch size of one allowed for now"
-        # speech_token_lens = torch.LongTensor([speech_tokens.size(1)]).to(self.device)
-
         speech_tokens = torch.concat([ref_dict["prompt_token"].repeat(speech_tokens.size(0), 1), speech_tokens], dim=1)
-        speech_token_lens = (ref_dict["prompt_token_len"] + speech_tokens.size(1)).repeat(speech_tokens.size(0)).to(self.device)
+        speech_token_lens = torch.ones(speech_tokens.size(0), device=self.device, dtype=torch.long) * (ref_dict["prompt_token_len"] + speech_token_lens)
 
         output_mels, _ = self.flow(
             token=speech_tokens,
@@ -975,6 +973,7 @@ class ChatterboxDecoder(nn.Module):
             streaming=True,
             finalize=finalize,
         )
+        output_mels = output_mels[:, :, ref_dict["prompt_feat_len"]:]
 
         # TODO jrm: ignoring the speed control (mel interpolation) and the HiFTGAN caching mechanisms for now.
         cache_source = torch.zeros(1, 1, 0).to(self.device)

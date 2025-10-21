@@ -2144,8 +2144,7 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
 
         # get conditions
         conds = torch.zeros_like(h, device=token.device)
-        # for i, j in enumerate(prompt_feat_len):
-        #     conds[i, :j] = prompt_feat[i, :j]
+        conds[:, :prompt_feat_len] = prompt_feat
         conds = conds.transpose(1, 2)
 
         h_lengths = h_lengths.sum(dim=-1).squeeze(dim=1)

@@ -116,6 +116,11 @@ class Conditionals:
         if isinstance(map_location, str):
             map_location = torch.device(map_location)
         kwargs = torch.load(fpath, map_location=map_location, weights_only=True)
+        # TODO: workaround to make tensor shapes at detokenizer constant
+        kwargs['gen']['prompt_token'] = kwargs['gen']['prompt_token'][:, :128]
+        kwargs['gen']['prompt_token_len'] = 128
+        kwargs['gen']['prompt_feat'] = kwargs['gen']['prompt_feat'][:, :256, :]
+        kwargs['gen']['prompt_feat_len'] = 256
         return cls(T3Cond(**kwargs['t3']), kwargs['gen'])
 
 
@@ -303,8 +308,7 @@ class ChatterboxLearnedPositionEmbeddings(nn.Module):
         """
         Returns positional embeddings for index 0 up to the length of x
         """
-        sl = x.shape[1]
-        return self.emb(torch.arange(0, sl, device=x.device))
+        return self.emb(x)
 
     def get_fixed_embedding(self, idx: Union[int, torch.Tensor]):
         """
@@ -500,7 +504,7 @@ class ChatterboxModel(BaseLM):
         """
         if self.default_sampling_config.max_tokens is not None:
             return self.default_sampling_config.max_tokens
-        return 1200
+        return 200
 
     @property
     def n_channels(self) -> int:
@@ -510,7 +514,27 @@ class ChatterboxModel(BaseLM):
     @property
     def output_audio_length(self) -> int:
         """Output audio length (in samples) at each postprocess call."""
-        return 171840  # Based on slice [2048:4096] in postprocess
+        return 21120
+    
+    @property
+    def supports_audio_input(self) -> bool:
+        """Indicates if the model accepts audio input."""
+        return True
+
+    @property
+    def needs_watermarking(self) -> bool:
+        """Indicates if the model requires watermarking."""
+        return False # TODO!!
+
+    @property
+    def needs_input_features(self) -> bool:
+        """Indicates if the model requires input_features."""
+        return True
+
+    @property
+    def needs_input_masks(self) -> bool:
+        """Indicates if the model requires input_masks."""
+        return True
 
     @property
     def vocab_size(self) -> int:
@@ -596,27 +620,63 @@ class ChatterboxModel(BaseLM):
         self,
         prompt: str = None,
         audio_path: str = None,
+        exaggeration: int = None,
     ) -> PreprocessOutput:
         """Prepare the prompt for the model, formatting it according to Chatterbox specifications."""
         if audio_path:
-            conds = self._prepare_conditionals(audio_path)
+            # conds = self._prepare_conditionals(audio_path)
+            raise NotImplementedError("Audio conditioning not implemented yet.")
+        else:
+            conds = self.default_conds.t3.to(dtype=self.dtype)
         
         # TODO: exaggeration handling
         # TODO: cfg handling
+
+        if conds.cond_prompt_speech_tokens is not None and conds.cond_prompt_speech_emb is None:
+            conds.cond_prompt_speech_emb = self.model.speech_emb(conds.cond_prompt_speech_tokens) + \
+                self.model.speech_pos_emb(
+                    torch.arange(0, conds.cond_prompt_speech_tokens.shape[1], device=self.device)
+                )
+
+        cond_emb = self.model.cond_enc(conds)[0]
         
         prompt = self._punc_norm(prompt)
+        prompt = prompt.replace(" ", "[SPACE]")
         input_ids = self.text_tokenizer.encode(prompt)
-        input_ids = [self.start_token_id] + input_ids.ids + [self.stop_token_id, self.start_speech_token_id]
+        input_ids = [0] * cond_emb.shape[0] + [self.start_token_id] + input_ids.ids + [
+            self.stop_token_id, 
+            self.start_speech_token_id,
+            self.start_speech_token_id, # following official implementation
+        ]
         input_ids = torch.tensor(input_ids, device=self.device).view(-1, 1)
 
-        # 1 for audio, 0 for text
-        # For now, only text input
+        # 1 for audio, 0 for else
         input_masks = torch.zeros(
             input_ids.shape[0],
             self.n_codebooks,
             device=self.device,
             dtype=torch.bool,
         )
+
+        input_features = torch.zeros(
+            input_ids.shape[0],
+            self.model.config.hidden_size,
+            device=self.device,
+            dtype=self.dtype,
+        )
+        input_features[:cond_emb.shape[0]] = cond_emb
+
+        text_embeds = self.model.text_emb(
+            torch.clamp(
+                input_ids[cond_emb.shape[0]:-2, 0], 0, self.model.config.text_tokens_dict_size - 1,
+            )
+        )
+        text_embeds = text_embeds + self.model.text_pos_emb(torch.arange(0, text_embeds.shape[0], device=self.device))
+        input_features[cond_emb.shape[0] : cond_emb.shape[0] + text_embeds.shape[0]] = text_embeds
+
+        audio_embeds = self.model.speech_emb(torch.clamp(input_ids[-2:, 0], 0, self.model.config.speech_tokens_dict_size - 1))
+        audio_embeds = audio_embeds + self.model.speech_pos_emb(torch.zeros(2, device=self.device, dtype=torch.long))
+        input_features[-2:] = audio_embeds
 
         # Create repetition cache if repetition penalty is enabled
         repetition_cache = None
@@ -636,6 +696,7 @@ class ChatterboxModel(BaseLM):
             input_tokens=input_ids, 
             repetition_cache=repetition_cache,
             input_masks=input_masks,
+            input_features=input_features,
         )
 
     def forward(
@@ -645,13 +706,19 @@ class ChatterboxModel(BaseLM):
         attn_wrapper: FlashInferWrapper,
         kv_cache: torch.Tensor,
         input_masks: torch.Tensor,
+        input_features: torch.Tensor,
         **kwargs: Any,
     ) -> torch.Tensor:
         """Forward pass through the model."""
-        # remove codebook dimension
-        text_embeds = self.model.text_emb(torch.clamp(input_ids[:, 0], 0, self.model.config.text_tokens_dict_size - 1))
+        # text_embeds = self.model.text_emb(torch.clamp(input_ids[:, 0], 0, self.model.config.text_tokens_dict_size - 1))
+        # text_embeds = text_embeds + self.model.text_pos_emb(position_ids)
+        
         audio_embeds = self.model.speech_emb(torch.clamp(input_ids[:, 0], 0, self.model.config.speech_tokens_dict_size - 1))
-        inputs_embeds = torch.where(input_masks, audio_embeds, text_embeds)
+        audio_embeds = audio_embeds + self.model.speech_pos_emb(torch.clamp(position_ids, 0, self.model.config.max_speech_tokens))
+        # NOTE (keisuke): the position id here is not actually correct. For TTS task, we should do use position_ids - prompt_len,
+        # since the position id count is independent for text and speech tokens in Chatterbox model.
+
+        inputs_embeds = torch.where(input_masks, audio_embeds, input_features)
 
         logits = self.model(
             inputs_embeds=inputs_embeds,
@@ -692,7 +759,8 @@ class ChatterboxModel(BaseLM):
         for i, req in enumerate(requests):
             req.input_tokens = output_ids[i : i + 1]
 
-            req.input_masks = req.input_masks[:1].zero_()
+            req.input_masks = req.input_masks[:1].zero_() + 1
+            req.input_features = req.input_features[:1].zero_()
 
         async def update_req_states():
             stop_mask = output_ids[:, 0] == self.stop_speech_token_id
@@ -723,6 +791,7 @@ class ChatterboxModel(BaseLM):
 
     def postprocess(self, token_ids: torch.Tensor):
         """Convert token IDs to audio bytes."""
+        # TODO: currently lacking the way to have request-specific ref_dict
         audio_tensor = self.audio_tokenizer.decode(
             token_ids[:, :, 0],
             speech_token_lens=self.detokenize_interval,
