@@ -118,7 +118,8 @@ def add_optional_chunk_mask(
         chunk_masks = masks
     assert chunk_masks.dtype == torch.bool
     # if (chunk_masks.sum(dim=-1) == 0).sum().item() != 0:
-    #     print('get chunk_masks all false at some timestep, force set to true, make sure they are masked in futuer computation!')
+    #     print('get chunk_masks all false at some timestep, force set to true,'
+    #           ' make sure they are masked in futuer computation!')
     #     chunk_masks[chunk_masks.sum(dim=-1) == 0] = True
     return chunk_masks
 
@@ -1007,7 +1008,8 @@ class SnakeBeta(nn.Module):
         - alpha - trainable parameter that controls frequency
         - beta - trainable parameter that controls magnitude
     References:
-        - This activation function is a modified version based on this paper by Liu Ziyin, Tilman Hartwig, Masahito Ueda:
+        - This activation function is a modified version based on this paper by
+          Liu Ziyin, Tilman Hartwig, Masahito Ueda:
         https://arxiv.org/abs/2006.08195
     Examples:
         >>> a1 = snakebeta(256)
@@ -1280,7 +1282,9 @@ class BasicTransformerBlock(nn.Module):
             # "feed_forward_chunk_size" can be used to save memory
             if norm_hidden_states.shape[self._chunk_dim] % self._chunk_size != 0:
                 raise ValueError(
-                    f"`hidden_states` dimension to be chunked: {norm_hidden_states.shape[self._chunk_dim]} has to be divisible by chunk size: {self._chunk_size}. Make sure to set an appropriate `chunk_size` when calling `unet.enable_forward_chunking`."
+                    f"`hidden_states` dimension to be chunked: {norm_hidden_states.shape[self._chunk_dim]} "
+                    f"has to be divisible by chunk size: {self._chunk_size}. Make sure to set an "
+                    f"appropriate `chunk_size` when calling `unet.enable_forward_chunking`."
                 )
 
             num_chunks = norm_hidden_states.shape[self._chunk_dim] // self._chunk_size

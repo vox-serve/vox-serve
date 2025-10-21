@@ -416,14 +416,20 @@ class ChatterboxModel(BaseLM):
         self.audio_tokenizer = ChatterboxDecoder()
 
         state_dict = {}
-        with safe_open(hf_hub_download(repo_id=model_name, filename="t3_cfg.safetensors", revision=None), framework="pt") as f:
+        with safe_open(
+            hf_hub_download(repo_id=model_name, filename="t3_cfg.safetensors", revision=None),
+            framework="pt"
+        ) as f:
             for key in f.keys():
                 state_dict[key] = f.get_tensor(key)
         self.model.load_state_dict(state_dict, strict=True)
         self.model.to(dtype).to(device)
 
         detokenizer_state_dict = {}
-        with safe_open(hf_hub_download(repo_id=model_name, filename="s3gen.safetensors", revision=None), framework="pt") as f:
+        with safe_open(
+            hf_hub_download(repo_id=model_name, filename="s3gen.safetensors", revision=None),
+            framework="pt"
+        ) as f:
             for key in f.keys():
                 detokenizer_state_dict[key] = f.get_tensor(key)
         self.audio_tokenizer.load_state_dict(detokenizer_state_dict, strict=False)
@@ -673,7 +679,9 @@ class ChatterboxModel(BaseLM):
         text_embeds = text_embeds + self.model.text_pos_emb(torch.arange(0, text_embeds.shape[0], device=self.device))
         input_features[cond_emb.shape[0] : cond_emb.shape[0] + text_embeds.shape[0]] = text_embeds
 
-        audio_embeds = self.model.speech_emb(torch.clamp(input_ids[-2:, 0], 0, self.model.config.speech_tokens_dict_size - 1))
+        audio_embeds = self.model.speech_emb(
+            torch.clamp(input_ids[-2:, 0], 0, self.model.config.speech_tokens_dict_size - 1)
+        )
         audio_embeds = audio_embeds + self.model.speech_pos_emb(torch.zeros(2, device=self.device, dtype=torch.long))
         input_features[-2:] = audio_embeds
 
@@ -709,12 +717,19 @@ class ChatterboxModel(BaseLM):
         **kwargs: Any,
     ) -> torch.Tensor:
         """Forward pass through the model."""
-        # text_embeds = self.model.text_emb(torch.clamp(input_ids[:, 0], 0, self.model.config.text_tokens_dict_size - 1))
+        # text_embeds = self.model.text_emb(
+        #     torch.clamp(input_ids[:, 0], 0, self.model.config.text_tokens_dict_size - 1)
+        # )
         # text_embeds = text_embeds + self.model.text_pos_emb(position_ids)
 
-        audio_embeds = self.model.speech_emb(torch.clamp(input_ids[:, 0], 0, self.model.config.speech_tokens_dict_size - 1))
-        audio_embeds = audio_embeds + self.model.speech_pos_emb(torch.clamp(position_ids, 0, self.model.config.max_speech_tokens))
-        # NOTE (keisuke): the position id here is not actually correct. For TTS task, we should do use position_ids - prompt_len,
+        audio_embeds = self.model.speech_emb(
+            torch.clamp(input_ids[:, 0], 0, self.model.config.speech_tokens_dict_size - 1)
+        )
+        audio_embeds = audio_embeds + self.model.speech_pos_emb(
+            torch.clamp(position_ids, 0, self.model.config.max_speech_tokens)
+        )
+        # NOTE (keisuke): the position id here is not actually correct. For TTS task,
+        # we should do use position_ids - prompt_len,
         # since the position id count is independent for text and speech tokens in Chatterbox model.
 
         inputs_embeds = torch.where(input_masks, audio_embeds, input_features)

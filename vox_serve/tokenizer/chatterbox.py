@@ -90,7 +90,8 @@ class S3Tokenizer(S3TokenizerV2):
 
     def pad(self, wavs, sr) -> List[torch.Tensor]:
         """
-        Given a list of wavs with the same `sample_rate`, pad them so that the length is multiple of 40ms (S3 runs at 25 token/sec).
+        Given a list of wavs with the same `sample_rate`, pad them so that the length
+        is multiple of 40ms (S3 runs at 25 token/sec).
         """
         processed_wavs = []
         for wav in wavs:
@@ -128,7 +129,8 @@ class S3Tokenizer(S3TokenizerV2):
     ) -> Tuple[torch.Tensor, torch.LongTensor]:
         """
         NOTE: mel-spec has a hop size of 160 points (100 frame/sec).
-        FIXME: this class inherits `nn.Module` but doesn't accept `torch.Tensor` and handles a list of wavs one by one, which is unexpected.
+        FIXME: this class inherits `nn.Module` but doesn't accept `torch.Tensor`
+        and handles a list of wavs one by one, which is unexpected.
 
         Args
         ----
@@ -290,8 +292,8 @@ class FCM(torch.nn.Module):
     def _make_layer(self, block, planes, num_blocks, stride):
         strides = [stride] + [1] * (num_blocks - 1)
         layers = []
-        for stride in strides:
-            layers.append(block(self.in_planes, planes, stride))
+        for current_stride in strides:
+            layers.append(block(self.in_planes, planes, current_stride))
             self.in_planes = planes * block.expansion
         return torch.nn.Sequential(*layers)
 

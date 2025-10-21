@@ -590,8 +590,10 @@ class HiFTGenerator(nn.Module):
         magnitude = torch.clip(magnitude, max=1e2)
         real = magnitude * torch.cos(phase)
         img = magnitude * torch.sin(phase)
-        # inverse_transform = torch.istft(torch.complex(real, img), self.istft_params["n_fft"], self.istft_params["hop_len"],
-        #                                 self.istft_params["n_fft"], window=self.stft_window.to(magnitude.device))
+        # inverse_transform = torch.istft(
+        #     torch.complex(real, img), self.istft_params["n_fft"], self.istft_params["hop_len"],
+        #     self.istft_params["n_fft"], window=self.stft_window.to(magnitude.device)
+        # )
         inverse_transform = self._istft_graph_safe(
             torch.complex(real, img), self.istft_params["n_fft"], self.istft_params["hop_len"], self.stft_window
         )

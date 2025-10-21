@@ -174,12 +174,18 @@ class AttentionBlock2(nn.Module):
         self.to_k = nn.Linear(channels, channels)
         self.to_v = nn.Linear(channels, channels)
 
-        self.attention = AttentionQKV(self.num_heads, channels // self.num_heads, dropout_rate=dropout_rate, flash=flash_attention, scale=scale)
+        self.attention = AttentionQKV(
+            self.num_heads, channels // self.num_heads, dropout_rate=dropout_rate,
+            flash=flash_attention, scale=scale
+        )
 
         self.proj_out = nn.Linear(channels, channels)
 
         if relative_pos_embeddings:
-            self.relative_pos_embeddings = RelativePositionBias(scale=(channels // self.num_heads) ** .5, causal=False, heads=num_heads, num_buckets=32, max_distance=64)
+            self.relative_pos_embeddings = RelativePositionBias(
+                scale=(channels // self.num_heads) ** .5, causal=False, heads=num_heads,
+                num_buckets=32, max_distance=64
+            )
         else:
             self.relative_pos_embeddings = None
 
@@ -201,7 +207,10 @@ class AttentionBlock2(nn.Module):
 
 
 class ChatterboxPerceiver(nn.Module):
-    def __init__(self, pre_attention_query_token=32, pre_attention_query_size=1024, embedding_dim=1024, num_attn_heads=4):
+    def __init__(
+        self, pre_attention_query_token=32, pre_attention_query_size=1024,
+        embedding_dim=1024, num_attn_heads=4
+    ):
         """
         Initialize the perceiver module.
 
@@ -247,7 +256,7 @@ class ChatterboxCondEnc(nn.Module):
     Handle all non-text conditioning, like speaker embeddings / prompts, CLAP, emotion, etc.
     """
 
-    def __init__(self, hp: "ChatterboxConfig"):
+    def __init__(self, hp):
         super().__init__()
         self.hp = hp
         if hp.encoder_type == "voice_encoder":
