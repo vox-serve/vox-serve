@@ -548,7 +548,7 @@ class S3TokenizerV2(torch.nn.Module):
         config (ModelConfig): Config
     """
 
-    def __init__(self, name: str, config: ModelConfig = ModelConfig()):
+    def __init__(self, name: str, config: ModelConfig = ModelConfig(), init_from_onnx: bool = True):
         super().__init__()
         self.name = name  # Store model name for token_rate determination
         if "v1" not in name:
@@ -569,7 +569,8 @@ class S3TokenizerV2(torch.nn.Module):
             self.config.n_codebook_size,
         )
 
-        self.init_from_onnx(name)
+        if init_from_onnx:
+            self.init_from_onnx(name)
 
     def forward(self, mel: torch.Tensor, mel_len: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         return self.quantize(mel, mel_len)

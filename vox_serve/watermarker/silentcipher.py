@@ -401,7 +401,7 @@ class Model:
 
         return self.decode_wav(y, orig_sr, phase_shift_decoding)
 
-    def encode_wav(self, y_multi_channel, orig_sr, message_list, message_sdr=None, calc_sdr=True, disable_checks=False):
+    def encode_wav(self, y_multi_channel, orig_sr, message_list, message_sdr=36, calc_sdr=False, disable_checks=False):
         """
         Encodes a multi-channel audio waveform with a given message.
 
@@ -543,7 +543,7 @@ class Model:
             y_watermarked_multi_channel = y_watermarked_multi_channel[:, 0]
             sdrs = sdrs[0]
 
-        return y_watermarked_multi_channel, sdrs
+        return y_watermarked_multi_channel
 
     def decode_wav(self, y_multi_channel, orig_sr, phase_shift_decoding):
         """

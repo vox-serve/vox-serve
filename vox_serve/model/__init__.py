@@ -4,6 +4,7 @@ import torch
 
 from ..sampling import SamplingConfig
 from .base import BaseLM, BaseLMWithDepth
+from .chatterbox import ChatterboxModel
 from .csm import CSMModel
 from .glm_voice import GLMVoiceModel
 from .orpheus import OrpheusModel
@@ -22,6 +23,8 @@ MODEL_REGISTRY: Dict[str, Type[BaseLM]] = {
     "zai-org/glm-4-voice-9b": GLMVoiceModel,
     "step": StepAudio2Model,
     "stepfun-ai/Step-Audio-2-mini": StepAudio2Model,
+    "chatterbox": ChatterboxModel,
+    "ResembleAI/chatterbox": ChatterboxModel,
 }
 
 
