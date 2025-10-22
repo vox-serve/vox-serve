@@ -316,10 +316,10 @@ class ModelWorker:
         input_masks = lm_inputs["input_masks"]
         repetition_cache = lm_inputs["repetition_cache"]
 
-        qo_indptr_tensor = torch.tensor(qo_indptr, device=self.device, dtype=torch.int32)
-        paged_kv_indptr_tensor = torch.tensor(paged_kv_indptr, device=self.device, dtype=torch.int32)
-        paged_kv_indices_tensor = torch.tensor(paged_kv_indices, device=self.device, dtype=torch.int32)
-        paged_kv_last_page_len_tensor = torch.tensor(paged_kv_last_page_len, device=self.device, dtype=torch.int32)
+        qo_indptr_tensor = torch.tensor(qo_indptr, dtype=torch.int32)
+        paged_kv_indptr_tensor = torch.tensor(paged_kv_indptr, dtype=torch.int32)
+        paged_kv_indices_tensor = torch.tensor(paged_kv_indices, dtype=torch.int32)
+        paged_kv_last_page_len_tensor = torch.tensor(paged_kv_last_page_len, dtype=torch.int32)
 
         self.prefill_wrapper.plan(
             qo_indptr_tensor,
@@ -397,9 +397,9 @@ class ModelWorker:
         input_masks = lm_inputs["input_masks"]
         repetition_cache = lm_inputs["repetition_cache"]
 
-        paged_kv_indptr_tensor = torch.tensor(paged_kv_indptr, device=self.device, dtype=torch.int32)
-        paged_kv_indices_tensor = torch.tensor(paged_kv_indices, device=self.device, dtype=torch.int32)
-        paged_kv_last_page_len_tensor = torch.tensor(paged_kv_last_page_len, device=self.device, dtype=torch.int32)
+        paged_kv_indptr_tensor = torch.tensor(paged_kv_indptr, dtype=torch.int32)
+        paged_kv_indices_tensor = torch.tensor(paged_kv_indices, dtype=torch.int32)
+        paged_kv_last_page_len_tensor = torch.tensor(paged_kv_last_page_len, dtype=torch.int32)
 
         self.decode_wrapper.plan(
             paged_kv_indptr_tensor,
@@ -459,10 +459,10 @@ class ModelWorker:
         # assuming that the sequence length is 2 for the initial iteration of depth transformer.
         # may need to change here for other models.
         depth_position_ids = torch.tensor([0, 1] * output_ids.shape[0], device=self.device, dtype=torch.int32)
-        depth_qo_indptr = torch.arange(output_ids.shape[0] + 1, device=self.device, dtype=torch.int32) * 2
-        depth_kv_indptr = torch.arange(output_ids.shape[0] + 1, device=self.device, dtype=torch.int32)
-        depth_kv_indices = torch.arange(output_ids.shape[0], device=self.device, dtype=torch.int32)
-        depth_kv_last_page_len = torch.tensor([2] * output_ids.shape[0], device=self.device, dtype=torch.int32)
+        depth_qo_indptr = torch.arange(output_ids.shape[0] + 1, dtype=torch.int32) * 2
+        depth_kv_indptr = torch.arange(output_ids.shape[0] + 1, dtype=torch.int32)
+        depth_kv_indices = torch.arange(output_ids.shape[0], dtype=torch.int32)
+        depth_kv_last_page_len = torch.tensor([2] * output_ids.shape[0], dtype=torch.int32)
         self.depth_kv_cache.zero_()
 
         for i in range(1, self.model.depth_n_codebooks):
@@ -510,7 +510,7 @@ class ModelWorker:
                 )
 
             depth_position_ids = torch.tensor([i + 1] * output_ids.shape[0], device=self.device, dtype=torch.int32)
-            depth_qo_indptr = torch.arange(output_ids.shape[0] + 1, device=self.device, dtype=torch.int32)
+            depth_qo_indptr = torch.arange(output_ids.shape[0] + 1, dtype=torch.int32)
             depth_kv_last_page_len += 1
 
         return output_ids
