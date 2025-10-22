@@ -331,7 +331,7 @@ class ModelWorker:
         torch.cuda.synchronize()
 
         # prefill run
-        if self.has_depth_transformer:    
+        if self.has_depth_transformer:
             logits, backbone_hidden_states = self.model.forward(
                 input_ids=input_ids,
                 position_ids=position_ids,
@@ -355,7 +355,7 @@ class ModelWorker:
 
             output_ids = self.run_lm_depth(
                 output_ids,
-                hidden_for_depth, 
+                hidden_for_depth,
                 requests
             )
         else:
@@ -429,7 +429,7 @@ class ModelWorker:
 
             output_ids = self.run_lm_depth(
                 output_ids,
-                hidden_for_depth, 
+                hidden_for_depth,
                 requests
             )
         else:
@@ -450,7 +450,12 @@ class ModelWorker:
 
             return task
 
-    def run_lm_depth(self, output_ids: torch.Tensor, hidden_for_depth: torch.Tensor, requests: List[Request]) -> torch.Tensor:
+    def run_lm_depth(
+        self,
+        output_ids: torch.Tensor,
+        hidden_for_depth: torch.Tensor,
+        requests: List[Request],
+    ) -> torch.Tensor:
         """
          - output_ids: [bs, 33]
          - hidden_for_depth: [bs, 2, hidden_size]
@@ -539,7 +544,7 @@ class ModelWorker:
 
         if not token_ids:
             return
-        
+
         token_ids = torch.stack(token_ids, dim=0)
 
         audio_tensors = self.model.postprocess(token_ids)

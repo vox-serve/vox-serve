@@ -96,7 +96,14 @@ class FlashInferPrefillWrapper:
 
         # Flatten to per-token
         seg = torch.repeat_interleave(torch.arange(n_req, dtype=torch.int32, device=lens.device), lens)  # [T]
-        intra = torch.arange(total_tokens, dtype=torch.int32, device=lens.device) - torch.repeat_interleave(starts, lens)
+        intra = (
+            torch.arange(
+            total_tokens,
+            dtype=torch.int32,
+            device=lens.device,
+            )
+            - torch.repeat_interleave(starts, lens)
+        )
 
         # Starting index of the newly appended run (per request), then absolute index per token
         start_new = kv_len_after[seg] - lens[seg]                # [T], int32
