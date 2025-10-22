@@ -772,6 +772,12 @@ def main():
         action="store_true",
         help="Enable torch.compile optimization for model inference (default: False)"
     )
+    parser.add_argument(
+        "--socket-suffix",
+        type=str,
+        default="",
+        help="Suffix to append to IPC socket paths to avoid conflicts (default: empty)"
+    )
     args = parser.parse_args()
 
     # Set global log level for the entire application
@@ -787,11 +793,17 @@ def main():
     # Determine final CUDA graph setting
     enable_cuda_graph = args.enable_cuda_graph and not args.disable_cuda_graph
 
+    # Construct socket paths with optional suffix
+    request_socket_path = f"/tmp/vox_serve_request{args.socket_suffix}.ipc"
+    result_socket_path = f"/tmp/vox_serve_result{args.socket_suffix}.ipc"
+
     # Initialize API server instance with specified model
     global api_server
     api_server = APIServer(
         model_name=args.model,
         scheduler_type=args.scheduler_type,
+        request_socket_path=request_socket_path,
+        result_socket_path=result_socket_path,
         max_batch_size=args.max_batch_size,
         max_num_pages=args.max_num_pages,
         page_size=args.page_size,
