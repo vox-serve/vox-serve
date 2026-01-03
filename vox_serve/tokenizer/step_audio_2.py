@@ -1020,7 +1020,7 @@ class CausalConditionalCFM(torch.nn.Module):
             this_att_cache = att_cache[step - 1]
             this_cnn_cache = cnn_cache[step - 1]
 
-            dphi_dt, this_new_cnn_cache, this_new_att_cache = self.estimator.forward_chunk(
+            dphi_dt = self.estimator.forward_chunk(
                 x=x.repeat(2, 1, 1),
                 mu=mu_in,
                 t=t.repeat(2),
@@ -1036,12 +1036,12 @@ class CausalConditionalCFM(torch.nn.Module):
             if step < len(t_span) - 1:
                 dt = t_span[step + 1] - t
 
-            self.cnn_cache_buffer[step - 1, :, :2 * mu.size(0)] = this_new_cnn_cache
-            self.att_cache_buffer[step - 1][:, :2 * mu.size(0), :, : x.shape[2] + last_att_len, :] = this_new_att_cache
+            # self.cnn_cache_buffer[step - 1, :, :2 * mu.size(0)] = this_new_cnn_cache
+            # self.att_cache_buffer[step - 1][:, :2 * mu.size(0), :, : x.shape[2] + last_att_len, :] = this_new_att_cache
 
-        cnn_cache = self.cnn_cache_buffer[:, :, :2 * mu.size(0), :, :]
-        att_cache = self.att_cache_buffer[:, :, :2 * mu.size(0), :, : x.shape[2] + last_att_len, :]
-        return x, cnn_cache, att_cache
+        # cnn_cache = self.cnn_cache_buffer[:, :, :2 * mu.size(0), :, :]
+        # att_cache = self.att_cache_buffer[:, :, :2 * mu.size(0), :, : x.shape[2] + last_att_len, :]
+        return x, None, None
 
     @torch.inference_mode()
     def forward_chunk(

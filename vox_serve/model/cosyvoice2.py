@@ -19,6 +19,7 @@ from ..flashinfer_utils import FlashInferWrapper, apply_rope_pos_ids, rms_norm
 from ..requests import Request
 from ..sampling import Sampler, SamplingConfig
 from ..tokenizer.s3 import S3TokenizerV2
+from ..tokenizer.cosyvoice2 import CosyVoice2Decoder
 from ..utils import get_logger, load_hf_safetensor_state_dict
 from .base import BaseLM, PreprocessOutput
 from librosa.filters import mel as librosa_mel_fn
@@ -234,13 +235,42 @@ class CosyVoice2LLM2(nn.Module):
     def __init__(self, config: CosyVoice2Config):
         super().__init__()
         self.model = CosyVoice2BackboneModel(config)
+        # unused
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+    
+    def forward(
+        self,
+        inputs_embeds: torch.Tensor,
+        position_ids: torch.LongTensor,
+        attn_wrapper: FlashInferWrapper,
+        kv_cache: torch.Tensor,
+    ):
+        return self.model(
+            inputs_embeds=inputs_embeds,
+            position_ids=position_ids,
+            attn_wrapper=attn_wrapper,
+            kv_cache=kv_cache,
+        )
 
 
 class CosyVoice2LLM(nn.Module):
     def __init__(self, config: CosyVoice2Config):
         super().__init__()
         self.model = CosyVoice2LLM2(config)
+
+    def forward(
+        self,
+        inputs_embeds: torch.Tensor,
+        position_ids: torch.LongTensor,
+        attn_wrapper: FlashInferWrapper,
+        kv_cache: torch.Tensor,
+    ):
+        return self.model(
+            inputs_embeds=inputs_embeds,
+            position_ids=position_ids,
+            attn_wrapper=attn_wrapper,
+            kv_cache=kv_cache,
+        )
 
 
 class CosyVoice2ForCausalLM(nn.Module):
@@ -253,7 +283,10 @@ class CosyVoice2ForCausalLM(nn.Module):
         self.vocab_size = config.vocab_size
 
     def embed_tokens(self, input_ids):
-        return self.model.embed_tokens(input_ids)
+        return self.llm_embedding(input_ids)
+
+    def embed_tokens_speech(self, input_ids):
+        return self.speech_embedding(input_ids)
 
     def forward(
         self,
@@ -262,20 +295,20 @@ class CosyVoice2ForCausalLM(nn.Module):
         attn_wrapper: FlashInferWrapper,
         kv_cache: torch.Tensor,
     ):
-        hidden_states = self.model(
+        hidden_states = self.llm(
             inputs_embeds=inputs_embeds,
             position_ids=position_ids,
             attn_wrapper=attn_wrapper,
             kv_cache=kv_cache,
         )
-        logits = self.lm_head(hidden_states)
+        logits = self.llm_decoder(hidden_states)
 
         return logits
 
 
 class CosyVoice2Model(BaseLM):
     def __init__(self, model_name, dtype=torch.bfloat16, device="cuda:0", enable_torch_compile=False):
-        if model_name == "step":
+        if model_name == "cosyvoice2":
             model_name = "FunAudioLLM/CosyVoice2-0.5B"
         super().__init__(model_name, device, dtype, enable_torch_compile)
         self.logger = get_logger(__name__)
@@ -320,12 +353,11 @@ class CosyVoice2Model(BaseLM):
             spk_model_path, sess_options=option, providers=["CPUExecutionProvider"]
         )
 
-        # self.audio_decoder = CosyVoice2Decoder(
-        #     model_path=model_name,
-        #     device=device,
-        #     float16=True,
-        # )
-        # self.audio_decoder.to(device)
+        self.audio_decoder = CosyVoice2Decoder(
+            model_path=model_name,
+            device=device,
+        )
+        self.audio_decoder.to(device)
         # self._audio_decoder_initial_cache = self.audio_decoder.init_cache()
 
         self._num_attention_heads = self.config.num_attention_heads
@@ -333,7 +365,7 @@ class CosyVoice2Model(BaseLM):
         self._num_hidden_layers = self.config.num_hidden_layers
         self._hidden_size = self.config.hidden_size
 
-        self.stop_token_id = self.text_tokenizer.tokenizer.convert_tokens_to_ids("<|EOT|>")
+        self.stop_token_ids = [self.config.speech_token_size + i for i in range(3)]
         
         # Initialize mel basis and hann window caches
         self.mel_basis = {}
@@ -348,6 +380,8 @@ class CosyVoice2Model(BaseLM):
             repetition_window=-1,
             cfg_scale=None,
         )
+
+        self._init_default_cond()
 
     @property
     def n_codebooks(self):
@@ -421,10 +455,10 @@ class CosyVoice2Model(BaseLM):
     @property
     def vocab_size(self) -> int:
         """Vocabulary size of the model."""
-        return self.config.vocab_size
+        return self.config.speech_token_size + 3
 
     def is_stop_id(self, token_ids: List[int]) -> bool:
-        return token_ids[0] == self.stop_token_id
+        return token_ids[0] in self.stop_token_ids
 
     def _load_tokenizer(self, tokenizer_path):
         self.allowed_special = "all"
@@ -644,23 +678,17 @@ class CosyVoice2Model(BaseLM):
                            dither=0,
                            sample_frequency=16000)
         feat = feat - feat.mean(dim=0, keepdim=True)
-        print(f"{feat.shape=}, {feat=}")
         embedding = self.campplus_model.run(
             None,
             {self.campplus_model.get_inputs()[0].name: feat.unsqueeze(dim=0).cpu().numpy()},
         )[0].flatten().tolist()
         embedding = torch.tensor([embedding]).to(self.device)
-        print(f"{embedding.shape=}, {embedding=}")
         return embedding
-
-    def preprocess(
-        self,
-        prompt: str | None = None,
-        ref_audio_path: str | None = None,
-        ref_audio_text: str | None = None,
-    ) -> PreprocessOutput:
-        prompt = self._text_normalize(prompt, split=False, text_frontend=True)
-        prompt_ids = self._extract_text_token(prompt)
+    
+    def _init_default_cond(self):
+        ref_audio_path = '/home/keisuke/vox-serve/audiobench.mp3'
+        ref_audio_text = 'How long does it take our eyes to fully adapt to the darkness?'
+        
         ref_text_ids = self._extract_text_token(ref_audio_text)
         speech_feat, speech_feat_len = self._extract_speech_feat(ref_audio_path)
         speech_token, speech_token_len = self._extract_speech_token(ref_audio_path)
@@ -670,12 +698,38 @@ class CosyVoice2Model(BaseLM):
         speech_feat, speech_feat_len = speech_feat[:, :2 * token_len], 2 * token_len
         speech_token, speech_token_len = speech_token[:, :token_len], token_len
 
+        # print(f"{ref_text_ids.shape=} {ref_text_ids=}") # [1, 14] ref_text_ids=tensor([[ 4340,  1293,  1558,   432,  1896,  1039,  6414,   311,  7225, 10515, 311,   279, 26298,    30]]
+        # print(f"{speech_feat.shape=} {speech_feat=}") # [1, 258, 80]
+        # print(f"{speech_feat_len=}") # 258
+        # print(f"{speech_token.shape=} {speech_token=}") # [1, 129]
+        # print(f"{speech_token_len=}") # 129
+        # print(f"{embedding.shape=} {embedding=}") # [1, 192]
+
+        self.default_speaker_ref_dict = {
+            'ref_text_ids': ref_text_ids,
+            'prompt_feat': speech_feat,
+            'prompt_feat_len': speech_feat_len,
+            'prompt_speech_token': speech_token,
+            'prompt_speech_token_len': speech_token_len,
+            'embedding': embedding,
+        }
+
+    def preprocess(
+        self,
+        prompt: str | None = None,
+        audio_path: str | None = None,
+    ) -> PreprocessOutput:
+        assert audio_path is None, "audio_path is not supported yet for this model"
+
+        prompt = self._text_normalize(prompt, split=False, text_frontend=True)
+        prompt_ids = self._extract_text_token(prompt)
+
         input_ids = torch.concat([
             torch.tensor([[self.sos]], dtype=torch.int32, device=self.device),
-            ref_text_ids,
+            self.default_speaker_ref_dict['ref_text_ids'],
             prompt_ids,
             torch.tensor([[self.task_id]], dtype=torch.int32, device=self.device),
-            speech_token,
+            self.default_speaker_ref_dict['prompt_speech_token'],
         ], dim=1).view(-1, 1) # add codebook dimension
 
         input_features = torch.zeros(
@@ -690,6 +744,8 @@ class CosyVoice2Model(BaseLM):
             device=self.device,
             dtype=torch.bool,
         )
+        input_masks[-self.default_speaker_ref_dict['prompt_speech_token_len']:, :] = 1
+        print(f"{input_ids.shape=}, {input_features.shape=}, {input_masks.shape=}")
 
         # Create repetition cache if repetition penalty is enabled
         repetition_cache = None
@@ -706,14 +762,14 @@ class CosyVoice2Model(BaseLM):
             )
 
         # Initial decoder cache for this request (default cache), sized for batch 1
-        decoder_cache = self.audio_decoder_initial_cache(batch_size=1)
+        # decoder_cache = self.audio_decoder_initial_cache(batch_size=1)
 
         return PreprocessOutput(
             input_tokens=input_ids,
             repetition_cache=repetition_cache,
             input_masks=input_masks,
             input_features=input_features,
-            decoder_cache=decoder_cache,
+            # decoder_cache=decoder_cache,
         )
 
     # def audio_decoder_initial_cache(self, batch_size: int):
@@ -724,8 +780,8 @@ class CosyVoice2Model(BaseLM):
     #         spk_emb=base_cache.spk_emb.repeat(batch_size, 1),
     #         conformer_cnn_cache=base_cache.conformer_cnn_cache.repeat(batch_size, 1, 1),
     #         conformer_att_cache=base_cache.conformer_att_cache.repeat(batch_size, 1, 1, 1, 1),
-    #         estimator_cnn_cache=base_cache.estimator_cnn_cache.repeat(batch_size, 1, 1, 1, 1, 1),
-    #         estimator_att_cache=base_cache.estimator_att_cache.repeat(batch_size, 1, 1, 1, 1, 1, 1),
+    #         # estimator_cnn_cache=base_cache.estimator_cnn_cache.repeat(batch_size, 1, 1, 1, 1, 1),
+    #         # estimator_att_cache=base_cache.estimator_att_cache.repeat(batch_size, 1, 1, 1, 1, 1, 1),
     #         hift_mel_cache=base_cache.hift_mel_cache.repeat(batch_size, 1, 1),
     #         hift_source_cache=base_cache.hift_source_cache.repeat(batch_size, 1, 1),
     #         hift_speech_cache=base_cache.hift_speech_cache.repeat(batch_size, 1),
@@ -743,9 +799,10 @@ class CosyVoice2Model(BaseLM):
     ) -> torch.Tensor:
         """Forward pass through the model."""
         # remove codebook dimension
-        inputs_embeds = self.model.embed_tokens(input_ids[:, 0])
+        inputs_embeds = self.model.embed_tokens(input_ids[:, 0].clamp(0, self.model.llm_embedding.weight.shape[0] - 1))
+        speech_embeds = self.model.embed_tokens_speech(input_ids[:, 0].clamp(0, self.model.speech_embedding.weight.shape[0] - 1))
 
-        inputs_embeds = torch.where(input_masks, input_features, inputs_embeds)
+        inputs_embeds = torch.where(input_masks, input_features, speech_embeds)
 
         logits = self.model(
             inputs_embeds=inputs_embeds,
@@ -790,12 +847,13 @@ class CosyVoice2Model(BaseLM):
             req.input_masks = req.input_masks[:1].zero_()
 
         async def update_req_states():
-            stop_mask = output_ids[:, 0] == self.stop_token_id
-            audio_mask = output_ids[:, 0] >= self.audio_offset
+            stop_mask = (output_ids[:, 0] == self.stop_token_ids[0]) | \
+                        (output_ids[:, 0] == self.stop_token_ids[1]) | \
+                        (output_ids[:, 0] == self.stop_token_ids[2])
 
             for i, req in enumerate(requests):
                 req.lm_output_tokens.append(output_ids[i : i + 1])
-                if audio_mask[i] and not stop_mask[i]:
+                if not stop_mask[i]:
                     req.lm_output_audio_tokens.append(output_ids[i : i + 1])
                 if stop_mask[i]:
                     req.done_lm_generation = True
@@ -813,23 +871,21 @@ class CosyVoice2Model(BaseLM):
 
         return output_ids, task
 
-    def postprocess(self, token_ids: torch.Tensor, decoder_cache):
-        pass
-    # def postprocess(self, token_ids: torch.Tensor, decoder_cache: CosyVoice2DecoderCache):
-    #     audio_tensor, new_decoder_cache = self.audio_decoder(
-    #         token_ids[:, :, 0] - self.audio_offset,
-    #         decoder_cache
-    #     )
-    #     decoder_cache.spk_emb[:] = new_decoder_cache.spk_emb
-    #     decoder_cache.conformer_cnn_cache[:] = new_decoder_cache.conformer_cnn_cache
-    #     decoder_cache.conformer_att_cache[:] = new_decoder_cache.conformer_att_cache
-    #     decoder_cache.estimator_cnn_cache[:] = new_decoder_cache.estimator_cnn_cache
-    #     decoder_cache.estimator_att_cache[:] = new_decoder_cache.estimator_att_cache
-    #     decoder_cache.hift_mel_cache[:] = new_decoder_cache.hift_mel_cache
-    #     decoder_cache.hift_source_cache[:] = new_decoder_cache.hift_source_cache
-    #     decoder_cache.hift_speech_cache[:] = new_decoder_cache.hift_speech_cache
-    #     return audio_tensor[:, None, :]  # add channel dimension
+    def postprocess(self, token_ids: torch.Tensor):
+        audio_tensor = self.audio_decoder.decode(
+            token_ids[:, :, 0],
+            speech_token_lens=self.detokenize_interval,
+            ref_dict=self.default_speaker_ref_dict,
+        )
+        # decoder_cache.spk_emb[:] = new_decoder_cache.spk_emb
+        # decoder_cache.conformer_cnn_cache[:] = new_decoder_cache.conformer_cnn_cache
+        # decoder_cache.conformer_att_cache[:] = new_decoder_cache.conformer_att_cache
+        # # decoder_cache.estimator_cnn_cache[:] = new_decoder_cache.estimator_cnn_cache
+        # # decoder_cache.estimator_att_cache[:] = new_decoder_cache.estimator_att_cache
+        # decoder_cache.hift_mel_cache[:] = new_decoder_cache.hift_mel_cache
+        # decoder_cache.hift_source_cache[:] = new_decoder_cache.hift_source_cache
+        # decoder_cache.hift_speech_cache[:] = new_decoder_cache.hift_speech_cache
+        return audio_tensor[:, None, :]  # add channel dimension
 
 if __name__ == "__main__":
     model = CosyVoice2Model("FunAudioLLM/CosyVoice2-0.5B")
-    
