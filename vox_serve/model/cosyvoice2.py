@@ -1,28 +1,24 @@
-import json
-from dataclasses import dataclass, field
-from functools import lru_cache, partial
-import os
-from typing import Any, Dict, List, Optional, Union
+from dataclasses import dataclass
+from functools import partial
+from typing import Any, List, Optional, Union
 
 import librosa
-import numpy as np
 import onnxruntime
 import torch
 import torchaudio
 from huggingface_hub import hf_hub_download
+from librosa.filters import mel as librosa_mel_fn
 from torch import nn
 from torch.nn import functional as F
-from torch.nn.utils.rnn import pad_sequence
 from transformers import AutoTokenizer
 
 from ..flashinfer_utils import FlashInferWrapper, apply_rope_pos_ids, rms_norm
 from ..requests import Request
 from ..sampling import Sampler, SamplingConfig
-from ..tokenizer.s3 import S3TokenizerV2
 from ..tokenizer.cosyvoice2 import CosyVoice2Decoder
-from ..utils import get_logger, load_hf_safetensor_state_dict
+from ..tokenizer.s3 import S3TokenizerV2
+from ..utils import get_logger
 from .base import BaseLM, PreprocessOutput
-from librosa.filters import mel as librosa_mel_fn
 
 
 @dataclass
@@ -237,7 +233,7 @@ class CosyVoice2LLM2(nn.Module):
         self.model = CosyVoice2BackboneModel(config)
         # unused
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-    
+
     def forward(
         self,
         inputs_embeds: torch.Tensor,
@@ -327,7 +323,7 @@ class CosyVoice2Model(BaseLM):
         self.model.load_state_dict(
             torch.load(
                 hf_hub_download(repo_id=model_name, filename="llm.pt", revision=None),
-                map_location="cpu", 
+                map_location="cpu",
                 weights_only=True
             ),
             strict=True,
@@ -365,7 +361,7 @@ class CosyVoice2Model(BaseLM):
         self._hidden_size = self.config.hidden_size
 
         self.stop_token_ids = [self.config.speech_token_size + i for i in range(3)]
-        
+
         # Initialize mel basis and hann window caches
         self.mel_basis = {}
         self.hann_window = {}
@@ -462,8 +458,19 @@ class CosyVoice2Model(BaseLM):
     def _load_tokenizer(self, tokenizer_path):
         self.allowed_special = "all"
         return CosyVoice2Tokenizer(tokenizer_path)
-    
-    def _audio_feat_extractor(self, y, n_fft=1920, num_mels=80, sampling_rate=24000, hop_size=480, win_size=1920, fmin=0, fmax=8000, center=False):
+
+    def _audio_feat_extractor(
+        self,
+        y,
+        n_fft=1920,
+        num_mels=80,
+        sampling_rate=24000,
+        hop_size=480,
+        win_size=1920,
+        fmin=0,
+        fmax=8000,
+        center=False,
+    ):
         """
         Mel-spectrogram feature extraction function.
         """
@@ -504,7 +511,7 @@ class CosyVoice2Model(BaseLM):
         spec = self.spectral_normalize_torch(spec)
 
         return spec
-    
+
     def spectral_normalize_torch(self, magnitudes):
         """Dynamic range compression for spectral normalization."""
         return torch.log(torch.clamp(magnitudes, min=1e-5))
@@ -519,15 +526,23 @@ class CosyVoice2Model(BaseLM):
                     new_text.append(num_str)
                     st = None
                 new_text.append(c)
-            else:
-                if st is None:
-                    st = i
+            elif st is None:
+                st = i
         if st is not None and st < len(text):
             num_str = inflect_parser.number_to_words(text[st:])
             new_text.append(num_str)
         return ''.join(new_text)
 
-    def _split_paragraph(self, text: str, tokenize, lang="zh", token_max_n=80, token_min_n=60, merge_len=20, comma_split=False):
+    def _split_paragraph(
+        self,
+        text: str,
+        tokenize,
+        lang="zh",
+        token_max_n=80,
+        token_min_n=60,
+        merge_len=20,
+        comma_split=False,
+    ):
         def calc_utt_length(_text: str):
             if lang == "zh":
                 return len(_text)
@@ -580,7 +595,7 @@ class CosyVoice2Model(BaseLM):
                 final_utts.append(cur_utt)
 
         return final_utts
-    
+
     def _is_only_punctuation(self, text):
         import regex
         # Regular expression: Match strings that consist only of punctuation marks or are empty.
@@ -598,16 +613,23 @@ class CosyVoice2Model(BaseLM):
         text = text.strip()
         # TODO: simplified normalization for now
         text = self._spell_out_number(text, self.inflect_parser)
-        texts = list(self._split_paragraph(text, partial(self.text_tokenizer.encode, allowed_special=self.allowed_special), "en", token_max_n=80,
-                                        token_min_n=60, merge_len=20, comma_split=False))
+        texts = list(self._split_paragraph(
+            text,
+            partial(self.text_tokenizer.encode, allowed_special=self.allowed_special),
+            "en",
+            token_max_n=80,
+            token_min_n=60,
+            merge_len=20,
+            comma_split=False,
+        ))
         texts = [i for i in texts if not self._is_only_punctuation(i)]
         return texts if split is True else text
-    
+
     def _extract_text_token(self, text):
         text_token = self.text_tokenizer.encode(text, allowed_special=self.allowed_special)
         text_token = torch.tensor([text_token], dtype=torch.int32).to(self.device)
         return text_token
-    
+
     def _extract_speech_feat(self, prompt_wav):
         speech, sample_rate = torchaudio.load(prompt_wav, backend='soundfile')
         speech = speech.mean(dim=0, keepdim=True)
@@ -618,7 +640,7 @@ class CosyVoice2Model(BaseLM):
         speech_feat = speech_feat.unsqueeze(dim=0)
         speech_feat_len = torch.tensor([speech_feat.shape[1]], dtype=torch.int32).to(self.device)
         return speech_feat, speech_feat_len
-    
+
     def _log_mel_spectrogram(
         self,
         audio: torch.Tensor,
@@ -649,7 +671,7 @@ class CosyVoice2Model(BaseLM):
         log_spec = torch.maximum(log_spec, log_spec.max() - 8.0)
         log_spec = (log_spec + 4.0) / 4.0
         return log_spec
-    
+
     def _extract_speech_token(self, prompt_wav):
         speech, sample_rate = torchaudio.load(prompt_wav, backend='soundfile')
         speech = speech.mean(dim=0, keepdim=True)
@@ -663,15 +685,15 @@ class CosyVoice2Model(BaseLM):
             torch.tensor([feat.shape[2]], dtype=torch.int32, device=self.device)
         )
         return speech_token, speech_token_len
-    
+
     def _extract_spk_embedding(self, prompt_wav):
-        import torchaudio.compliance.kaldi as kaldi
+        from torchaudio.compliance import kaldi
         speech, sample_rate = torchaudio.load(prompt_wav, backend='soundfile')
         speech = speech.mean(dim=0, keepdim=True)
         if sample_rate != 16000:
             assert sample_rate >= 16000, 'wav sample rate {} must be greater than {}'.format(sample_rate, 16000)
             speech = torchaudio.transforms.Resample(orig_freq=sample_rate, new_freq=16000)(speech)
-        
+
         feat = kaldi.fbank(speech,
                            num_mel_bins=80,
                            dither=0,
@@ -683,11 +705,11 @@ class CosyVoice2Model(BaseLM):
         )[0].flatten().tolist()
         embedding = torch.tensor([embedding]).to(self.device)
         return embedding
-    
+
     def _init_default_cond(self):
         ref_audio_path = '/home/keisuke/vox-serve/audiobench.mp3'
         ref_audio_text = 'How long does it take our eyes to fully adapt to the darkness?'
-        
+
         ref_text_ids = self._extract_text_token(ref_audio_text)
         speech_feat, speech_feat_len = self._extract_speech_feat(ref_audio_path)
         speech_token, speech_token_len = self._extract_speech_token(ref_audio_path)
@@ -727,20 +749,20 @@ class CosyVoice2Model(BaseLM):
 
         # 1. Embed SOS token using llm_embedding
         sos_emb = self.model.llm_embedding.weight[self.sos].unsqueeze(0)  # (1, hidden_size)
-        
+
         # 2. Embed text tokens (ref_text_ids + prompt_ids)
         ref_text_ids = self.default_speaker_ref_dict['ref_text_ids'][0]  # (ref_text_len,)
         prompt_ids_flat = prompt_ids[0]  # (prompt_len,)
         all_text_ids = torch.concat([ref_text_ids, prompt_ids_flat], dim=0)  # (ref_text_len + prompt_len,)
         text_embeds = self.model.llm.model.model.embed_tokens(all_text_ids)  # (ref_text_len + prompt_len, hidden_size)
-        
+
         # 3. Embed task_id token
         task_id_emb = self.model.llm_embedding.weight[self.task_id].unsqueeze(0)  # (1, hidden_size)
-        
+
         # 4. Embed speech tokens using speech_embedding
         speech_token_ids = self.default_speaker_ref_dict['prompt_speech_token'][0]  # (speech_len,)
         speech_embeds = self.model.speech_embedding(speech_token_ids)  # (speech_len, hidden_size)
-        
+
         # 5. Concatenate all embeddings in the correct order: [sos, text, task_id, speech]
         input_features = torch.concat([
             sos_emb,
@@ -748,7 +770,7 @@ class CosyVoice2Model(BaseLM):
             task_id_emb,
             speech_embeds,
         ], dim=0)  # (total_len, hidden_size)
-        
+
         # Create input_masks: 1 for text/special tokens, 0 for speech tokens
         input_masks = torch.ones(
             input_ids.shape[0],
@@ -791,7 +813,9 @@ class CosyVoice2Model(BaseLM):
     ) -> torch.Tensor:
         """Forward pass through the model."""
         # remove codebook dimension
-        inputs_embeds = self.model.embed_tokens_speech(input_ids[:, 0].clamp(0, self.model.speech_embedding.weight.shape[0] - 1))
+        inputs_embeds = self.model.embed_tokens_speech(
+            input_ids[:, 0].clamp(0, self.model.speech_embedding.weight.shape[0] - 1),
+        )
 
         inputs_embeds = torch.where(input_masks, input_features, inputs_embeds)
 
