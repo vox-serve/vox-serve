@@ -17,7 +17,7 @@ from ..requests import Request
 from ..sampling import Sampler, SamplingConfig
 from ..tokenizer.cosyvoice2 import CosyVoice2Decoder
 from ..tokenizer.s3 import S3TokenizerV2
-from ..utils import get_logger
+from ..utils import download_audio_from_url, get_logger
 from .base import BaseLM, PreprocessOutput
 
 
@@ -707,8 +707,15 @@ class CosyVoice2Model(BaseLM):
         return embedding
 
     def _init_default_cond(self):
-        ref_audio_path = '/home/keisuke/vox-serve/audiobench.mp3'
-        ref_audio_text = 'How long does it take our eyes to fully adapt to the darkness?'
+        # ref_audio_path = '/home/keisuke/vox-serve/audiobench.mp3'
+        # ref_audio_text = 'How long does it take our eyes to fully adapt to the darkness?'
+        ref_audio_path = str(download_audio_from_url(
+            "https://keithito.com/LJ-Speech-Dataset/LJ037-0171.wav"
+        ))
+        ref_audio_text = (
+            "The examination and testimony of the experts enabled the "
+            "Commission to conclude that five shots may have been fired"
+        )
 
         ref_text_ids = self._extract_text_token(ref_audio_text)
         speech_feat, speech_feat_len = self._extract_speech_feat(ref_audio_path)
