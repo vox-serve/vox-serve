@@ -134,8 +134,6 @@ class ThroughputBenchmark:
                         chunk_count += 1
                         audio_chunks.append(chunk)
 
-                    # Read full response
-                    audio_data = await response.read()
                     metrics.end_time = time.time()
                     metrics.latency = metrics.end_time - metrics.start_time
 
@@ -168,10 +166,10 @@ class ThroughputBenchmark:
                     metrics.audio_duration = self.get_audio_duration(full_audio)
 
                     # Save audio if enabled
-                    if self.save_audio and audio_data:
+                    if self.save_audio and full_audio:
                         output_path = os.path.join(self.output_dir, f"{request_id}.wav")
                         with open(output_path, "wb") as f:
-                            f.write(audio_data)
+                            f.write(full_audio)
 
                     metrics.success = True
                     break  # Success, exit retry loop
