@@ -162,7 +162,8 @@ class SineGen(torch.nn.Module):
 
     def _f02uv(self, f0):
         # generate uv signal
-        uv = (f0 > self.voiced_threshold).type(torch.float32)
+        # uv = (f0 > self.voiced_threshold).type(torch.float32)
+        uv = (f0 > self.voiced_threshold).type(f0.dtype)
         return uv
 
     @torch.no_grad()
@@ -289,7 +290,8 @@ class SineGen2(torch.nn.Module):
 
     def _f02uv(self, f0):
         # generate uv signal
-        uv = (f0 > self.voiced_threshold).type(torch.float32)
+        # uv = (f0 > self.voiced_threshold).type(torch.float32)
+        uv = (f0 > self.voiced_threshold).type(f0.dtype)
         return uv
 
     def _f02sine(self, f0_values):
@@ -595,8 +597,11 @@ class HiFTGenerator(nn.Module):
         #     self.istft_params["n_fft"], window=self.stft_window.to(magnitude.device)
         # )
         inverse_transform = self._istft_graph_safe(
-            torch.complex(real, img), self.istft_params["n_fft"], self.istft_params["hop_len"], self.stft_window
-        )
+            torch.complex(real.to(torch.float32), img.to(torch.float32)),
+            self.istft_params["n_fft"],
+            self.istft_params["hop_len"],
+            self.stft_window.to(magnitude.dtype)
+        ).to(magnitude.dtype)
         return inverse_transform
 
     def _istft_graph_safe(self, comp_tensor, n_fft, hop_len, window):
@@ -641,7 +646,7 @@ class HiFTGenerator(nn.Module):
 
     def decode(self, x: torch.Tensor, s: torch.Tensor = torch.zeros(1, 1, 0)) -> torch.Tensor:
         s_stft_real, s_stft_imag = self._stft(s.squeeze(1))
-        s_stft = torch.cat([s_stft_real, s_stft_imag], dim=1)
+        s_stft = torch.cat([s_stft_real, s_stft_imag], dim=1).to(x.dtype)
 
         x = self.conv_pre(x)
         for i in range(self.num_upsamples):

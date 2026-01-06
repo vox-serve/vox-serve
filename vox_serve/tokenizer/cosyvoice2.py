@@ -815,6 +815,7 @@ class CosyVoice2Decoder(nn.Module):
             num_heads=8,
             act_fn="gelu",
         )
+        # estimator.forward = torch.compile(estimator.forward, mode="max-autotune-no-cudagraphs")
         decoder = CausalConditionalCFM(
             in_channels=240,
             spk_emb_dim=80,
@@ -824,7 +825,7 @@ class CosyVoice2Decoder(nn.Module):
 
         self.flow = CausalMaskedDiffWithXvec(encoder=encoder, decoder=decoder)
         self.flow.load_state_dict(torch.load(flow_path, map_location="cpu", weights_only=True), strict=True)
-        self.flow.to(self.device).eval()
+        self.flow.to(self.device).to(torch.bfloat16).eval()
 
         self.resamplers = {}
 
@@ -842,7 +843,7 @@ class CosyVoice2Decoder(nn.Module):
             for k, v in torch.load(hift_path, map_location="cpu", weights_only=True).items()
         }
         self.hift.load_state_dict(hift_state_dict, strict=True)
-        self.hift.to(self.device).eval()
+        self.hift.to(self.device).to(torch.bfloat16).eval()
 
         # silence out a few ms and fade audio in to reduce artifacts
         n_trim = self.S3GEN_SR // 50  # 20ms = half of a frame
@@ -850,55 +851,6 @@ class CosyVoice2Decoder(nn.Module):
         trim_fade[n_trim:] = (torch.cos(torch.linspace(torch.pi, 0, n_trim)) + 1) / 2
         self.register_buffer("trim_fade", trim_fade, persistent=False)  # (buffers get automatic device casting)
 
-    # def embed_ref(
-    #     self,
-    #     ref_wav: torch.Tensor,
-    #     ref_sr: int,
-    #     device="auto",
-    #     ref_fade_out=True,
-    # ):
-    #     device = self.device if device == "auto" else device
-    #     if isinstance(ref_wav, np.ndarray):
-    #         ref_wav = torch.from_numpy(ref_wav).float()
-
-    #     if ref_wav.device != device:
-    #         ref_wav = ref_wav.to(device)
-
-    #     if len(ref_wav.shape) == 1:
-    #         ref_wav = ref_wav.unsqueeze(0)  # (B, L)
-
-    #     if ref_wav.size(1) > 10 * ref_sr:
-    #         print("WARNING: cosydec received ref longer than 10s")
-
-    #     ref_wav_24 = ref_wav
-    #     if ref_sr != self.S3GEN_SR:
-    #         ref_wav_24 = get_resampler(ref_sr, self.S3GEN_SR, device)(ref_wav)
-
-    #     ref_mels_24 = self.mel_extractor(ref_wav_24).transpose(1, 2).to(device)
-    #     ref_mels_24_len = None
-
-    #     # Resample to 16kHz
-    #     ref_wav_16 = get_resampler(ref_sr, S3_SR, device)(ref_wav).to(device)
-
-    #     # Speaker embedding
-    #     ref_x_vector = self.speaker_encoder.inference(ref_wav_16)
-
-    #     # Tokenize 16khz reference
-    #     ref_speech_tokens, ref_speech_token_lens = self.tokenizer(ref_wav_16)
-
-    #     # Make sure mel_len = 2 * stoken_len (happens when the input is not padded to multiple of 40ms)
-    #     if ref_mels_24.shape[1] != 2 * ref_speech_tokens.shape[1]:
-    #         logging.warning("Reference mel length is not equal to 2 * reference token length.\n")
-    #         ref_speech_tokens = ref_speech_tokens[:, : ref_mels_24.shape[1] // 2]
-    #         ref_speech_token_lens[0] = ref_speech_tokens.shape[1]
-
-    #     return dict(
-    #         prompt_token=ref_speech_tokens.to(device),
-    #         prompt_token_len=ref_speech_token_lens,
-    #         prompt_feat=ref_mels_24,
-    #         prompt_feat_len=ref_mels_24_len,
-    #         embedding=ref_x_vector,
-    #     )
 
     @torch.inference_mode()
     def decode(
@@ -931,9 +883,9 @@ class CosyVoice2Decoder(nn.Module):
         output_mels = output_mels[:, :, ref_dict["prompt_feat_len"] :]
 
         # TODO jrm: ignoring the speed control (mel interpolation) and the HiFTGAN caching mechanisms for now.
-        cache_source = torch.zeros(1, 1, 0).to(self.device)
+        cache_source = torch.zeros(1, 1, 0, dtype=torch.bfloat16, device=self.device)
 
-        output_wavs, output_sources = self.hift.forward(output_mels, cache_source)
+        output_wavs, output_sources = self.hift.forward(output_mels.to(torch.bfloat16), cache_source)
 
         # # NOTE: ad-hoc method to reduce "spillover" from the reference clip.
         # output_wavs[:, :len(self.trim_fade)] *= self.trim_fade
