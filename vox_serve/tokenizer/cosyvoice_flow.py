@@ -6,12 +6,154 @@ from typing import Any, Dict, Optional, Tuple, Union
 
 import torch
 import torch.nn.functional as F
-from diffusers.models.attention import GEGLU, GELU, AdaLayerNorm, AdaLayerNormZero, ApproximateGELU
-from diffusers.models.attention_processor import Attention
-from diffusers.models.lora import LoRACompatibleLinear
-from diffusers.utils.torch_utils import maybe_allow_in_graph
 from einops import pack, rearrange, repeat
 from torch import nn
+
+
+class LoRACompatibleLinear(nn.Linear):
+    """Linear layer compatible with LoRA (for now, just a regular Linear layer)."""
+
+    def __init__(self, in_features: int, out_features: int, bias: bool = True, **kwargs):
+        super().__init__(in_features, out_features, bias=bias)
+
+
+class GELU(nn.Module):
+    def __init__(self, dim_in: int, dim_out: int, approximate: str = "none", bias: bool = True):
+        super().__init__()
+        self.proj = nn.Linear(dim_in, dim_out, bias=bias)
+        self.approximate = approximate
+
+    def forward(self, hidden_states):
+        hidden_states = self.proj(hidden_states)
+        hidden_states = F.gelu(hidden_states, approximate=self.approximate)
+        return hidden_states
+
+
+class ApproximateGELU(nn.Module):
+    def __init__(self, dim_in: int, dim_out: int, bias: bool = True):
+        super().__init__()
+        self.proj = nn.Linear(dim_in, dim_out, bias=bias)
+
+    def forward(self, hidden_states):
+        hidden_states = self.proj(hidden_states)
+        hidden_states = F.gelu(hidden_states, approximate="tanh")
+        return hidden_states
+
+
+class GEGLU(nn.Module):
+    def __init__(self, dim_in: int, dim_out: int, bias: bool = True):
+        super().__init__()
+        inner_dim = dim_out * 2
+        self.proj = nn.Linear(dim_in, inner_dim, bias=bias)
+
+    def forward(self, hidden_states):
+        hidden_states, gate = self.proj(hidden_states).chunk(2, dim=-1)
+        return hidden_states * F.gelu(gate)
+
+
+class AdaLayerNorm(nn.Module):
+    def __init__(self, embedding_dim: int, num_embeddings: int):
+        super().__init__()
+        self.emb = nn.Embedding(num_embeddings, embedding_dim * 2)
+        self.silu = nn.SiLU()
+        self.linear = nn.Linear(embedding_dim, embedding_dim * 2)
+        self.norm = nn.LayerNorm(embedding_dim, elementwise_affine=False, eps=1e-6)
+
+    def forward(self, x: torch.Tensor, timestep: torch.Tensor) -> torch.Tensor:
+        emb = self.linear(self.silu(self.emb(timestep)))
+        scale, shift = torch.chunk(emb, 2, dim=1)
+        x = self.norm(x) * (1 + scale[:, None, :]) + shift[:, None, :]
+        return x
+
+
+class AdaLayerNormZero(nn.Module):
+    def __init__(self, embedding_dim: int, num_embeddings: int):
+        super().__init__()
+        self.emb = nn.Embedding(num_embeddings, embedding_dim * 6)
+        self.silu = nn.SiLU()
+        self.linear = nn.Linear(embedding_dim, embedding_dim * 6)
+        self.norm = nn.LayerNorm(embedding_dim, elementwise_affine=False, eps=1e-6)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        timestep: torch.Tensor,
+        class_labels: Optional[torch.Tensor] = None,
+        hidden_dtype: Optional[torch.dtype] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        emb = self.linear(self.silu(self.emb(timestep)))
+        if class_labels is not None:
+            class_emb = self.emb(class_labels)
+            emb = emb + class_emb
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = torch.chunk(emb, 6, dim=1)
+        x = self.norm(x) * (1 + scale_msa[:, None, :]) + shift_msa[:, None, :]
+        return x, gate_msa, shift_mlp, scale_mlp, gate_mlp
+
+
+class Attention(nn.Module):
+    def __init__(
+        self,
+        query_dim: int,
+        cross_attention_dim: Optional[int] = None,
+        heads: int = 8,
+        dim_head: int = 64,
+        dropout: float = 0.0,
+        bias: bool = False,
+        upcast_attention: bool = False,
+    ):
+        super().__init__()
+        inner_dim = dim_head * heads
+        cross_attention_dim = cross_attention_dim if cross_attention_dim is not None else query_dim
+
+        self.scale = dim_head**-0.5
+        self.heads = heads
+        self.upcast_attention = upcast_attention
+
+        self.to_q = nn.Linear(query_dim, inner_dim, bias=bias)
+        self.to_k = nn.Linear(cross_attention_dim, inner_dim, bias=bias)
+        self.to_v = nn.Linear(cross_attention_dim, inner_dim, bias=bias)
+        self.to_out = nn.ModuleList([nn.Linear(inner_dim, query_dim)])
+
+        self.dropout = dropout
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        encoder_hidden_states: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        batch_size, sequence_length, _ = hidden_states.shape
+
+        encoder_hidden_states = encoder_hidden_states if encoder_hidden_states is not None else hidden_states
+
+        attention_mask = attention_mask.view(batch_size, 1, attention_mask.shape[-2], attention_mask.shape[-1])
+
+        query = self.to_q(hidden_states)
+        key = self.to_k(encoder_hidden_states)
+        value = self.to_v(encoder_hidden_states)
+
+        inner_dim = query.shape[-1]
+        head_dim = inner_dim // self.heads
+
+        query = query.view(batch_size, sequence_length, self.heads, head_dim).transpose(1, 2)
+        key = key.view(batch_size, -1, self.heads, head_dim).transpose(1, 2)
+        value = value.view(batch_size, -1, self.heads, head_dim).transpose(1, 2)
+
+        if self.upcast_attention:
+            query = query.float()
+            key = key.float()
+
+        hidden_states = F.scaled_dot_product_attention(
+            query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False
+        )
+
+        hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, self.heads * head_dim)
+        hidden_states = hidden_states.to(query.dtype)
+
+        # linear proj
+        hidden_states = self.to_out[0](hidden_states)
+
+        return hidden_states
 
 
 def subsequent_chunk_mask(
@@ -1119,7 +1261,6 @@ class FeedForward(nn.Module):
         return hidden_states
 
 
-@maybe_allow_in_graph
 class BasicTransformerBlock(nn.Module):
     r"""
     A basic Transformer block.
@@ -2005,7 +2146,9 @@ class CausalConditionalCFM(torch.nn.Module):
             sample: generated mel-spectrogram
                 shape: (batch_size, n_feats, mel_timesteps)
         """
-        z = torch.randn_like(mu).to(mu.device).to(mu.dtype) * temperature
+        # Generate a single random noise and replicate across batch for identical start
+        single_noise = torch.randn(1, mu.size(1), mu.size(2), device=mu.device, dtype=mu.dtype) * temperature
+        z = single_noise.expand(mu.size(0), -1, -1)
         # fix prompt and overlap part mu and z
         t_span = torch.linspace(0, 1, n_timesteps + 1, device=mu.device, dtype=mu.dtype)
         if self.t_scheduler == "cosine":
