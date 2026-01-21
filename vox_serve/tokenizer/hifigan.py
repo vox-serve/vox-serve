@@ -1,6 +1,7 @@
 # adopted from https://github.com/xingchensong/FlashCosyVoice
 
-from typing import Dict, List
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -17,6 +18,16 @@ except ImportError:
 
 
 from torch.distributions.uniform import Uniform
+
+from .base import DecoderCache
+
+
+@dataclass
+class HiFTGeneratorCache(DecoderCache):
+    """Cache for HiFTGenerator streaming inference."""
+    mel_cache: Optional[torch.Tensor] = None
+    source_cache: Optional[torch.Tensor] = None
+    speech_cache: Optional[torch.Tensor] = None
 
 
 def get_padding(kernel_size, dilation=1):
@@ -60,11 +71,10 @@ class Snake(nn.Module):
         super(Snake, self).__init__()
         self.in_features = in_features
 
-        # initialize alpha
         self.alpha_logscale = alpha_logscale
-        if self.alpha_logscale:  # log scale alphas initialized to zeros
+        if self.alpha_logscale:
             self.alpha = nn.Parameter(torch.zeros(in_features) * alpha)
-        else:  # linear scale alphas initialized to ones
+        else:
             self.alpha = nn.Parameter(torch.ones(in_features) * alpha)
 
         self.alpha.requires_grad = alpha_trainable
@@ -162,7 +172,8 @@ class SineGen(torch.nn.Module):
 
     def _f02uv(self, f0):
         # generate uv signal
-        uv = (f0 > self.voiced_threshold).type(torch.float32)
+        # uv = (f0 > self.voiced_threshold).type(torch.float32)
+        uv = (f0 > self.voiced_threshold).type(f0.dtype)
         return uv
 
     @torch.no_grad()
@@ -181,20 +192,11 @@ class SineGen(torch.nn.Module):
         phase_vec = u_dist.sample(sample_shape=(f0.size(0), self.harmonic_num + 1, 1)).to(F_mat.device)
         phase_vec[:, 0, :] = 0
 
-        # generate sine waveforms
         sine_waves = self.sine_amp * torch.sin(theta_mat + phase_vec)
-
-        # generate uv signal
         uv = self._f02uv(f0)
 
-        # noise: for unvoiced should be similar to sine_amp
-        #        std = self.sine_amp/3 -> max value ~ self.sine_amp
-        # .       for voiced regions is self.noise_std
         noise_amp = uv * self.noise_std + (1 - uv) * self.sine_amp / 3
         noise = noise_amp * torch.randn_like(sine_waves)
-
-        # first: set the unvoiced part to 0 by uv
-        # then: additive noise
         sine_waves = sine_waves * uv + noise
         return sine_waves, uv, noise
 
@@ -225,10 +227,7 @@ class SourceModuleHnNSF(torch.nn.Module):
         self.sine_amp = sine_amp
         self.noise_std = add_noise_std
 
-        # to produce sine waveforms
         self.l_sin_gen = SineGen(sampling_rate, harmonic_num, sine_amp, add_noise_std, voiced_threshod)
-
-        # to merge source harmonics into a single excitation
         self.l_linear = torch.nn.Linear(harmonic_num + 1, 1)
         self.l_tanh = torch.nn.Tanh()
 
@@ -239,14 +238,12 @@ class SourceModuleHnNSF(torch.nn.Module):
         Sine_source (batchsize, length, 1)
         noise_source (batchsize, length 1)
         """
-        # source for harmonic branch
         with torch.no_grad():
             sine_wavs, uv, _ = self.l_sin_gen(x.transpose(1, 2))
             sine_wavs = sine_wavs.transpose(1, 2)
             uv = uv.transpose(1, 2)
         sine_merge = self.l_tanh(self.l_linear(sine_wavs))
 
-        # source for noise branch, in the same shape as uv
         noise = torch.randn_like(uv) * self.sine_amp / 3
         return sine_merge, noise, uv
 
@@ -288,24 +285,19 @@ class SineGen2(torch.nn.Module):
         self.upsample_scale = upsample_scale
 
     def _f02uv(self, f0):
-        # generate uv signal
-        uv = (f0 > self.voiced_threshold).type(torch.float32)
+        uv = (f0 > self.voiced_threshold).type(f0.dtype)
         return uv
 
     def _f02sine(self, f0_values):
         """f0_values: (batchsize, length, dim)
         where dim indicates fundamental tone and overtones
         """
-        # convert to F0 in rad. The interger part n can be ignored
-        # because 2 * np.pi * n doesn't affect phase
         rad_values = (f0_values / self.sampling_rate) % 1
 
-        # initial phase noise (no noise for fundamental component)
         rand_ini = torch.rand(f0_values.shape[0], f0_values.shape[2], device=f0_values.device)
         rand_ini[:, 0] = 0
         rad_values[:, 0, :] = rad_values[:, 0, :] + rand_ini
 
-        # instantanouse phase sine[t] = sin(2*pi \sum_i=1 ^{t} rad)
         if not self.flag_for_pulse:
             rad_values = torch.nn.functional.interpolate(
                 rad_values.transpose(1, 2), scale_factor=1 / self.upsample_scale, mode="linear"
@@ -317,32 +309,19 @@ class SineGen2(torch.nn.Module):
             ).transpose(1, 2)
             sines = torch.sin(phase)
         else:
-            # If necessary, make sure that the first time step of every
-            # voiced segments is sin(pi) or cos(0)
-            # This is used for pulse-train generation
-
-            # identify the last time step in unvoiced segments
             uv = self._f02uv(f0_values)
             uv_1 = torch.roll(uv, shifts=-1, dims=1)
             uv_1[:, -1, :] = 1
             u_loc = (uv < 1) * (uv_1 > 0)
 
-            # get the instantanouse phase
             tmp_cumsum = torch.cumsum(rad_values, dim=1)
-            # different batch needs to be processed differently
             for idx in range(f0_values.shape[0]):
                 temp_sum = tmp_cumsum[idx, u_loc[idx, :, 0], :]
                 temp_sum[1:, :] = temp_sum[1:, :] - temp_sum[0:-1, :]
-                # stores the accumulation of i.phase within
-                # each voiced segments
                 tmp_cumsum[idx, :, :] = 0
                 tmp_cumsum[idx, u_loc[idx, :, 0], :] = temp_sum
 
-            # rad_values - tmp_cumsum: remove the accumulation of i.phase
-            # within the previous voiced segment.
             i_phase = torch.cumsum(rad_values - tmp_cumsum, dim=1)
-
-            # get the sines
             sines = torch.cos(i_phase * 2 * np.pi)
         return sines
 
@@ -353,24 +332,13 @@ class SineGen2(torch.nn.Module):
         output sine_tensor: tensor(batchsize=1, length, dim)
         output uv: tensor(batchsize=1, length, 1)
         """
-        # fundamental component
-        # fn = torch.multiply(f0, torch.FloatTensor([[range(1, self.harmonic_num + 2)]]).to(f0.device))
         fn = f0 * torch.arange(1, self.harmonic_num + 2, device=f0.device, dtype=f0.dtype)
 
-        # generate sine waveforms
         sine_waves = self._f02sine(fn) * self.sine_amp
-
-        # generate uv signal
         uv = self._f02uv(f0)
 
-        # noise: for unvoiced should be similar to sine_amp
-        #        std = self.sine_amp/3 -> max value ~ self.sine_amp
-        # .       for voiced regions is self.noise_std
         noise_amp = uv * self.noise_std + (1 - uv) * self.sine_amp / 3
         noise = noise_amp * torch.randn_like(sine_waves)
-
-        # first: set the unvoiced part to 0 by uv
-        # then: additive noise
         sine_waves = sine_waves * uv + noise
         return sine_waves, uv, noise
 
@@ -415,12 +383,10 @@ class SourceModuleHnNSF2(torch.nn.Module):
         Sine_source (batchsize, length, 1)
         noise_source (batchsize, length 1)
         """
-        # source for harmonic branch
         with torch.no_grad():
             sine_wavs, uv, _ = self.l_sin_gen(x)
         sine_merge = self.l_tanh(self.l_linear(sine_wavs))
 
-        # source for noise branch, in the same shape as uv
         noise = torch.randn_like(uv) * self.sine_amp / 3
         return sine_merge, noise, uv
 
@@ -497,7 +463,6 @@ class HiFTGenerator(nn.Module):
 
         self.num_kernels = len(resblock_kernel_sizes)
         self.num_upsamples = len(upsample_rates)
-        # NOTE in CosyVoice2, we use the original SourceModuleHnNSF implementation
         this_SourceModuleHnNSF = SourceModuleHnNSF if self.sampling_rate == 22050 else SourceModuleHnNSF2
         self.m_source = this_SourceModuleHnNSF(
             sampling_rate=sampling_rate,
@@ -513,7 +478,6 @@ class HiFTGenerator(nn.Module):
             Conv1d(in_channels, base_channels, 7, 1, padding=3)
         )
 
-        # Up
         self.ups = nn.ModuleList()
         for i, (u, k) in enumerate(zip(upsample_rates, upsample_kernel_sizes, strict=False)):
             self.ups.append(
@@ -528,7 +492,6 @@ class HiFTGenerator(nn.Module):
                 )
             )
 
-        # Down
         self.source_downs = nn.ModuleList()
         self.source_resblocks = nn.ModuleList()
         downsample_rates = [1] + upsample_rates[::-1][:-1]
@@ -590,13 +553,12 @@ class HiFTGenerator(nn.Module):
         magnitude = torch.clip(magnitude, max=1e2)
         real = magnitude * torch.cos(phase)
         img = magnitude * torch.sin(phase)
-        # inverse_transform = torch.istft(
-        #     torch.complex(real, img), self.istft_params["n_fft"], self.istft_params["hop_len"],
-        #     self.istft_params["n_fft"], window=self.stft_window.to(magnitude.device)
-        # )
         inverse_transform = self._istft_graph_safe(
-            torch.complex(real, img), self.istft_params["n_fft"], self.istft_params["hop_len"], self.stft_window
-        )
+            torch.complex(real.to(torch.float32), img.to(torch.float32)),
+            self.istft_params["n_fft"],
+            self.istft_params["hop_len"],
+            self.stft_window.to(magnitude.dtype)
+        ).to(magnitude.dtype)
         return inverse_transform
 
     def _istft_graph_safe(self, comp_tensor, n_fft, hop_len, window):
@@ -605,18 +567,11 @@ class HiFTGenerator(nn.Module):
         # Get dimensions from the original spectrogram
         _, _, n_frames = comp_tensor.shape
 
-        # 1. Calculate the full output signal length before trimming
-        # This is the length that the overlap-add procedure will produce
         expected_signal_len = n_fft + hop_len * (n_frames - 1)
 
-        # 2. Inverse FFT
-        # Perform iFFT on the original, unpadded spectrogram
         frames = torch.fft.irfft(comp_tensor.permute(0, 2, 1), n=n_fft)
-
-        # 3. Apply the synthesis window
         windowed_frames = frames * window
 
-        # 4. Overlap-Add using F.fold
         frames_for_fold = windowed_frames.permute(0, 2, 1)
         reconstructed_full = F.fold(
             frames_for_fold, output_size=(1, expected_signal_len), kernel_size=(1, n_fft), stride=(1, hop_len)
@@ -628,12 +583,9 @@ class HiFTGenerator(nn.Module):
         win_sq_padded = ones * win_sq.view(1, -1, 1)
         denom = F.fold(win_sq_padded, output_size=(1, expected_signal_len), kernel_size=(1, n_fft), stride=(1, hop_len))
 
-        # Apply normalization, avoiding division by zero
         denom = torch.where(denom > 1e-8, denom, torch.ones_like(denom))
         reconstructed_full /= denom
 
-        # 6. Trim the ends to match the behavior of `center=True`
-        # This is the correct way to handle the centering logic in the inverse transform
         pad_amount = n_fft // 2
         final_signal = reconstructed_full.squeeze(2).squeeze(1)[:, pad_amount:-pad_amount]
 
@@ -641,7 +593,7 @@ class HiFTGenerator(nn.Module):
 
     def decode(self, x: torch.Tensor, s: torch.Tensor = torch.zeros(1, 1, 0)) -> torch.Tensor:
         s_stft_real, s_stft_imag = self._stft(s.squeeze(1))
-        s_stft = torch.cat([s_stft_real, s_stft_imag], dim=1)
+        s_stft = torch.cat([s_stft_real, s_stft_imag], dim=1).to(x.dtype)
 
         x = self.conv_pre(x)
         for i in range(self.num_upsamples):
@@ -651,7 +603,6 @@ class HiFTGenerator(nn.Module):
             if i == self.num_upsamples - 1:
                 x = self.reflection_pad(x)
 
-            # fusion
             si = self.source_downs[i](s_stft)
             si = self.source_resblocks[i](si)
             x = x + si
@@ -667,7 +618,7 @@ class HiFTGenerator(nn.Module):
         x = F.leaky_relu(x)
         x = self.conv_post(x)
         magnitude = torch.exp(x[:, : self.istft_params["n_fft"] // 2 + 1, :])
-        phase = torch.sin(x[:, self.istft_params["n_fft"] // 2 + 1 :, :])  # actually, sin is redundancy
+        phase = torch.sin(x[:, self.istft_params["n_fft"] // 2 + 1 :, :])
 
         x = self._istft(magnitude, phase)
         x = torch.clamp(x, -self.audio_limit, self.audio_limit)
@@ -675,14 +626,38 @@ class HiFTGenerator(nn.Module):
 
     @torch.inference_mode()
     def forward(self, speech_feat: torch.Tensor, cache_source: torch.Tensor = torch.zeros(1, 1, 0)) -> torch.Tensor:
-        # mel->f0
         f0 = self.f0_predictor(speech_feat)
-        # f0->source
-        s = self.f0_upsamp(f0[:, None]).transpose(1, 2)  # bs,n,t
+        s = self.f0_upsamp(f0[:, None]).transpose(1, 2)
         s, _, _ = self.m_source(s)
         s = s.transpose(1, 2)
-        # use cache_source to avoid glitch
         if cache_source.shape[2] != 0:
             s[:, :, : cache_source.shape[2]] = cache_source
+        generated_speech = self.decode(x=speech_feat, s=s)
+        return generated_speech, s
+
+    @torch.inference_mode()
+    def forward_chunk(
+        self,
+        speech_feat: torch.Tensor,
+        cache_source: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, HiFTGeneratorCache]:
+        """Forward with caching for streaming inference.
+
+        Args:
+            speech_feat: Mel spectrogram features for current chunk
+            cache: Previous cache state with mel, source, and speech history
+            last_chunk: Whether this is the last chunk
+
+        Returns:
+            Tuple of (generated_audio, updated_cache)
+        """
+        f0 = self.f0_predictor(speech_feat)
+        s = self.f0_upsamp(f0[:, None]).transpose(1, 2)
+        s, _, _ = self.m_source(s)
+        s = s.transpose(1, 2)
+
+        if cache_source is not None and cache_source.shape[2] > 0:
+            s[:, :, :cache_source.shape[2]] = cache_source
+
         generated_speech = self.decode(x=speech_feat, s=s)
         return generated_speech, s

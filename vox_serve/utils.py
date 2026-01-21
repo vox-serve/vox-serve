@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 import os
@@ -6,6 +7,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, List, Optional
+from urllib.parse import unquote, urlparse
 
 import requests
 import torch
@@ -147,7 +149,7 @@ def download_github_file(owner: str, repo: str, path: str, branch: str = "main",
     dest = cache_dir / owner / repo / branch / path
     dest.parent.mkdir(parents=True, exist_ok=True)
 
-    # If we’ve already downloaded it, just return
+    # If we've already downloaded it, just return
     if dest.exists():
         return dest
 
@@ -156,6 +158,64 @@ def download_github_file(owner: str, repo: str, path: str, branch: str = "main",
     resp = requests.get(url)
     resp.raise_for_status()
     dest.write_bytes(resp.content)
+    return dest
+
+
+def download_audio_from_url(url: str, cache_dir: str = None, filename: str = None) -> Path:
+    """
+    Download an audio file from a URL (excluding HuggingFace and GitHub), caching it locally.
+
+    Args:
+        url: The URL of the audio file to download
+        cache_dir: Optional cache directory. If None, uses ~/.cache/voxserve-files/audio
+        filename: Optional filename for the cached file. If None, extracts from URL or uses a hash
+
+    Returns:
+        Path to the cached audio file
+
+    Raises:
+        ValueError: If the URL is from HuggingFace or GitHub
+        requests.RequestException: If the download fails
+    """
+    # Check if URL is from HuggingFace or GitHub
+    url_lower = url.lower()
+    if "huggingface.co" in url_lower or "hf.co" in url_lower:
+        raise ValueError("HuggingFace URLs are not supported. Use HuggingFace Hub tools instead.")
+    if "github.com" in url_lower or "raw.githubusercontent.com" in url_lower:
+        raise ValueError("GitHub URLs are not supported. Use download_github_file() instead.")
+
+    # Decide on a cache directory
+    if cache_dir is None:
+        cache_dir = Path.home() / ".cache" / "voxserve-files" / "audio"
+    else:
+        cache_dir = Path(cache_dir) / "audio"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    # Determine filename
+    if filename is None:
+        # Try to extract filename from URL
+        parsed = urlparse(url)
+        filename = unquote(parsed.path.split("/")[-1])
+        # If no filename in URL, generate one from URL hash
+        if not filename or "." not in filename:
+            url_hash = hashlib.md5(url.encode()).hexdigest()[:12]
+            filename = f"audio_{url_hash}.wav"  # Default to .wav if unknown
+
+    dest = cache_dir / filename
+
+    # If we've already downloaded it, just return
+    if dest.exists():
+        return dest
+
+    # Download the file
+    resp = requests.get(url, stream=True)
+    resp.raise_for_status()
+
+    # Write to file
+    with open(dest, "wb") as f:
+        for chunk in resp.iter_content(chunk_size=8192):
+            f.write(chunk)
+
     return dest
 
 

@@ -33,6 +33,8 @@ curl -X POST "http://localhost:<port-number>/generate" -F "text=Hello world" -F 
 
 We currently support the following TTS and STS models:
 
+- `chatterbox`: [Chatterbox TTS](https://huggingface.co/ResembleAI/chatterbox)
+- `cosyvoice2`: [CosyVoice2-0.5B](https://huggingface.co/FunAudioLLM/CosyVoice2-0.5B)
 - `csm`: [CSM-1B](https://huggingface.co/sesame/csm-1b)
 - `orpheus`: [Orpheus-3B](https://huggingface.co/canopylabs/orpheus-3b-0.1-ft)
 - `zonos`: [Zonos-v0.1](https://huggingface.co/Zyphra/Zonos-v0.1-transformer)
