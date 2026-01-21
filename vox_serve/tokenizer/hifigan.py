@@ -1,6 +1,7 @@
 # adopted from https://github.com/xingchensong/FlashCosyVoice
 
-from typing import Dict, List
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -17,6 +18,16 @@ except ImportError:
 
 
 from torch.distributions.uniform import Uniform
+
+from .base import DecoderCache
+
+
+@dataclass
+class HiFTGeneratorCache(DecoderCache):
+    """Cache for HiFTGenerator streaming inference."""
+    mel_cache: Optional[torch.Tensor] = None
+    source_cache: Optional[torch.Tensor] = None
+    speech_cache: Optional[torch.Tensor] = None
 
 
 def get_padding(kernel_size, dilation=1):
@@ -689,5 +700,36 @@ class HiFTGenerator(nn.Module):
         # use cache_source to avoid glitch
         if cache_source.shape[2] != 0:
             s[:, :, : cache_source.shape[2]] = cache_source
+        generated_speech = self.decode(x=speech_feat, s=s)
+        return generated_speech, s
+
+    @torch.inference_mode()
+    def forward_chunk(
+        self,
+        speech_feat: torch.Tensor,
+        cache_source: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, HiFTGeneratorCache]:
+        """Forward with caching for streaming inference.
+        
+        Args:
+            speech_feat: Mel spectrogram features for current chunk
+            cache: Previous cache state with mel, source, and speech history
+            last_chunk: Whether this is the last chunk
+            
+        Returns:
+            Tuple of (generated_audio, updated_cache)
+        """
+        # mel->f0
+        f0 = self.f0_predictor(speech_feat)
+        # f0->source
+        s = self.f0_upsamp(f0[:, None]).transpose(1, 2)  # bs,n,t
+        s, _, _ = self.m_source(s)
+        s = s.transpose(1, 2)
+        
+        # Use cached source to avoid glitch at chunk boundaries
+        if cache_source is not None and cache_source.shape[2] > 0:
+            s[:, :, :cache_source.shape[2]] = cache_source
+
+        # Generate audio
         generated_speech = self.decode(x=speech_feat, s=s)
         return generated_speech, s

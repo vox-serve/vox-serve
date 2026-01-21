@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from functools import lru_cache
 from typing import List, Optional, OrderedDict, Tuple, Union
 
@@ -14,15 +15,42 @@ from torch import nn
 from torch.nn.utils.rnn import pad_sequence
 
 from ..utils import download_github_file
+from .base import DecoderCache
 from .cosyvoice_flow import (
     CausalConditionalCFM,
     CausalConditionalDecoder,
     CausalMaskedDiffWithXvec,
     UpsampleConformerEncoder,
 )
-from .hifigan import ConvRNNF0Predictor, HiFTGenerator
+from .cosyvoice_flow import FlowEncoderCache, FlowDecoderCache
+from .hifigan import ConvRNNF0Predictor, HiFTGenerator, HiFTGeneratorCache
 from .s3 import ModelConfig as S3ModelConfig
 from .s3 import S3TokenizerV2
+
+
+@dataclass
+class CosyVoice2DecoderCache(DecoderCache):
+    """Cache tensors used by CosyVoice2Decoder.
+
+    Simplified structure using FlowEncoderCache, FlowDecoderCache, and HiFTGeneratorCache.
+    """
+    # Flow encoder and decoder caches
+    flow_encoder_cache: Optional[FlowEncoderCache] = None
+    flow_decoder_cache: Optional[FlowDecoderCache] = None
+
+    # HiFT (vocoder) cache - now stores the complete HiFTGeneratorCache object
+    hift_cache: Optional[HiFTGeneratorCache] = None
+
+
+def fade_in_out(fade_in_mel: torch.Tensor, fade_out_mel: torch.Tensor, window: torch.Tensor):
+    """perform fade_in_out in tensor style"""
+    mel_overlap_len = int(window.shape[0] / 2)
+    fade_in_mel = fade_in_mel.clone()
+    fade_in_mel[..., :mel_overlap_len] = (
+        fade_in_mel[..., :mel_overlap_len] * window[:mel_overlap_len]
+        + fade_out_mel[..., -mel_overlap_len:] * window[mel_overlap_len:]
+    )
+    return fade_in_mel
 
 
 class AttrDict(dict):
@@ -758,6 +786,8 @@ class CosyVoice2Decoder(nn.Module):
     """
 
     S3GEN_SR = 24000
+    MAX_CACHE_LEN = 128  # Maximum attention cache length for sliding window
+    PREFIX_LEN = 16  # Number of prefix tokens to keep for attention sink approach
 
     def __init__(self, model_path, device):
         super().__init__()
@@ -843,7 +873,7 @@ class CosyVoice2Decoder(nn.Module):
             for k, v in torch.load(hift_path, map_location="cpu", weights_only=True).items()
         }
         self.hift.load_state_dict(hift_state_dict, strict=True)
-        self.hift.to(self.device).to(torch.bfloat16).eval()
+        self.hift.to(self.device).eval()
 
         # silence out a few ms and fade audio in to reduce artifacts
         n_trim = self.S3GEN_SR // 50  # 20ms = half of a frame
@@ -851,6 +881,178 @@ class CosyVoice2Decoder(nn.Module):
         trim_fade[n_trim:] = (torch.cos(torch.linspace(torch.pi, 0, n_trim)) + 1) / 2
         self.register_buffer("trim_fade", trim_fade, persistent=False)  # (buffers get automatic device casting)
 
+        # Cache configuration for streaming
+        self.mel_cache_len = 6 # cache length for mel spectrograms
+        self.source_cache_len = int(self.mel_cache_len * 480)  # 50hz mel -> 24kHz wave conversion
+        self.speech_window = torch.from_numpy(np.hamming(2 * self.source_cache_len)).to(self.device)
+
+    def init_cache(self, ref_dict: dict) -> CosyVoice2DecoderCache:
+        """Initialize cache for streaming inference by processing speech tokens."""
+        # Get prompt speech tokens for cache initialization
+        prompt_speech_tokens = torch.cat([
+            ref_dict["prompt_speech_token"], 
+            ref_dict["prompt_speech_token"][:, :3],
+        ], dim=1).to(self.device)
+        prompt_speech_token_len = torch.ones(
+            1, device=self.device, dtype=torch.long
+        ) * (ref_dict["prompt_speech_token_len"] + 3)
+        
+        # Initialize empty caches
+        empty_encoder_cache = FlowEncoderCache()
+        empty_decoder_cache = FlowDecoderCache()
+        
+        # Process speech tokens through flow.forward_chunk to initialize caches
+        with torch.no_grad():
+            prompt_mels, flow_encoder_cache, flow_decoder_cache = self.flow.forward_chunk(
+                token=prompt_speech_tokens,
+                token_len=prompt_speech_token_len,
+                prompt_feat=ref_dict["prompt_feat"],
+                prompt_feat_len=ref_dict["prompt_feat_len"],
+                embedding=ref_dict["embedding"],
+                encoder_cache=empty_encoder_cache,
+                decoder_cache=empty_decoder_cache,
+                last_chunk=False,
+            )
+
+        if flow_encoder_cache.conformer_att_cache is not None:
+            # flow_encoder_cache.conformer_att_cache = flow_encoder_cache.conformer_att_cache[:, :, :, :self.PREFIX_LEN // 2, :]
+            # Attention sink approach: keep first PREFIX_LEN and last MAX_CACHE_LEN // 2 - PREFIX_LEN tokens
+            cache_len = flow_encoder_cache.conformer_att_cache.shape[3]
+            max_len = self.MAX_CACHE_LEN // 2
+            if cache_len > max_len:
+                prefix = flow_encoder_cache.conformer_att_cache[:, :, :, :self.PREFIX_LEN // 2, :]
+                suffix = flow_encoder_cache.conformer_att_cache[:, :, :, -(max_len - self.PREFIX_LEN // 2):, :]
+                flow_encoder_cache.conformer_att_cache = torch.cat([prefix, suffix], dim=3)
+
+        if flow_encoder_cache.up_conformer_att_cache is not None:
+            # flow_encoder_cache.up_conformer_att_cache = flow_encoder_cache.up_conformer_att_cache[:, :, :, :self.PREFIX_LEN, :]
+            # Attention sink approach: keep first PREFIX_LEN and last MAX_CACHE_LEN - PREFIX_LEN tokens
+            cache_len = flow_encoder_cache.up_conformer_att_cache.shape[3]
+            if cache_len > self.MAX_CACHE_LEN:
+                prefix = flow_encoder_cache.up_conformer_att_cache[:, :, :, :self.PREFIX_LEN, :]
+                suffix = flow_encoder_cache.up_conformer_att_cache[:, :, :, -(self.MAX_CACHE_LEN - self.PREFIX_LEN):, :]
+                flow_encoder_cache.up_conformer_att_cache = torch.cat([prefix, suffix], dim=3)
+
+        if flow_decoder_cache.att_cache is not None:
+            # Attention sink approach: keep first PREFIX_LEN and last MAX_CACHE_LEN - PREFIX_LEN tokens
+            cache_len = flow_decoder_cache.att_cache.shape[5]
+            if cache_len > self.MAX_CACHE_LEN:
+                prefix = flow_decoder_cache.att_cache[:, :, :, :, :, :self.PREFIX_LEN, :]
+                suffix = flow_decoder_cache.att_cache[:, :, :, :, :, -(self.MAX_CACHE_LEN - self.PREFIX_LEN):, :]
+                flow_decoder_cache.att_cache = torch.cat([prefix, suffix], dim=5)
+
+        # Initialize HiFT cache with real mel values from prompt processing
+        initial_mel_cache = prompt_mels[:, :, -self.mel_cache_len:]
+        
+        hift_cache = HiFTGeneratorCache(
+            mel_cache=initial_mel_cache,
+            source_cache=torch.zeros(1, 1, self.source_cache_len, device=self.device, dtype=torch.float32),
+            speech_cache=torch.zeros(1, self.source_cache_len, device=self.device, dtype=torch.bfloat16),
+        )
+
+        return CosyVoice2DecoderCache(
+            flow_encoder_cache=flow_encoder_cache,
+            flow_decoder_cache=flow_decoder_cache,
+            hift_cache=hift_cache,
+        )
+
+    @torch.inference_mode()
+    def decode_chunk(
+        self,
+        speech_tokens: torch.Tensor,
+        speech_token_lens: int,
+        decoder_cache: CosyVoice2DecoderCache,
+        ref_dict: Optional[dict] = None,
+        last_chunk: bool = False,
+    ) -> Tuple[torch.Tensor, CosyVoice2DecoderCache]:
+        """Forward pass with caching for streaming inference.
+        
+        Args:
+            speech_tokens: Token sequence to decode
+            speech_token_lens: Length of token sequence
+            decoder_cache: Cache state from previous chunk
+            ref_dict: Reference audio features
+            last_chunk: Whether this is the last chunk
+            
+        Returns:
+            Tuple of (audio_output, updated_cache)
+        """
+
+        if len(speech_tokens.shape) == 1:
+            speech_tokens = speech_tokens.unsqueeze(0)
+
+        # Convert speech_token_lens to tensor if it's an int
+        if isinstance(speech_token_lens, int):
+            speech_token_lens = torch.ones(speech_tokens.size(0), device=self.device, dtype=torch.long) * speech_token_lens
+
+        output_mels, new_flow_encoder_cache, new_flow_decoder_cache = self.flow.forward_chunk(
+            token=speech_tokens,
+            token_len=speech_token_lens,
+            prompt_feat=torch.zeros(1, 0, 80, device=self.device, dtype=torch.bfloat16),
+            prompt_feat_len=0,
+            embedding=ref_dict["embedding"],
+            encoder_cache=decoder_cache.flow_encoder_cache,
+            decoder_cache=decoder_cache.flow_decoder_cache,
+            last_chunk=last_chunk,
+        )
+
+        if new_flow_encoder_cache.conformer_att_cache is not None:
+            # Attention sink approach: keep first PREFIX_LEN and last MAX_CACHE_LEN // 2 - PREFIX_LEN tokens
+            cache_len = new_flow_encoder_cache.conformer_att_cache.shape[3]
+            max_len = self.MAX_CACHE_LEN // 2
+            if cache_len > max_len:
+                prefix = new_flow_encoder_cache.conformer_att_cache[:, :, :, :self.PREFIX_LEN // 2, :]
+                suffix = new_flow_encoder_cache.conformer_att_cache[:, :, :, -(max_len - self.PREFIX_LEN // 2):, :]
+                new_flow_encoder_cache.conformer_att_cache = torch.cat([prefix, suffix], dim=3)
+
+        if new_flow_encoder_cache.up_conformer_att_cache is not None:
+            # Attention sink approach: keep first PREFIX_LEN and last MAX_CACHE_LEN - PREFIX_LEN tokens
+            cache_len = new_flow_encoder_cache.up_conformer_att_cache.shape[3]
+            if cache_len > self.MAX_CACHE_LEN:
+                prefix = new_flow_encoder_cache.up_conformer_att_cache[:, :, :, :self.PREFIX_LEN, :]
+                suffix = new_flow_encoder_cache.up_conformer_att_cache[:, :, :, -(self.MAX_CACHE_LEN - self.PREFIX_LEN):, :]
+                new_flow_encoder_cache.up_conformer_att_cache = torch.cat([prefix, suffix], dim=3)
+
+        if new_flow_decoder_cache.att_cache is not None:
+            # Attention sink approach: keep first PREFIX_LEN and last MAX_CACHE_LEN - PREFIX_LEN tokens
+            cache_len = new_flow_decoder_cache.att_cache.shape[5]
+            if cache_len > self.MAX_CACHE_LEN:
+                prefix = new_flow_decoder_cache.att_cache[:, :, :, :, :, :self.PREFIX_LEN, :]
+                suffix = new_flow_decoder_cache.att_cache[:, :, :, :, :, -(self.MAX_CACHE_LEN - self.PREFIX_LEN):, :]
+                new_flow_decoder_cache.att_cache = torch.cat([prefix, suffix], dim=5)
+
+        # HiFT forward pass with caching
+        # output_mels = torch.concat(
+        #     [decoder_cache.hift_cache.mel_cache, output_mels], 
+        #     dim=2, 
+        # ).to(torch.float32).to(self.device)
+
+        output_mels = output_mels.to(torch.float32).to(self.device)
+        output_wavs, source = self.hift.forward_chunk(
+            output_mels,
+            # decoder_cache.hift_cache.source_cache,
+        )
+        output_wavs = fade_in_out(
+            output_wavs, 
+            decoder_cache.hift_cache.speech_cache, 
+            self.speech_window,
+        )
+
+        new_hift_cache = HiFTGeneratorCache(
+            mel_cache=output_mels[..., -self.mel_cache_len:],
+            source_cache=source[:, :, -self.source_cache_len:],
+            speech_cache=output_wavs[:, -self.source_cache_len:],
+        )
+        output_wavs = output_wavs[:, :-self.source_cache_len]
+
+        # Update caches
+        updated_cache = CosyVoice2DecoderCache(
+            flow_encoder_cache=new_flow_encoder_cache,
+            flow_decoder_cache=new_flow_decoder_cache,
+            hift_cache=new_hift_cache,
+        )
+
+        return output_wavs, updated_cache
 
     @torch.inference_mode()
     def decode(

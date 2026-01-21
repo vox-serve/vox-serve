@@ -15,7 +15,9 @@ from transformers import AutoTokenizer
 from ..flashinfer_utils import FlashInferWrapper, apply_rope_pos_ids, rms_norm
 from ..requests import Request
 from ..sampling import Sampler, SamplingConfig
-from ..tokenizer.cosyvoice2 import CosyVoice2Decoder
+from ..tokenizer.cosyvoice2 import CosyVoice2Decoder, CosyVoice2DecoderCache
+from ..tokenizer.cosyvoice_flow import FlowDecoderCache, FlowEncoderCache
+from ..tokenizer.hifigan import HiFTGeneratorCache
 from ..tokenizer.s3 import S3TokenizerV2
 from ..utils import download_audio_from_url, get_logger
 from .base import BaseLM, PreprocessOutput
@@ -378,6 +380,120 @@ class CosyVoice2Model(BaseLM):
 
         self._init_default_cond()
 
+        # Initialize decoder cache after default conditions are set
+        self._audio_decoder_initial_cache = self.audio_decoder.init_cache(self.default_speaker_ref_dict)
+
+    def _expand_flow_encoder_cache(self, cache: FlowEncoderCache, batch_size: int) -> FlowEncoderCache:
+        """Expand flow encoder cache to match the given batch size."""
+        if batch_size == 1:
+            # return a deep copy so per-request cache state is isolated
+            return FlowEncoderCache(
+                conformer_att_cache=cache.conformer_att_cache.clone()
+                if cache.conformer_att_cache is not None
+                else None,
+                conformer_cnn_cache=cache.conformer_cnn_cache.clone()
+                if cache.conformer_cnn_cache is not None
+                else None,
+                up_conformer_att_cache=cache.up_conformer_att_cache.clone()
+                if cache.up_conformer_att_cache is not None
+                else None,
+                up_conformer_cnn_cache=cache.up_conformer_cnn_cache.clone()
+                if cache.up_conformer_cnn_cache is not None
+                else None,
+            )
+
+        # Expand conformer attention caches (batch dimension is typically dim 0)
+        new_conformer_att_cache = None 
+        if cache.conformer_att_cache is not None and cache.conformer_att_cache.numel() > 0:
+            new_conformer_att_cache = cache.conformer_att_cache.repeat(batch_size, *[1] * (cache.conformer_att_cache.dim() - 1))
+
+        # Expand conformer CNN caches (batch dimension is typically dim 0)
+        new_conformer_cnn_cache = None
+        if cache.conformer_cnn_cache is not None and cache.conformer_cnn_cache.numel() > 0:
+            new_conformer_cnn_cache = cache.conformer_cnn_cache.repeat(batch_size, *[1] * (cache.conformer_cnn_cache.dim() - 1))
+
+        # Expand up-sampling conformer attention caches
+        new_up_conformer_att_cache = None
+        if cache.up_conformer_att_cache is not None and cache.up_conformer_att_cache.numel() > 0:
+            new_up_conformer_att_cache = cache.up_conformer_att_cache.repeat(batch_size, *[1] * (cache.up_conformer_att_cache.dim() - 1))
+
+        # Expand up-sampling conformer CNN caches
+        new_up_conformer_cnn_cache = None
+        if cache.up_conformer_cnn_cache is not None and cache.up_conformer_cnn_cache.numel() > 0:
+            new_up_conformer_cnn_cache = cache.up_conformer_cnn_cache.repeat(batch_size, *[1] * (cache.up_conformer_cnn_cache.dim() - 1))
+
+        return FlowEncoderCache(
+            conformer_att_cache=new_conformer_att_cache,
+            conformer_cnn_cache=new_conformer_cnn_cache,
+            up_conformer_att_cache=new_up_conformer_att_cache,
+            up_conformer_cnn_cache=new_up_conformer_cnn_cache,
+        )
+
+    def _expand_flow_decoder_cache(self, cache: FlowDecoderCache, batch_size: int) -> FlowDecoderCache:
+        """Expand flow decoder cache to match the given batch size."""
+        if batch_size == 1:
+            # IMPORTANT: return a deep copy so per-request cache state is isolated.
+            return FlowDecoderCache(
+                cnn_cache=[
+                    [
+                        (layer_cache.clone() if layer_cache is not None else None)
+                        for layer_cache in timestep_cache
+                    ]
+                    for timestep_cache in cache.cnn_cache
+                ]
+                if cache.cnn_cache is not None
+                else None,
+                att_cache=cache.att_cache.clone() if cache.att_cache is not None else None,
+            )
+
+        # Expand CNN cache: List[List[torch.Tensor]] where inner tensors have shape (batch, 2, channels, 2)
+        # We need to repeat along the batch dimension (dim 0)
+        new_cnn_cache = None
+        if cache.cnn_cache is not None:
+            new_cnn_cache = [
+                [
+                    layer_cache.repeat(batch_size, 1, 1, 1) if layer_cache is not None else None
+                    for layer_cache in timestep_cache
+                ]
+                for timestep_cache in cache.cnn_cache
+            ]
+
+        # Expand attention cache: (batch, 2, n_timesteps, n_layers, num_heads, seq_len, 2*head_dim)
+        # batch dimension is at index 0, CFG dimension (2) is at index 1
+        # We need to repeat along the batch dimension only
+        new_att_cache = None
+        if cache.att_cache is not None:
+            new_att_cache = cache.att_cache.repeat(batch_size, 1, 1, 1, 1, 1, 1)
+
+        return FlowDecoderCache(
+            cnn_cache=new_cnn_cache,
+            att_cache=new_att_cache,
+        )
+
+    def audio_decoder_initial_cache(self, batch_size: int):
+        """Create initial decoder cache for the given batch size."""
+        base_cache = self._audio_decoder_initial_cache
+
+        # Expand flow caches to match the batch size
+        expanded_encoder_cache = self._expand_flow_encoder_cache(base_cache.flow_encoder_cache, batch_size)
+        expanded_decoder_cache = self._expand_flow_decoder_cache(base_cache.flow_decoder_cache, batch_size)
+
+        # Expand HiFT cache
+        expanded_hift_cache = None
+        if base_cache.hift_cache is not None:
+            expanded_hift_cache = HiFTGeneratorCache(
+                mel_cache=base_cache.hift_cache.mel_cache.repeat(batch_size, 1, 1) if base_cache.hift_cache.mel_cache is not None else None,
+                source_cache=base_cache.hift_cache.source_cache.repeat(batch_size, 1, 1) if base_cache.hift_cache.source_cache is not None else None,
+                speech_cache=base_cache.hift_cache.speech_cache.repeat(batch_size, 1) if base_cache.hift_cache.speech_cache is not None else None,
+            )
+
+        # Clone cache tensors for the given batch size
+        return CosyVoice2DecoderCache(
+            flow_encoder_cache=expanded_encoder_cache,
+            flow_decoder_cache=expanded_decoder_cache,
+            hift_cache=expanded_hift_cache,
+        )
+
     @property
     def n_codebooks(self):
         """Number of codebooks in the model."""
@@ -728,11 +844,11 @@ class CosyVoice2Model(BaseLM):
 
         self.default_speaker_ref_dict = {
             'ref_text_ids': ref_text_ids,
-            'prompt_feat': speech_feat,
+            'prompt_feat': speech_feat.to(torch.bfloat16),
             'prompt_feat_len': speech_feat_len,
             'prompt_speech_token': speech_token,
             'prompt_speech_token_len': speech_token_len,
-            'embedding': embedding,
+            'embedding': embedding.to(torch.bfloat16),
         }
 
     @torch.no_grad()
@@ -801,11 +917,15 @@ class CosyVoice2Model(BaseLM):
                 device=self.device,
             )
 
+        # Initial decoder cache for this request (default cache), sized for batch 1
+        decoder_cache = self.audio_decoder_initial_cache(batch_size=1)
+
         return PreprocessOutput(
             input_tokens=input_ids,
             repetition_cache=repetition_cache,
             input_masks=input_masks,
             input_features=input_features,
+            decoder_cache=decoder_cache,
         )
 
     def forward(
@@ -893,12 +1013,18 @@ class CosyVoice2Model(BaseLM):
 
         return output_ids, task
 
-    def postprocess(self, token_ids: torch.Tensor):
-        audio_tensor = self.audio_decoder.decode(
+    def postprocess(self, token_ids: torch.Tensor, decoder_cache: CosyVoice2DecoderCache):
+        audio_tensor, new_decoder_cache = self.audio_decoder.decode_chunk(
             token_ids[:, :, 0],
             speech_token_lens=self.detokenize_interval,
+            decoder_cache=decoder_cache,
             ref_dict=self.default_speaker_ref_dict,
         )
+
+        # Update cache in place to maintain state across chunks (required for CUDA graphs)
+        # The decoder already applied sliding window to ensure constant shapes
+        decoder_cache.copy_from(new_decoder_cache)
+
         return audio_tensor[:, None, :]  # add channel dimension
 
 if __name__ == "__main__":

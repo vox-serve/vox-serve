@@ -797,7 +797,7 @@ class CudaGraphWorker(ModelWorker):
         # Check if we can use CUDA graphs for this batch
         if self._get_prefill_cuda_graph_key(actual_batch_size, actual_seq_len) is None:
             # fallback to prefill implementation of parent class
-            raise RuntimeError("No suitable prefill CUDA graph found")
+            raise RuntimeError(f"No suitable prefill CUDA graph found for batch_size={actual_batch_size}, seq_len={actual_seq_len}")
             super().run_lm_prefill(requests, lm_inputs)
             return
 
@@ -1186,12 +1186,9 @@ class CudaGraphWorker(ModelWorker):
         if self.cuda_graph_buffers["detokenize_cache"] is not None:
             # Merge per-request caches along batch dimension
             batched_cache = DecoderCache.cat(decoder_caches)
-            # Copy data from batched_cache into cache_buffer
-            for field in dataclasses.fields(batched_cache):
-                field_name = field.name
-                src_tensor = getattr(batched_cache, field_name)
-                dst_tensor = getattr(self.cuda_graph_buffers["detokenize_cache"][:actual_batch_size], field_name)
-                dst_tensor[:actual_batch_size].copy_(src_tensor)
+            # Slice the buffer to the actual batch size and copy data from batched_cache
+            sliced_buffer = self.cuda_graph_buffers["detokenize_cache"][:actual_batch_size]
+            sliced_buffer.copy_from(batched_cache)
 
         graph = self.cuda_graphs_detokenization[padded_batch_size]
 
@@ -1207,10 +1204,8 @@ class CudaGraphWorker(ModelWorker):
         if self.cuda_graph_buffers["detokenize_cache"] is not None:
             for i, (req_idx, _chunk_idx) in enumerate(request_chunk_mapping):
                 req = requests[req_idx]
-                for f in dataclasses.fields(type(req.decoder_cache)):
-                    src = getattr(self.cuda_graph_buffers["detokenize_cache"], f.name)[i : i + 1]
-                    dst = getattr(req.decoder_cache, f.name)
-                    dst.copy_(src)
+                # Slice the buffer for this specific request and copy to the request's cache
+                req.decoder_cache.copy_from(self.cuda_graph_buffers["detokenize_cache"][i : i + 1])
 
         if self.needs_watermarking:
             for i in range(audio_tensors.shape[0]):
