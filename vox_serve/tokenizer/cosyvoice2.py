@@ -20,9 +20,10 @@ from .cosyvoice_flow import (
     CausalConditionalCFM,
     CausalConditionalDecoder,
     CausalMaskedDiffWithXvec,
+    FlowDecoderCache,
+    FlowEncoderCache,
     UpsampleConformerEncoder,
 )
-from .cosyvoice_flow import FlowEncoderCache, FlowDecoderCache
 from .hifigan import ConvRNNF0Predictor, HiFTGenerator, HiFTGeneratorCache
 from .s3 import ModelConfig as S3ModelConfig
 from .s3 import S3TokenizerV2
@@ -890,17 +891,17 @@ class CosyVoice2Decoder(nn.Module):
         """Initialize cache for streaming inference by processing speech tokens."""
         # Get prompt speech tokens for cache initialization
         prompt_speech_tokens = torch.cat([
-            ref_dict["prompt_speech_token"], 
+            ref_dict["prompt_speech_token"],
             ref_dict["prompt_speech_token"][:, :3],
         ], dim=1).to(self.device)
         prompt_speech_token_len = torch.ones(
             1, device=self.device, dtype=torch.long
         ) * (ref_dict["prompt_speech_token_len"] + 3)
-        
+
         # Initialize empty caches
         empty_encoder_cache = FlowEncoderCache()
         empty_decoder_cache = FlowDecoderCache()
-        
+
         # Process speech tokens through flow.forward_chunk to initialize caches
         with torch.no_grad():
             prompt_mels, flow_encoder_cache, flow_decoder_cache = self.flow.forward_chunk(
@@ -915,8 +916,6 @@ class CosyVoice2Decoder(nn.Module):
             )
 
         if flow_encoder_cache.conformer_att_cache is not None:
-            # flow_encoder_cache.conformer_att_cache = flow_encoder_cache.conformer_att_cache[:, :, :, :self.PREFIX_LEN // 2, :]
-            # Attention sink approach: keep first PREFIX_LEN and last MAX_CACHE_LEN // 2 - PREFIX_LEN tokens
             cache_len = flow_encoder_cache.conformer_att_cache.shape[3]
             max_len = self.MAX_CACHE_LEN // 2
             if cache_len > max_len:
@@ -925,8 +924,6 @@ class CosyVoice2Decoder(nn.Module):
                 flow_encoder_cache.conformer_att_cache = torch.cat([prefix, suffix], dim=3)
 
         if flow_encoder_cache.up_conformer_att_cache is not None:
-            # flow_encoder_cache.up_conformer_att_cache = flow_encoder_cache.up_conformer_att_cache[:, :, :, :self.PREFIX_LEN, :]
-            # Attention sink approach: keep first PREFIX_LEN and last MAX_CACHE_LEN - PREFIX_LEN tokens
             cache_len = flow_encoder_cache.up_conformer_att_cache.shape[3]
             if cache_len > self.MAX_CACHE_LEN:
                 prefix = flow_encoder_cache.up_conformer_att_cache[:, :, :, :self.PREFIX_LEN, :]
@@ -934,7 +931,6 @@ class CosyVoice2Decoder(nn.Module):
                 flow_encoder_cache.up_conformer_att_cache = torch.cat([prefix, suffix], dim=3)
 
         if flow_decoder_cache.att_cache is not None:
-            # Attention sink approach: keep first PREFIX_LEN and last MAX_CACHE_LEN - PREFIX_LEN tokens
             cache_len = flow_decoder_cache.att_cache.shape[5]
             if cache_len > self.MAX_CACHE_LEN:
                 prefix = flow_decoder_cache.att_cache[:, :, :, :, :, :self.PREFIX_LEN, :]
@@ -943,7 +939,7 @@ class CosyVoice2Decoder(nn.Module):
 
         # Initialize HiFT cache with real mel values from prompt processing
         initial_mel_cache = prompt_mels[:, :, -self.mel_cache_len:]
-        
+
         hift_cache = HiFTGeneratorCache(
             mel_cache=initial_mel_cache,
             source_cache=torch.zeros(1, 1, self.source_cache_len, device=self.device, dtype=torch.float32),
@@ -966,14 +962,14 @@ class CosyVoice2Decoder(nn.Module):
         last_chunk: bool = False,
     ) -> Tuple[torch.Tensor, CosyVoice2DecoderCache]:
         """Forward pass with caching for streaming inference.
-        
+
         Args:
             speech_tokens: Token sequence to decode
             speech_token_lens: Length of token sequence
             decoder_cache: Cache state from previous chunk
             ref_dict: Reference audio features
             last_chunk: Whether this is the last chunk
-            
+
         Returns:
             Tuple of (audio_output, updated_cache)
         """
@@ -983,7 +979,10 @@ class CosyVoice2Decoder(nn.Module):
 
         # Convert speech_token_lens to tensor if it's an int
         if isinstance(speech_token_lens, int):
-            speech_token_lens = torch.ones(speech_tokens.size(0), device=self.device, dtype=torch.long) * speech_token_lens
+            speech_token_lens = (
+                torch.ones(speech_tokens.size(0), device=self.device, dtype=torch.long)
+                * speech_token_lens
+            )
 
         output_mels, new_flow_encoder_cache, new_flow_decoder_cache = self.flow.forward_chunk(
             token=speech_tokens,
@@ -997,7 +996,6 @@ class CosyVoice2Decoder(nn.Module):
         )
 
         if new_flow_encoder_cache.conformer_att_cache is not None:
-            # Attention sink approach: keep first PREFIX_LEN and last MAX_CACHE_LEN // 2 - PREFIX_LEN tokens
             cache_len = new_flow_encoder_cache.conformer_att_cache.shape[3]
             max_len = self.MAX_CACHE_LEN // 2
             if cache_len > max_len:
@@ -1006,15 +1004,15 @@ class CosyVoice2Decoder(nn.Module):
                 new_flow_encoder_cache.conformer_att_cache = torch.cat([prefix, suffix], dim=3)
 
         if new_flow_encoder_cache.up_conformer_att_cache is not None:
-            # Attention sink approach: keep first PREFIX_LEN and last MAX_CACHE_LEN - PREFIX_LEN tokens
             cache_len = new_flow_encoder_cache.up_conformer_att_cache.shape[3]
             if cache_len > self.MAX_CACHE_LEN:
                 prefix = new_flow_encoder_cache.up_conformer_att_cache[:, :, :, :self.PREFIX_LEN, :]
-                suffix = new_flow_encoder_cache.up_conformer_att_cache[:, :, :, -(self.MAX_CACHE_LEN - self.PREFIX_LEN):, :]
+                suffix = new_flow_encoder_cache.up_conformer_att_cache[
+                    :, :, :, -(self.MAX_CACHE_LEN - self.PREFIX_LEN):, :
+                ]
                 new_flow_encoder_cache.up_conformer_att_cache = torch.cat([prefix, suffix], dim=3)
 
         if new_flow_decoder_cache.att_cache is not None:
-            # Attention sink approach: keep first PREFIX_LEN and last MAX_CACHE_LEN - PREFIX_LEN tokens
             cache_len = new_flow_decoder_cache.att_cache.shape[5]
             if cache_len > self.MAX_CACHE_LEN:
                 prefix = new_flow_decoder_cache.att_cache[:, :, :, :, :, :self.PREFIX_LEN, :]
@@ -1023,8 +1021,8 @@ class CosyVoice2Decoder(nn.Module):
 
         # HiFT forward pass with caching
         # output_mels = torch.concat(
-        #     [decoder_cache.hift_cache.mel_cache, output_mels], 
-        #     dim=2, 
+        #     [decoder_cache.hift_cache.mel_cache, output_mels],
+        #     dim=2,
         # ).to(torch.float32).to(self.device)
 
         output_mels = output_mels.to(torch.float32).to(self.device)
@@ -1033,8 +1031,8 @@ class CosyVoice2Decoder(nn.Module):
             # decoder_cache.hift_cache.source_cache,
         )
         output_wavs = fade_in_out(
-            output_wavs, 
-            decoder_cache.hift_cache.speech_cache, 
+            output_wavs,
+            decoder_cache.hift_cache.speech_cache,
             self.speech_window,
         )
 

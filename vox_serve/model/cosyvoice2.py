@@ -403,24 +403,32 @@ class CosyVoice2Model(BaseLM):
             )
 
         # Expand conformer attention caches (batch dimension is typically dim 0)
-        new_conformer_att_cache = None 
+        new_conformer_att_cache = None
         if cache.conformer_att_cache is not None and cache.conformer_att_cache.numel() > 0:
-            new_conformer_att_cache = cache.conformer_att_cache.repeat(batch_size, *[1] * (cache.conformer_att_cache.dim() - 1))
+            new_conformer_att_cache = cache.conformer_att_cache.repeat(
+                batch_size, *[1] * (cache.conformer_att_cache.dim() - 1)
+            )
 
         # Expand conformer CNN caches (batch dimension is typically dim 0)
         new_conformer_cnn_cache = None
         if cache.conformer_cnn_cache is not None and cache.conformer_cnn_cache.numel() > 0:
-            new_conformer_cnn_cache = cache.conformer_cnn_cache.repeat(batch_size, *[1] * (cache.conformer_cnn_cache.dim() - 1))
+            new_conformer_cnn_cache = cache.conformer_cnn_cache.repeat(
+                batch_size, *[1] * (cache.conformer_cnn_cache.dim() - 1)
+            )
 
         # Expand up-sampling conformer attention caches
         new_up_conformer_att_cache = None
         if cache.up_conformer_att_cache is not None and cache.up_conformer_att_cache.numel() > 0:
-            new_up_conformer_att_cache = cache.up_conformer_att_cache.repeat(batch_size, *[1] * (cache.up_conformer_att_cache.dim() - 1))
+            new_up_conformer_att_cache = cache.up_conformer_att_cache.repeat(
+                batch_size, *[1] * (cache.up_conformer_att_cache.dim() - 1)
+            )
 
         # Expand up-sampling conformer CNN caches
         new_up_conformer_cnn_cache = None
         if cache.up_conformer_cnn_cache is not None and cache.up_conformer_cnn_cache.numel() > 0:
-            new_up_conformer_cnn_cache = cache.up_conformer_cnn_cache.repeat(batch_size, *[1] * (cache.up_conformer_cnn_cache.dim() - 1))
+            new_up_conformer_cnn_cache = cache.up_conformer_cnn_cache.repeat(
+                batch_size, *[1] * (cache.up_conformer_cnn_cache.dim() - 1)
+            )
 
         return FlowEncoderCache(
             conformer_att_cache=new_conformer_att_cache,
@@ -482,9 +490,15 @@ class CosyVoice2Model(BaseLM):
         expanded_hift_cache = None
         if base_cache.hift_cache is not None:
             expanded_hift_cache = HiFTGeneratorCache(
-                mel_cache=base_cache.hift_cache.mel_cache.repeat(batch_size, 1, 1) if base_cache.hift_cache.mel_cache is not None else None,
-                source_cache=base_cache.hift_cache.source_cache.repeat(batch_size, 1, 1) if base_cache.hift_cache.source_cache is not None else None,
-                speech_cache=base_cache.hift_cache.speech_cache.repeat(batch_size, 1) if base_cache.hift_cache.speech_cache is not None else None,
+                mel_cache=base_cache.hift_cache.mel_cache.repeat(batch_size, 1, 1)
+                if base_cache.hift_cache.mel_cache is not None
+                else None,
+                source_cache=base_cache.hift_cache.source_cache.repeat(batch_size, 1, 1)
+                if base_cache.hift_cache.source_cache is not None
+                else None,
+                speech_cache=base_cache.hift_cache.speech_cache.repeat(batch_size, 1)
+                if base_cache.hift_cache.speech_cache is not None
+                else None,
             )
 
         # Clone cache tensors for the given batch size

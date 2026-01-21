@@ -1,4 +1,3 @@
-import dataclasses
 from typing import Coroutine, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -797,7 +796,10 @@ class CudaGraphWorker(ModelWorker):
         # Check if we can use CUDA graphs for this batch
         if self._get_prefill_cuda_graph_key(actual_batch_size, actual_seq_len) is None:
             # fallback to prefill implementation of parent class
-            raise RuntimeError(f"No suitable prefill CUDA graph found for batch_size={actual_batch_size}, seq_len={actual_seq_len}")
+            raise RuntimeError(
+                f"No suitable prefill CUDA graph found for batch_size={actual_batch_size}, "
+                f"seq_len={actual_seq_len}"
+            )
             super().run_lm_prefill(requests, lm_inputs)
             return
 

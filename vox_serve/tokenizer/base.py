@@ -45,7 +45,7 @@ class DecoderCache:
         For tensors, uses .copy_() for efficient in-place copying.
         For nested caches, recursively calls copy_from.
         """
-        if type(self) != type(src):
+        if type(self) is not type(src):
             raise TypeError(f"Cannot copy from {type(src)} to {type(self)}")
 
         def _copy_field(dst: Any, src: Any) -> None:
@@ -64,14 +64,14 @@ class DecoderCache:
             if isinstance(dst, list) and isinstance(src, list):
                 if len(dst) != len(src):
                     raise ValueError(f"List length mismatch: {len(dst)} vs {len(src)}")
-                for d, s in zip(dst, src):
+                for d, s in zip(dst, src, strict=False):
                     _copy_field(d, s)
                 return
 
             if isinstance(dst, tuple) and isinstance(src, tuple):
                 if len(dst) != len(src):
                     raise ValueError(f"Tuple length mismatch: {len(dst)} vs {len(src)}")
-                for d, s in zip(dst, src):
+                for d, s in zip(dst, src, strict=False):
                     _copy_field(d, s)
                 return
 
@@ -86,7 +86,7 @@ class DecoderCache:
             # This is okay as these should be immutable or reference types
             if dst is None or src is None:
                 if dst != src:
-                    raise ValueError(f"Cannot copy non-None to None or vice versa")
+                    raise ValueError("Cannot copy non-None to None or vice versa")
                 return
 
         for f in fields(self):
