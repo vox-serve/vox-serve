@@ -65,7 +65,6 @@ def drop_invalid_tokens(x):
     return x[x < SPEECH_VOCAB_SIZE]
 
 
-# TODO: global resampler cache
 @lru_cache(100)
 def get_resampler(src_sr, dst_sr, device):
     return ta.transforms.Resample(src_sr, dst_sr).to(device)
@@ -139,7 +138,6 @@ class S3Tokenizer(S3TokenizerV2):
     def forward(
         self,
         wavs: torch.Tensor,
-        # accelerator: 'Accelerator'=None,
         max_len: int = None,
     ) -> Tuple[torch.Tensor, torch.LongTensor]:
         """
@@ -163,10 +161,6 @@ class S3Tokenizer(S3TokenizerV2):
             mels.append(mel.squeeze(0))
 
         mels, mel_lens = padding(mels)
-        # if accelerator is None:
-        #     tokenizer = self
-        # else:
-        #     tokenizer = accelerator.unwrap_model(self)
 
         speech_tokens, speech_token_lens = self.quantize(mels, mel_lens.to(self.device))
         return (
@@ -253,9 +247,7 @@ def extract_feature(audio):
         features.append(feature)
         feature_times.append(au.shape[0])
         feature_lengths.append(feature.shape[0])
-    # padding for batch inference
     features_padded = pad_list(features, pad_value=0)
-    # features = torch.cat(features)
     return features_padded, feature_lengths, feature_times
 
 
@@ -528,7 +520,6 @@ class DenseLayer(torch.nn.Module):
         return x
 
 
-# @tables.register("model_classes", "CAMPPlus")
 class CAMPPlus(torch.nn.Module):
     def __init__(
         self,
@@ -660,7 +651,6 @@ def _mel_filters(device, n_mels: int) -> torch.Tensor:
     """
     assert n_mels in {80, 128}, f"Unsupported n_mels: {n_mels}"
 
-    # filters_path = os.path.join(os.path.dirname(__file__), "assets", "mel_filters.npz")
     filters_path = download_github_file(
         "xingchensong",
         "S3Tokenizer",
@@ -687,7 +677,7 @@ def log_mel_spectrogram(
         audio waveform in 16 kHz
 
     n_mels: int
-        The number of Mel-frequency filters, only 80 is supported
+        The number of Mel-frequency filters (80 or 128)
 
     padding: int
         Number of zero samples to pad to the right
@@ -814,30 +804,19 @@ class CosyVoice2Decoder(nn.Module):
             revision=None,
         )
         self.tokenizer = S3Tokenizer(audio_tokenizer_path)
-        self.mel_extractor = mel_spectrogram  # TODO: make it a torch module?
-        # self.speaker_encoder = CAMPPlus()  # use default args
+        self.mel_extractor = mel_spectrogram
 
         encoder = UpsampleConformerEncoder(
             output_size=512,
             attention_heads=8,
             linear_units=2048,
             num_blocks=6,
-            # dropout_rate=0.1,
-            # positional_dropout_rate=0.1,
-            # attention_dropout_rate=0.1,
-            # normalize_before=True,
-            # input_layer='linear',
-            # pos_enc_layer_type='rel_pos_espnet',
-            # selfattention_layer_type='rel_selfattn',
             input_size=512,
-            # use_cnn_module=False,
-            # macaron_style=False,
         )
 
         estimator = CausalConditionalDecoder(
             in_channels=320,
             out_channels=80,
-            # causal=True,
             channels=[256],
             dropout=0.0,
             attention_head_dim=64,
@@ -846,11 +825,9 @@ class CosyVoice2Decoder(nn.Module):
             num_heads=8,
             act_fn="gelu",
         )
-        # estimator.forward = torch.compile(estimator.forward, mode="max-autotune-no-cudagraphs")
         decoder = CausalConditionalCFM(
             in_channels=240,
             spk_emb_dim=80,
-            # cfm_params=CFM_PARAMS,
             estimator=estimator,
         )
 
@@ -876,20 +853,12 @@ class CosyVoice2Decoder(nn.Module):
         self.hift.load_state_dict(hift_state_dict, strict=True)
         self.hift.to(self.device).eval()
 
-        # silence out a few ms and fade audio in to reduce artifacts
-        n_trim = self.S3GEN_SR // 50  # 20ms = half of a frame
-        trim_fade = torch.zeros(2 * n_trim)
-        trim_fade[n_trim:] = (torch.cos(torch.linspace(torch.pi, 0, n_trim)) + 1) / 2
-        self.register_buffer("trim_fade", trim_fade, persistent=False)  # (buffers get automatic device casting)
-
-        # Cache configuration for streaming
-        self.mel_cache_len = 6 # cache length for mel spectrograms
-        self.source_cache_len = int(self.mel_cache_len * 480)  # 50hz mel -> 24kHz wave conversion
+        self.mel_cache_len = 6
+        self.source_cache_len = int(self.mel_cache_len * 480)
         self.speech_window = torch.from_numpy(np.hamming(2 * self.source_cache_len)).to(self.device)
 
     def init_cache(self, ref_dict: dict) -> CosyVoice2DecoderCache:
         """Initialize cache for streaming inference by processing speech tokens."""
-        # Get prompt speech tokens for cache initialization
         prompt_speech_tokens = torch.cat([
             ref_dict["prompt_speech_token"],
             ref_dict["prompt_speech_token"][:, :3],
@@ -902,7 +871,6 @@ class CosyVoice2Decoder(nn.Module):
         empty_encoder_cache = FlowEncoderCache()
         empty_decoder_cache = FlowDecoderCache()
 
-        # Process speech tokens through flow.forward_chunk to initialize caches
         with torch.no_grad():
             prompt_mels, flow_encoder_cache, flow_decoder_cache = self.flow.forward_chunk(
                 token=prompt_speech_tokens,
@@ -937,7 +905,6 @@ class CosyVoice2Decoder(nn.Module):
                 suffix = flow_decoder_cache.att_cache[:, :, :, :, :, -(self.MAX_CACHE_LEN - self.PREFIX_LEN):, :]
                 flow_decoder_cache.att_cache = torch.cat([prefix, suffix], dim=5)
 
-        # Initialize HiFT cache with real mel values from prompt processing
         initial_mel_cache = prompt_mels[:, :, -self.mel_cache_len:]
 
         hift_cache = HiFTGeneratorCache(
@@ -1082,12 +1049,8 @@ class CosyVoice2Decoder(nn.Module):
         )
         output_mels = output_mels[:, :, ref_dict["prompt_feat_len"] :]
 
-        # TODO jrm: ignoring the speed control (mel interpolation) and the HiFTGAN caching mechanisms for now.
         cache_source = torch.zeros(1, 1, 0, dtype=torch.bfloat16, device=self.device)
 
         output_wavs, output_sources = self.hift.forward(output_mels.to(torch.bfloat16), cache_source)
-
-        # # NOTE: ad-hoc method to reduce "spillover" from the reference clip.
-        # output_wavs[:, :len(self.trim_fade)] *= self.trim_fade
 
         return output_wavs
