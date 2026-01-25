@@ -846,6 +846,7 @@ class CosyVoice2Decoder(nn.Module):
             source_resblock_kernel_sizes=[7, 7, 11],
             source_resblock_dilation_sizes=[[1, 3, 5], [1, 3, 5], [1, 3, 5]],
             f0_predictor=f0_predictor,
+            device=self.device,
         )
         hift_state_dict = {
             k.replace("generator.", ""): v
