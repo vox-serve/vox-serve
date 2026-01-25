@@ -89,7 +89,6 @@ def _mel_filters(device, n_mels: int) -> torch.Tensor:
     """
     assert n_mels in {80, 128}, f"Unsupported n_mels: {n_mels}"
 
-    # filters_path = os.path.join(os.path.dirname(__file__), "assets", "mel_filters.npz")
     filters_path = download_github_file(
         "xingchensong", "S3Tokenizer", "s3tokenizer/assets/mel_filters.npz",
     )
@@ -306,7 +305,6 @@ class DiTAttention(torch.nn.Module):
 
     def to_heads(self, ts: torch.Tensor):
         b, t, c = ts.shape
-        # (b, t, nh, c)
         ts = ts.reshape(b, t, self.num_heads, c // self.num_heads)
         ts = ts.transpose(1, 2)
         return ts
@@ -322,7 +320,7 @@ class DiTAttention(torch.nn.Module):
         k = self.to_k(x)
         v = self.to_v(x)
 
-        q = self.to_heads(q)  # (b, nh, t, c)
+        q = self.to_heads(q)
         k = self.to_heads(k)
         v = self.to_heads(v)
 
@@ -336,7 +334,7 @@ class DiTAttention(torch.nn.Module):
             v,
             attn_mask=attn_mask,
             dropout_p=self.attn_drop.p if self.training else 0.0,
-        )  # (b, nh, t, c)
+        )
         x = x.transpose(1, 2).reshape(b, t, -1)
         x = self.proj(x)
         x = self.proj_drop(x)
@@ -354,14 +352,13 @@ class DiTAttention(torch.nn.Module):
         k = self.to_k(x)
         v = self.to_v(x)
 
-        q = self.to_heads(q)  # (b, nh, t, c)
+        q = self.to_heads(q)
         k = self.to_heads(k)
         v = self.to_heads(v)
 
         q = self.q_norm(q)
         k = self.k_norm(k)
 
-        # unpack {k,v}_cache
         if att_cache is not None:
             if attn_mask is not None:
                 k_cache, v_cache = att_cache.chunk(2, dim=3)
@@ -373,12 +370,10 @@ class DiTAttention(torch.nn.Module):
                 k = torch.cat([k, k_cache], dim=2)
                 v = torch.cat([v, v_cache], dim=2)
 
-        # new {k,v}_cache
         new_att_cache = torch.cat([k, v], dim=3)
-        # attn_mask = torch.ones((b, 1, t, t1), dtype=torch.bool, device=x.device)
         if attn_mask is not None:
             attn_mask = attn_mask.unsqueeze(1)
-        x = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)  # (b, nh, t, c)
+        x = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
         x = x.transpose(1, 2).reshape(b, t, -1)
         x = self.proj(x)
         x = self.proj_drop(x)
@@ -402,7 +397,6 @@ class DiTTimestepEmbedder(nn.Module):
             nn.Linear(hidden_size, hidden_size, bias=True),
         )
         self.frequency_embedding_size = frequency_embedding_size
-        # from SinusoidalPosEmb
         self.scale = 1000
 
     @staticmethod
@@ -415,9 +409,7 @@ class DiTTimestepEmbedder(nn.Module):
         :param max_period: controls the minimum frequency of the embeddings.
         :return: an (N, D) Tensor of positional embeddings.
         """
-        # https://github.com/openai/glide-text2im/blob/main/glide_text2im/nn.py
         half = dim // 2
-        # freqs = torch.exp(-math.log(max_period) * torch.arange(start=0, end=half) / half).to(t)
         freqs = torch.exp(
             -torch.log(max_period)
             * torch.arange(0, half, device=t.device, dtype=t.dtype) / half
@@ -434,7 +426,6 @@ class DiTTimestepEmbedder(nn.Module):
         return t_emb
 
 
-# Convolution related
 class DiTTranspose(torch.nn.Module):
     def __init__(self, dim0: int, dim1: int):
         super().__init__()
@@ -483,15 +474,11 @@ class DiTCausalConvBlock(nn.Module):
         self.kernel_size = kernel_size
 
         self.block = torch.nn.Sequential(
-            # norm
-            # conv1
             DiTTranspose(1, 2),
             DiTCausalConv1d(in_channels, out_channels, kernel_size),
             DiTTranspose(1, 2),
-            # norm & act
             nn.LayerNorm(out_channels),
             nn.Mish(),
-            # conv2
             DiTTranspose(1, 2),
             DiTCausalConv1d(out_channels, out_channels, kernel_size),
             DiTTranspose(1, 2),
@@ -561,11 +548,8 @@ class DiTBlock(nn.Module):
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp, shift_conv, scale_conv, gate_conv = (
             self.adaLN_modulation(c).chunk(9, dim=-1)
         )
-        # attention
         x = x + gate_msa * self.attn(modulate(self.norm1(x), shift_msa, scale_msa), attn_mask)
-        # conv
         x = x + gate_conv * self.conv(modulate(self.norm3(x), shift_conv, scale_conv))
-        # mlp
         x = x + gate_mlp * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
         return x
 
@@ -587,13 +571,10 @@ class DiTBlock(nn.Module):
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp, shift_conv, scale_conv, gate_conv = (
             self.adaLN_modulation(c).chunk(9, dim=-1)
         )
-        # attention
         x_att, new_att_cache = self.attn.forward_chunk(modulate(self.norm1(x), shift_msa, scale_msa), att_cache, mask)
         x = x + gate_msa * x_att
-        # conv
         x_conv, new_cnn_cache = self.conv.forward_chunk(modulate(self.norm3(x), shift_conv, scale_conv), cnn_cache)
         x = x + gate_conv * x_conv
-        # mlp
         x = x + gate_mlp * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
         return x, new_cnn_cache, new_att_cache
 
@@ -653,7 +634,6 @@ class DiT(nn.Module):
         self.max_size_chunk = {}
 
     def initialize_weights(self):
-        # Initialize transformer layers:
         def _basic_init(module):
             if isinstance(module, nn.Linear):
                 torch.nn.init.xavier_uniform_(module.weight)
@@ -662,26 +642,21 @@ class DiT(nn.Module):
 
         self.apply(_basic_init)
 
-        # Initialize timestep embedding MLP:
         nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
         nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
 
-        # Zero-out adaLN modulation layers in DiT blocks:
         for block in self.blocks:
             nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
             nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
 
-        # Zero-out output layers:
         nn.init.constant_(self.final_layer.adaLN_modulation[-1].weight, 0)
         nn.init.constant_(self.final_layer.adaLN_modulation[-1].bias, 0)
         nn.init.constant_(self.final_layer.linear.weight, 0)
         nn.init.constant_(self.final_layer.linear.bias, 0)
 
     def _init_cuda_graph_chunk(self):
-        # get dtype, device from model parameters
         param = next(self.parameters())
         dtype, device = param.dtype, param.device
-        # init cuda graph for streaming forward
         with torch.no_grad():
             for chunk_size in [30, 48, 96]:
                 if chunk_size in [30, 48]:
@@ -744,10 +719,7 @@ class DiT(nn.Module):
         spks: shape (b, c)
         cond: shape (b, c, t)
         """
-        # (sfy) chunk training strategy should not be open-sourced
-
-        # time
-        t = self.t_embedder(t).unsqueeze(1)  # (b, 1, c)
+        t = self.t_embedder(t).unsqueeze(1)
         x = pack([x, mu], "b * t")[0]
         if spks is not None:
             spks = repeat(spks, "b c -> b c t", t=x.shape[-1])
@@ -799,7 +771,6 @@ class DiT(nn.Module):
         if cond is not None:
             x = pack([x, cond], "b * t")[0]
 
-        # create fake cache
         if cnn_cache is None:
             cnn_cache = [None] * len(self.blocks)
         if att_cache is None:
@@ -862,7 +833,6 @@ class DiT(nn.Module):
             new_att_caches.append(this_new_att_cache)
         x = self.final_layer(x, t)
         x = x.transpose(1, 2)
-        # Stack collected caches
         new_cnn_cache = torch.stack(new_cnn_caches, dim=0)
         new_att_cache = torch.stack(new_att_caches, dim=0)
         return x, new_cnn_cache, new_att_cache
@@ -898,7 +868,6 @@ class CausalConditionalCFM(torch.nn.Module):
         t = t.unsqueeze(dim=0)
         assert self.inference_cfg_rate > 0, "inference_cfg_rate better > 0"
 
-        # constant during denoising
         mask_in = torch.cat([mask, mask], dim=0)
         mu_in = torch.cat([mu, torch.zeros_like(mu)], dim=0)
         spks_in = torch.cat([spks, torch.zeros_like(spks)], dim=0)
@@ -929,7 +898,6 @@ class CausalConditionalCFM(torch.nn.Module):
     def forward(self, mu, mask, spks, cond, n_timesteps=10, temperature=1.0):
         z = self.rand_noise[:mu.size(0), :, : mu.size(2)] * temperature
         t_span = torch.linspace(0, 1, n_timesteps + 1, device=mu.device, dtype=mu.dtype)
-        # cosine scheduling
         t_span = 1 - torch.cos(t_span * 0.5 * torch.pi)
         return self.solve_euler(z, t_span, mu, mask, spks, cond)
 
@@ -962,15 +930,13 @@ class CausalConditionalCFM(torch.nn.Module):
         assert self.inference_cfg_rate > 0, "cfg rate should be > 0"
 
         t, _, dt = t_span[0], t_span[-1], t_span[1] - t_span[0]
-        t = t.unsqueeze(dim=0)  # (b,)
+        t = t.unsqueeze(dim=0)
 
-        # setup initial cache
         if cnn_cache is None:
             cnn_cache = [None for _ in range(len(t_span) - 1)]
         if att_cache is None:
             att_cache = [None for _ in range(len(t_span) - 1)]
 
-        # constant during denoising
         mu_in = torch.cat([mu, torch.zeros_like(mu)], dim=0)
         spks_in = torch.cat([spks, torch.zeros_like(spks)], dim=0)
         cond_in = torch.cat([cond, torch.zeros_like(cond)], dim=0)
@@ -1001,7 +967,6 @@ class CausalConditionalCFM(torch.nn.Module):
             new_cnn_caches.append(this_new_cnn_cache)
             new_att_caches.append(this_new_att_cache)
 
-        # Stack collected caches
         cnn_cache = torch.stack(new_cnn_caches, dim=0)
         att_cache = torch.stack(new_att_caches, dim=0)
         return x, cnn_cache, att_cache
@@ -1025,12 +990,10 @@ class CausalConditionalCFM(torch.nn.Module):
             cnn_cache: shape (n_time, depth, b, c1+c2, 2)
             att_cache: shape (n_time, depth, b, nh, t, c * 2)
         """
-        # Generate a single random noise and replicate across batch for identical start
         offset = att_cache.shape[4] if att_cache is not None else 0
         single_noise = torch.randn(1, mu.size(1), mu.size(2), device=mu.device, dtype=mu.dtype) * temperature
         z = single_noise.expand(mu.size(0), -1, -1)
         t_span = torch.linspace(0, 1, n_timesteps + 1, device=mu.device, dtype=mu.dtype)
-        # cosine scheduling
         t_span = 1 - torch.cos(t_span * 0.5 * torch.pi)
         x, new_cnn_cache, new_att_cache = self.solve_euler_chunk(
             x=z,
@@ -1081,16 +1044,16 @@ class ConformerEncoderLayer(nn.Module):
         self.feed_forward = feed_forward
         self.feed_forward_macaron = feed_forward_macaron
         self.conv_module = conv_module
-        self.norm_ff = nn.LayerNorm(size, eps=1e-12)  # for the FNN module
-        self.norm_mha = nn.LayerNorm(size, eps=1e-12)  # for the MHA module
+        self.norm_ff = nn.LayerNorm(size, eps=1e-12)
+        self.norm_mha = nn.LayerNorm(size, eps=1e-12)
         if feed_forward_macaron is not None:
             self.norm_ff_macaron = nn.LayerNorm(size, eps=1e-12)
             self.ff_scale = 0.5
         else:
             self.ff_scale = 1.0
         if self.conv_module is not None:
-            self.norm_conv = nn.LayerNorm(size, eps=1e-12)  # for the CNN module
-            self.norm_final = nn.LayerNorm(size, eps=1e-12)  # for the final output of the block
+            self.norm_conv = nn.LayerNorm(size, eps=1e-12)
+            self.norm_final = nn.LayerNorm(size, eps=1e-12)
         self.dropout = nn.Dropout(dropout_rate)
         self.size = size
         self.normalize_before = normalize_before
@@ -1136,7 +1099,6 @@ class ConformerEncoderLayer(nn.Module):
         att_cache: torch.Tensor = torch.zeros((0, 0, 0, 0)),
         cnn_cache: torch.Tensor = torch.zeros((0, 0, 0, 0)),
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        # whether to use macaron style
         if self.feed_forward_macaron is not None:
             residual = x
             if self.normalize_before:
@@ -1145,18 +1107,14 @@ class ConformerEncoderLayer(nn.Module):
             if not self.normalize_before:
                 x = self.norm_ff_macaron(x)
 
-        # multi-headed self-attention module
         residual = x
         if self.normalize_before:
             x = self.norm_mha(x)
-        # att_cache: (b, head, cache_t, d_k*2)
         x_att, new_att_cache = self.self_attn(x, x, x, mask, pos_emb, att_cache)
         x = residual + self.dropout(x_att)
         if not self.normalize_before:
             x = self.norm_mha(x)
 
-        # convolution module
-        # Fake new cnn cache here, and then change it in conv_module
         new_cnn_cache = torch.zeros((0, 0, 0), dtype=x.dtype, device=x.device)
         if self.conv_module is not None:
             residual = x
@@ -1168,7 +1126,6 @@ class ConformerEncoderLayer(nn.Module):
             if not self.normalize_before:
                 x = self.norm_conv(x)
 
-        # feed forward module
         residual = x
         if self.normalize_before:
             x = self.norm_ff(x)
@@ -1185,7 +1142,6 @@ class ConformerEncoderLayer(nn.Module):
 class PositionwiseFeedForward(torch.nn.Module):
     """Positionwise feed forward layer.
 
-    FeedForward are appied on each position of the sequence.
     The output dim is same with the input dim.
 
     Args:
@@ -1231,9 +1187,7 @@ class BaseSubsampling(torch.nn.Module):
 
 
 class LinearNoSubsampling(BaseSubsampling):
-    """Linear transform the input without subsampling
-
-    Args:
+    """Args:
         idim (int): Input dimension.
         odim (int): Output dimension.
         dropout_rate (float): Dropout rate.
@@ -1305,9 +1259,6 @@ class EspnetRelPositionalEncoding(torch.nn.Module):
                 if self.pe.dtype != x.dtype or self.pe.device != x.device:
                     self.pe = self.pe.to(dtype=x.dtype, device=x.device)
                 return
-        # Suppose `i` means to the position of query vecotr and `j` means the
-        # position of key vector. We use position relative positions when keys
-        # are to the left (i>j) and negative relative positions otherwise (i<j).
         pe_positive = torch.zeros(x.size(1), self.d_model)
         pe_negative = torch.zeros(x.size(1), self.d_model)
         position = torch.arange(0, x.size(1), dtype=torch.float32).unsqueeze(1)
@@ -1319,9 +1270,6 @@ class EspnetRelPositionalEncoding(torch.nn.Module):
         pe_negative[:, 0::2] = torch.sin(-1 * position * div_term)
         pe_negative[:, 1::2] = torch.cos(-1 * position * div_term)
 
-        # Reserve the order of positive indices and concat both positive and
-        # negative indices. This is used to support the shifting trick
-        # as in https://arxiv.org/abs/1901.02860
         pe_positive = torch.flip(pe_positive, [0]).unsqueeze(0)
         pe_negative = pe_negative[1:].unsqueeze(0)
         pe = torch.cat([pe_positive, pe_negative], dim=1)
@@ -1344,12 +1292,6 @@ class EspnetRelPositionalEncoding(torch.nn.Module):
 
     def position_encoding(self, offset: Union[int, torch.Tensor], size: int) -> torch.Tensor:
         """For getting encoding in a streaming fashion
-
-        Attention!!!!!
-        we apply dropout only once at the whole utterance level in a none
-        streaming way, but will call this function several times with
-        increasing input size in a streaming scenario, so the dropout will
-        be applied several times.
 
         Args:
             offset (int or torch.tensor): start offset
@@ -1379,7 +1321,6 @@ class FlowEncoderMultiHeadedAttention(nn.Module):
         """Construct an MultiHeadedAttention object."""
         super().__init__()
         assert n_feat % n_head == 0
-        # We assume d_v always equals d_k
         self.d_k = n_feat // n_head
         self.h = n_head
         self.linear_q = nn.Linear(n_feat, n_feat)
@@ -1436,27 +1377,20 @@ class FlowEncoderMultiHeadedAttention(nn.Module):
 
         """
         n_batch = value.size(0)
-        # NOTE(xcsong): When will `if mask.size(2) > 0` be True?
-        #   1. onnx(16/4) [WHY? Because we feed real cache & real mask for the
-        #           1st chunk to ease the onnx export.]
-        #   2. pytorch training
-        if mask.size(2) > 0:  # time2 > 0
+        if mask.size(2) > 0:
             mask = mask.unsqueeze(1).eq(0)  # (batch, 1, *, time2)
             # For last chunk, time2 might be larger than scores.size(-1)
-            mask = mask[:, :, :, : scores.size(-1)]  # (batch, 1, *, time2)
+            mask = mask[:, :, :, : scores.size(-1)]
             scores = scores.masked_fill(mask, -float("inf"))
-            attn = torch.softmax(scores, dim=-1).masked_fill(mask, 0.0)  # (batch, head, time1, time2)
-        # NOTE(xcsong): When will `if mask.size(2) > 0` be False?
-        #   1. onnx(16/-1, -1/-1, 16/0)
-        #   2. jit (16/-1, -1/-1, 16/0, 16/4)
+            attn = torch.softmax(scores, dim=-1).masked_fill(mask, 0.0)
         else:
             attn = torch.softmax(scores, dim=-1)  # (batch, head, time1, time2)
 
         p_attn = self.dropout(attn)
-        x = torch.matmul(p_attn, value)  # (batch, head, time1, d_k)
-        x = x.transpose(1, 2).contiguous().view(n_batch, -1, self.h * self.d_k)  # (batch, time1, d_model)
+        x = torch.matmul(p_attn, value)
+        x = x.transpose(1, 2).contiguous().view(n_batch, -1, self.h * self.d_k)
 
-        return self.linear_out(x)  # (batch, time1, d_model)
+        return self.linear_out(x)
 
     def forward(
         self,
@@ -1499,22 +1433,6 @@ class FlowEncoderMultiHeadedAttention(nn.Module):
         """
         q, k, v = self.forward_qkv(query, key, value)
 
-        # NOTE(xcsong):
-        #   when export onnx model, for 1st chunk, we feed
-        #       cache(1, head, 0, d_k * 2) (16/-1, -1/-1, 16/0 mode)
-        #       or cache(1, head, real_cache_t, d_k * 2) (16/4 mode).
-        #       In all modes, `if cache.size(0) > 0` will alwayse be `True`
-        #       and we will always do splitting and
-        #       concatnation(this will simplify onnx export). Note that
-        #       it's OK to concat & split zero-shaped tensors(see code below).
-        #   when export jit  model, for 1st chunk, we always feed
-        #       cache(0, 0, 0, 0) since jit supports dynamic if-branch.
-        # >>> a = torch.ones((1, 2, 0, 4))
-        # >>> b = torch.ones((1, 2, 3, 4))
-        # >>> c = torch.cat((a, b), dim=2)
-        # >>> torch.equal(b, c)        # True
-        # >>> d = torch.split(a, 2, dim=-1)
-        # >>> torch.equal(d[0], d[1])  # True
         if cache.size(0) > 0:
             key_cache, value_cache = torch.split(cache, cache.size(-1) // 2, dim=-1)
             k = torch.cat([key_cache, k], dim=2)
@@ -1539,10 +1457,7 @@ class RelPositionMultiHeadedAttention(FlowEncoderMultiHeadedAttention):
     def __init__(self, n_head: int, n_feat: int, dropout_rate: float, key_bias: bool = True):
         """Construct an RelPositionMultiHeadedAttention object."""
         super().__init__(n_head, n_feat, dropout_rate, key_bias)
-        # linear transformation for positional encoding
         self.linear_pos = nn.Linear(n_feat, n_feat, bias=False)
-        # these two learnable bias are used in matrix c and matrix d
-        # as described in https://arxiv.org/abs/1901.02860 Section 3.3
         self.pos_bias_u = nn.Parameter(torch.Tensor(self.h, self.d_k))
         self.pos_bias_v = nn.Parameter(torch.Tensor(self.h, self.d_k))
         torch.nn.init.xavier_uniform_(self.pos_bias_u)
@@ -1594,55 +1509,28 @@ class RelPositionMultiHeadedAttention(FlowEncoderMultiHeadedAttention):
                 and `head * d_k == size`
         """
         q, k, v = self.forward_qkv(query, key, value)
-        q = q.transpose(1, 2)  # (batch, time1, head, d_k)
+        q = q.transpose(1, 2)
 
-        # NOTE(xcsong):
-        #   when export onnx model, for 1st chunk, we feed
-        #       cache(1, head, 0, d_k * 2) (16/-1, -1/-1, 16/0 mode)
-        #       or cache(1, head, real_cache_t, d_k * 2) (16/4 mode).
-        #       In all modes, `if cache.size(0) > 0` will alwayse be `True`
-        #       and we will always do splitting and
-        #       concatnation(this will simplify onnx export). Note that
-        #       it's OK to concat & split zero-shaped tensors(see code below).
-        #   when export jit  model, for 1st chunk, we always feed
-        #       cache(0, 0, 0, 0) since jit supports dynamic if-branch.
-        # >>> a = torch.ones((1, 2, 0, 4))
-        # >>> b = torch.ones((1, 2, 3, 4))
-        # >>> c = torch.cat((a, b), dim=2)
-        # >>> torch.equal(b, c)        # True
-        # >>> d = torch.split(a, 2, dim=-1)
-        # >>> torch.equal(d[0], d[1])  # True
         if cache is not None and cache.size(0) > 0:
             key_cache, value_cache = torch.split(cache, cache.size(-1) // 2, dim=-1)
             k = torch.cat([key_cache, k], dim=2)
             v = torch.cat([value_cache, v], dim=2)
-        # NOTE(xcsong): We do cache slicing in encoder.forward_chunk, since it's
-        #   non-trivial to calculate `next_cache_start` here.
         new_cache = torch.cat((k, v), dim=-1)
 
         n_batch_pos = pos_emb.size(0)
         p = self.linear_pos(pos_emb).view(n_batch_pos, -1, self.h, self.d_k)
-        p = p.transpose(1, 2)  # (batch, head, time1, d_k)
+        p = p.transpose(1, 2)
 
-        # (batch, head, time1, d_k)
         q_with_bias_u = (q + self.pos_bias_u).transpose(1, 2)
-        # (batch, head, time1, d_k)
         q_with_bias_v = (q + self.pos_bias_v).transpose(1, 2)
 
-        # compute attention score
-        # first compute matrix a and matrix c
-        # as described in https://arxiv.org/abs/1901.02860 Section 3.3
-        # (batch, head, time1, time2)
         matrix_ac = torch.matmul(q_with_bias_u, k.transpose(-2, -1))
 
-        # compute matrix b and matrix d
-        # (batch, head, time1, time2)
         matrix_bd = torch.matmul(q_with_bias_v, p.transpose(-2, -1))
-        # NOTE(Xiang Lyu): Keep rel_shift since espnet rel_pos_emb is used
         if matrix_ac.shape != matrix_bd.shape:
             matrix_bd = self.rel_shift(matrix_bd)
 
-        scores = (matrix_ac + matrix_bd) / math.sqrt(self.d_k)  # (batch, head, time1, time2)
+        scores = (matrix_ac + matrix_bd) / math.sqrt(self.d_k)
 
         return self.forward_attention(v, scores, mask), new_cache
 
@@ -1666,7 +1554,6 @@ class Upsample1D(nn.Module):
         self.channels = channels
         self.out_channels = out_channels
         self.stride = stride
-        # In this mode, first repeat interpolate, than conv with stride=1
         self.conv = nn.Conv1d(self.channels, self.out_channels, stride * 2 + 1, stride=1, padding=0)
         self.scale_factor = float(self.stride) if scale_factor is None else float(scale_factor)
 
@@ -1723,15 +1610,12 @@ class PreLookaheadLayer(nn.Module):
         inputs: (batch_size, seq_len, channels)
         """
         outputs = inputs.transpose(1, 2).contiguous()
-        # look ahead
         outputs = F.pad(outputs, (0, self.pre_lookahead_len), mode="constant", value=0.0)
         outputs = F.leaky_relu(self.conv1(outputs))
-        # outputs
         outputs = F.pad(outputs, (2, 0), mode="constant", value=0.0)
         outputs = self.conv2(outputs)
         outputs = outputs.transpose(1, 2).contiguous()
 
-        # residual connection
         outputs = outputs + inputs
         return outputs
 
@@ -1743,15 +1627,12 @@ class PreLookaheadLayer(nn.Module):
         """
         outputs = inputs.transpose(1, 2).contiguous()
         outputs = F.leaky_relu(self.conv1(outputs))
-        # the length of outputs is input length - pre_lookahead_len
         if cache is None:
             cache = outputs.new_zeros(outputs.shape[0], outputs.shape[1], 2)
-        # NOTE
         new_cache = outputs[..., -2:]
         outputs = torch.cat([cache, outputs], dim=2)
         outputs = self.conv2(outputs)
         outputs = outputs.transpose(1, 2).contiguous()
-        # residual connection
         outputs = outputs + inputs[:, : -self.pre_lookahead_len]
         return outputs, new_cache
 
@@ -1859,16 +1740,12 @@ class UpsampleConformerEncoderV2(torch.nn.Module):
         self.inference_buffers_up_encoder = {}
         self.max_static_time = 1500
 
-    # FIXME(sfy) revert hard-coded bfloat16
-    # this method is skipped in CausalMaskedDiffWithXvec.scatter_cuda_graph
     def scatter_cuda_graph(self, enable_cuda_graph: bool):
         self.enable_cuda_graph = enable_cuda_graph
         if self.enable_cuda_graph:
             self._init_cuda_graph()
 
     def _init_cuda_graph(self):
-        """初始化 CUDA Graph"""
-
         for l in range(100, 1500, 10):
             static_x = torch.zeros((1, l, 512), dtype=torch.float32, device=torch.device("cuda"))
             static_mask = torch.ones((1, 1, l), dtype=torch.bool, device=torch.device("cuda"))
@@ -1944,12 +1821,10 @@ class UpsampleConformerEncoderV2(torch.nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # (sfy) chunk training strategy should not be open-sourced
         T = xs.size(1)
-        masks = ~make_pad_mask(xs_lens, T).unsqueeze(1)  # (B, 1, T)
+        masks = ~make_pad_mask(xs_lens, T).unsqueeze(1)
         xs, pos_emb, masks = self.embed(xs, masks)
 
-        # lookahead
         xs = self.pre_lookahead_layer(xs)
-        # conformer block
         if self.enable_cuda_graph and xs.shape[1] in self.graph_encoder:
             self.inference_buffers_encoder[xs.shape[1]]["static_inputs"][0].copy_(xs)
             self.inference_buffers_encoder[xs.shape[1]]["static_inputs"][1].copy_(masks)
@@ -1958,14 +1833,12 @@ class UpsampleConformerEncoderV2(torch.nn.Module):
             xs = self.inference_buffers_encoder[xs.shape[1]]["static_outputs"][0]
         else:
             xs = self._forward_impl_encoder(xs, masks, pos_emb)
-        # upsample
         xs = xs.transpose(1, 2).contiguous()
         xs, xs_lens = self.up_layer(xs, xs_lens)
         xs = xs.transpose(1, 2).contiguous()
 
-        # 2nd conformer block
         T = xs.size(1)
-        masks = ~make_pad_mask(xs_lens, T).unsqueeze(1)  # (B, 1, T)
+        masks = ~make_pad_mask(xs_lens, T).unsqueeze(1)
         xs, pos_emb, masks = self.up_embed(xs, masks)
         if self.enable_cuda_graph and xs.shape[1] in self.graph_up_encoder:
             self.inference_buffers_up_encoder[xs.shape[1]]["static_inputs"][0].copy_(xs)
@@ -1975,7 +1848,6 @@ class UpsampleConformerEncoderV2(torch.nn.Module):
             xs = self.inference_buffers_up_encoder[xs.shape[1]]["static_outputs"][0]
         else:
             xs = self._forward_impl_up_encoder(xs, masks, pos_emb)
-        # post norm
         if self.normalize_before:
             xs = self.after_norm(xs)
         return xs, masks
@@ -2011,35 +1883,26 @@ class UpsampleConformerEncoderV2(torch.nn.Module):
         if last_chunk:
             xs = F.pad(xs, (0, 0, 0, self.pre_lookahead_layer.pre_lookahead_len))
 
-        # this_cnn_cache: shape (b=1, c=512, t=2)
         xs, new_cnn_cache1 = self.pre_lookahead_layer.forward_chunk(xs, cache=cnn_cache1)
 
-        # remake pos_emb, offset param is ignored by position_encoding
         pos_emb = self.embed.position_encoding(offset=None, size=offset1 + xs.shape[1])
 
-        # first conformer
         chunk_masks = torch.zeros((0, 0, 0))
         new_att_cache1 = []
 
         for idx, layer in enumerate(self.encoders):
-            # this_att_cache: shape (b, nh, t, c * 2)
             xs, _, this_new_att_cache1, _ = layer(xs, chunk_masks, pos_emb, att_cache=att_cache1[idx])
             new_att_cache1.append(this_new_att_cache1)
         new_att_cache1 = torch.stack(new_att_cache1, dim=0)
 
-        # upsample + conformer encoder, xs: (b, t, c) -> (b, c, t)
         xs = xs.transpose(1, 2).contiguous()
-        # this_cnn_cache: shape (b=1, c=512, t=2*2)
         xs, _, new_cnn_cache2 = self.up_layer.forward_chunk(xs, None, cache=cnn_cache2)
         xs = xs.transpose(1, 2).contiguous()
 
-        # at this time, xs are doubled in length
         xs, _, _ = self.up_embed(xs, None)
 
-        # remake pos_emb
         pos_emb = self.embed.position_encoding(offset=None, size=offset1 * self.up_layer.stride + xs.shape[1])
 
-        # second conformer
         chunk_masks = torch.zeros((0, 0, 0), dtype=torch.bfloat16)
         new_att_cache2 = []
 
@@ -2051,7 +1914,6 @@ class UpsampleConformerEncoderV2(torch.nn.Module):
         if self.normalize_before:
             xs = self.after_norm(xs)
 
-        # pack new cache
         new_att_cache = torch.cat([new_att_cache1.repeat(1, 1, 1, 2, 1), new_att_cache2], dim=0)
         new_cnn_cache = torch.cat([new_cnn_cache1, new_cnn_cache2], dim=2)
 
@@ -2086,8 +1948,6 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
         self.encoder_proj = torch.nn.Linear(self.encoder.output_size(), output_size)
         self.decoder = decoder
 
-        # xvec projection with CUDA Graph optimization
-        # 初始化 CUDA Graph 相关变量
         self.enable_cuda_graph = False
         self.static_embedding = None
         self.static_output = None
@@ -2097,7 +1957,6 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
     def scatter_cuda_graph(self, enable_cuda_graph: bool):
         self.enable_cuda_graph = enable_cuda_graph
         if self.enable_cuda_graph:
-            # self.encoder.scatter_cuda_graph(enable_cuda_graph)
             self.decoder.scatter_cuda_graph(enable_cuda_graph)
 
     @torch.inference_mode()
@@ -2114,22 +1973,18 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
     ):
         assert token.shape[0] == 1
 
-        # xvec projection
         embedding = F.normalize(embedding, dim=1)
         embedding = self.spk_embed_affine_layer(embedding)
 
-        # concat text and prompt_text
         token_len = prompt_token_len + token_len
         token = torch.concat([prompt_token, token], dim=1)
 
         mask = (~make_pad_mask(token_len)).unsqueeze(-1).to(embedding)
         token = self.input_embedding(torch.clamp(token, min=0)) * mask
 
-        # token encode
         h, _ = self.encoder.forward(token, token_len)
         h = self.encoder_proj(h)
 
-        # condition
         mel_len1 = prompt_feat.shape[1]
         mel_len2 = h.shape[1] - prompt_feat.shape[1]
 
@@ -2173,12 +2028,10 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
         # check if look ahead token included
         assert (token.shape[1] - self.pre_lookahead_len) * self.up_rate == mel.shape[1], (token.shape, mel.shape)
 
-        # xvec projection
         spk = F.normalize(spk, dim=1)
         spk = self.spk_embed_affine_layer(spk)
 
         token = self.input_embedding(token)
-        # NOTE encoder.forward_chunk will strip the look ahead part
         h, conformer_cnn_cache, conformer_att_cache = self.encoder.forward_chunk(
             xs=token,
             last_chunk=False,
@@ -2197,15 +2050,10 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
             att_cache=None,
         )
 
-        # Convert caches to batch-first layout at API boundary
-        # conformer_cnn_cache: (b, c, t) -> unchanged (batch-first already)
-        # conformer_att_cache: (depth, b, nh, t, c) -> (b, depth, nh, t, c)
         if isinstance(conformer_att_cache, torch.Tensor):
             conformer_att_cache = conformer_att_cache.permute(1, 0, 2, 3, 4).contiguous()
-        # estimator_cnn_cache: (n_time, depth, b, ch, 2) -> (b, n_time, depth, ch, 2)
         if isinstance(estimator_cnn_cache, torch.Tensor):
             estimator_cnn_cache = estimator_cnn_cache.permute(2, 0, 1, 3, 4).contiguous()
-        # estimator_att_cache: (n_time, depth, b, nh, t, d) -> (b, n_time, depth, nh, t, d)
         if isinstance(estimator_att_cache, torch.Tensor):
             estimator_att_cache = estimator_att_cache.permute(2, 0, 1, 3, 4, 5).contiguous()
 
@@ -2241,23 +2089,17 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
         estimator_cnn_cache = cache["estimator_cnn_cache"]
         estimator_att_cache = cache["estimator_att_cache"]
 
-        # conformer_att_cache: (b, depth, nh, t, c) -> (depth, b, nh, t, c)
         if isinstance(conformer_att_cache, torch.Tensor):
             conformer_att_cache = conformer_att_cache.permute(1, 0, 2, 3, 4).contiguous()
-        # estimator caches may be None on first call
-        # estimator_cnn_cache: (b, n_time, depth, ch, 2) -> (n_time, depth, b, ch, 2)
         if isinstance(estimator_cnn_cache, torch.Tensor):
             estimator_cnn_cache = estimator_cnn_cache.permute(1, 2, 0, 3, 4).contiguous()
-        # estimator_att_cache: (b, n_time, depth, nh, t, d) -> (n_time, depth, b, nh, t, d)
         if isinstance(estimator_att_cache, torch.Tensor):
             estimator_att_cache = estimator_att_cache.permute(1, 2, 0, 3, 4, 5).contiguous()
 
-        # xvec projection
         spk = F.normalize(spk, dim=1)
         spk = self.spk_embed_affine_layer(spk)
 
         token = self.input_embedding(torch.clamp(token, min=0))
-        # if not the last chunk, h is shorter than xs for a length of lookahead_length * stride (6)
         h, conformer_cnn_cache, conformer_att_cache = self.encoder.forward_chunk(
             xs=token,
             last_chunk=last_chunk,
@@ -2267,7 +2109,6 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
         h = self.encoder_proj(h)
 
         cond = torch.zeros_like(h)
-        # forward estimator (internal layout)
         feat, estimator_cnn_cache, estimator_att_cache = self.decoder.forward_chunk(
             mu=h.transpose(1, 2).contiguous(),
             spks=spk,
@@ -2278,14 +2119,10 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
             att_cache=estimator_att_cache,
         )
 
-        # Convert caches back to batch-first for API return
-        # conformer_att_cache: (depth, b, nh, t, c) -> (b, depth, nh, t, c)
         if isinstance(conformer_att_cache, torch.Tensor):
             conformer_att_cache = conformer_att_cache.permute(1, 0, 2, 3, 4).contiguous()
-        # estimator_cnn_cache: (n_time, depth, b, ch, 2) -> (b, n_time, depth, ch, 2)
         if isinstance(estimator_cnn_cache, torch.Tensor):
             estimator_cnn_cache = estimator_cnn_cache.permute(2, 0, 1, 3, 4).contiguous()
-        # estimator_att_cache: (n_time, depth, b, nh, t, d) -> (b, n_time, depth, nh, t, d)
         if isinstance(estimator_att_cache, torch.Tensor):
             estimator_att_cache = estimator_att_cache.permute(2, 0, 1, 3, 4, 5).contiguous()
 
@@ -2388,12 +2225,10 @@ class StepAudio2Decoder(nn.Module):
         self.hift.load_state_dict(hift_state_dict, strict=True)
         self.hift.to(self.device).eval()
 
-        # stream conf
-        self.mel_cache_len = 8  # hard-coded, 160ms
-        self.source_cache_len = int(self.mel_cache_len * 480)  # 50hz mel -> 24kHz wave
+        self.mel_cache_len = 8
+        self.source_cache_len = int(self.mel_cache_len * 480)
         self.speech_window = torch.from_numpy(np.hamming(2 * self.source_cache_len)).to(self.device)
 
-        # preset audio for now
         self.preset_audio = download_github_file(
             "stepfun-ai", "Step-Audio2", "assets/default_female.wav"
         )
@@ -2475,20 +2310,16 @@ class StepAudio2Decoder(nn.Module):
         decoder_cache: StepAudio2DecoderCache,
         last_chunk: bool = False,
     ) -> Tuple[torch.Tensor, StepAudio2DecoderCache]:
-        # Flatten CFG dimension for estimator caches before passing to flow model
-        # estimator_cnn_cache: (b, 2, n_time, depth, ch, 2) -> (b*2, n_time, depth, ch, 2)
         estimator_cnn_cache_flat = decoder_cache.estimator_cnn_cache.view(
             -1,
             *decoder_cache.estimator_cnn_cache.shape[2:],
         ) if decoder_cache.estimator_cnn_cache.dim() > 5 else decoder_cache.estimator_cnn_cache
 
-        # estimator_att_cache: (b, 2, n_time, depth, nh, t, d) -> (b*2, n_time, depth, nh, t, d)
         estimator_att_cache_flat = decoder_cache.estimator_att_cache.view(
             -1,
             *decoder_cache.estimator_att_cache.shape[2:],
         ) if decoder_cache.estimator_att_cache.dim() > 6 else decoder_cache.estimator_att_cache
 
-        # Pack stream cache tensors into expected dict for flow
         stream_cache = {
             "conformer_cnn_cache": decoder_cache.conformer_cnn_cache,
             "conformer_att_cache": decoder_cache.conformer_att_cache,
@@ -2505,15 +2336,12 @@ class StepAudio2Decoder(nn.Module):
                 n_timesteps=10,
             )
 
-        # vocoder cache (HiFT)
         mel = torch.concat([decoder_cache.hift_mel_cache, chunk_mel], dim=2)
         speech, source = self.hift(mel, decoder_cache.hift_source_cache)
 
-        # overlap speech smooth
         if decoder_cache.hift_speech_cache.shape[-1] > 0:
             speech = fade_in_out(speech, decoder_cache.hift_speech_cache, self.speech_window)
 
-        # build updated vocoder cache tensors
         new_hift_mel_cache = mel[..., -self.mel_cache_len :]
         new_hift_source_cache = source[:, :, -self.source_cache_len :]
         new_hift_speech_cache = speech[:, -self.source_cache_len :]
@@ -2521,25 +2349,19 @@ class StepAudio2Decoder(nn.Module):
         if not last_chunk:
             speech = speech[:, : -self.source_cache_len]
 
-        # For flow caches, keep recent attention window consistent with previous behavior
-        # Expect stream_cache to be batch-first; slice time dims accordingly
         if isinstance(new_stream_cache.get("conformer_att_cache"), torch.Tensor):
             new_stream_cache["conformer_att_cache"] = new_stream_cache["conformer_att_cache"][:, :, :, -128:, :]
         if isinstance(new_stream_cache.get("estimator_att_cache"), torch.Tensor):
             new_stream_cache["estimator_att_cache"] = new_stream_cache["estimator_att_cache"][:, :, :, :, -128:, :]
 
-        # Unflatten CFG dimension for estimator caches
-        # Get original batch size by dividing flattened batch size by CFG factor (2)
         estimator_cnn_cache_flat = new_stream_cache.get("estimator_cnn_cache")
         batch_size = estimator_cnn_cache_flat.shape[0] // 2 if estimator_cnn_cache_flat is not None else -1
 
-        # Unflatten estimator_cnn_cache: (b*2, n_time, depth, ch, 2) -> (b, 2, n_time, depth, ch, 2)
         estimator_cnn_cache_unflat = new_stream_cache.get("estimator_cnn_cache")
         if estimator_cnn_cache_unflat is not None and batch_size > 0:
             estimator_cnn_cache_unflat = estimator_cnn_cache_unflat.view(
                 batch_size, 2, *estimator_cnn_cache_unflat.shape[1:])
 
-        # Unflatten estimator_att_cache: (b*2, n_time, depth, nh, t, d) -> (b, 2, n_time, depth, nh, t, d)
         estimator_att_cache_unflat = new_stream_cache.get("estimator_att_cache")
         if estimator_att_cache_unflat is not None and batch_size > 0:
             estimator_att_cache_unflat = estimator_att_cache_unflat.view(
