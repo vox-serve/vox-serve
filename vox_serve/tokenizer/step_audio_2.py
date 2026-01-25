@@ -1953,13 +1953,17 @@ class StepAudio2Decoder(nn.Module):
                 b = estimator_att_cache.shape[0] // 2
                 estimator_att_cache = estimator_att_cache.view(b, 2, *estimator_att_cache.shape[1:])
 
+        # Initialize HiFT cache with actual mel values from prompt (like CosyVoice does)
+        # prompt_mels has shape (B, T, F) = (1, 452, 80), extract last mel_cache_len frames and transpose
+        initial_mel_cache = prompt_mels[:, -self.mel_cache_len:, :].transpose(1, 2)
+
         new_cache = StepAudio2DecoderCache(
             spk_emb=spk_emb,
             conformer_cnn_cache=stream_cache.get("conformer_cnn_cache"),
             conformer_att_cache=stream_cache.get("conformer_att_cache"),
             estimator_cnn_cache=estimator_cnn_cache,
             estimator_att_cache=estimator_att_cache,
-            hift_mel_cache=torch.zeros(1, prompt_mels.shape[2], self.mel_cache_len, device="cuda"),
+            hift_mel_cache=initial_mel_cache,
             hift_source_cache=torch.zeros(1, 1, self.source_cache_len, device="cuda"),
             hift_speech_cache=torch.zeros(1, self.source_cache_len, device="cuda"),
         )
@@ -1999,7 +2003,8 @@ class StepAudio2Decoder(nn.Module):
             )
 
         mel = torch.concat([decoder_cache.hift_mel_cache, chunk_mel], dim=2)
-        speech, source = self.hift(mel, decoder_cache.hift_source_cache)
+        # HiFT runs in fp32, convert from autocast fp16
+        speech, source = self.hift(mel.to(torch.float32), decoder_cache.hift_source_cache.to(torch.float32))
 
         if decoder_cache.hift_speech_cache.shape[-1] > 0:
             speech = fade_in_out(speech, decoder_cache.hift_speech_cache, self.speech_window)
