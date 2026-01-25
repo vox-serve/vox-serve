@@ -652,20 +652,6 @@ class DiT(nn.Module):
         self.inference_buffers_chunk = {}
         self.max_size_chunk = {}
 
-        # TODO: propagate max_batch_size from outside
-        self.max_batch_size = 8
-
-        self.register_buffer(
-            "att_cache_buffer",
-            torch.zeros((16, 2 * self.max_batch_size, 8, 1000, 128)),
-            persistent=False,
-        )
-        self.register_buffer(
-            "cnn_cache_buffer",
-            torch.zeros((16, 2 * self.max_batch_size, 1024, 2)),
-            persistent=False,
-        )
-
     def initialize_weights(self):
         # Initialize transformer layers:
         def _basic_init(module):
@@ -692,8 +678,9 @@ class DiT(nn.Module):
         nn.init.constant_(self.final_layer.linear.bias, 0)
 
     def _init_cuda_graph_chunk(self):
-        # get dtype, device from registered buffer
-        dtype, device = self.cnn_cache_buffer.dtype, self.cnn_cache_buffer.device
+        # get dtype, device from model parameters
+        param = next(self.parameters())
+        dtype, device = param.dtype, param.device
         # init cuda graph for streaming forward
         with torch.no_grad():
             for chunk_size in [30, 48, 96]:
@@ -850,34 +837,35 @@ class DiT(nn.Module):
             ]
         else:
             mask = None
-            x = self.blocks_forward_chunk(
+            x, new_cnn_cache, new_att_cache = self.blocks_forward_chunk(
                 x,
                 t,
                 mask,
                 cnn_cache,
                 att_cache,
-                self.cnn_cache_buffer[:, :batch_size],
-                self.att_cache_buffer[:, :batch_size],
             )
-            new_cnn_cache = self.cnn_cache_buffer[:, :batch_size, :, :]
-            new_att_cache = self.att_cache_buffer[:, :batch_size, :, : last_att_len + chunk_size, :]
 
         return x, new_cnn_cache, new_att_cache
 
     def blocks_forward_chunk(
-        self, x, t, mask, cnn_cache=None, att_cache=None, cnn_cache_buffer=None, att_cache_buffer=None
+        self, x, t, mask, cnn_cache=None, att_cache=None
     ):
         x = x.transpose(1, 2)
         x = self.in_proj(x)
+        new_cnn_caches = []
+        new_att_caches = []
         for b_idx, block in enumerate(self.blocks):
             x, this_new_cnn_cache, this_new_att_cache = block.forward_chunk(
                 x, t, cnn_cache[b_idx], att_cache[b_idx], mask
             )
-            cnn_cache_buffer[b_idx] = this_new_cnn_cache
-            att_cache_buffer[b_idx][:, :, : this_new_att_cache.shape[2], :] = this_new_att_cache
+            new_cnn_caches.append(this_new_cnn_cache)
+            new_att_caches.append(this_new_att_cache)
         x = self.final_layer(x, t)
         x = x.transpose(1, 2)
-        return x
+        # Stack collected caches
+        new_cnn_cache = torch.stack(new_cnn_caches, dim=0)
+        new_att_cache = torch.stack(new_att_caches, dim=0)
+        return x, new_cnn_cache, new_att_cache
 
 
 class CausalConditionalCFM(torch.nn.Module):
@@ -886,26 +874,6 @@ class CausalConditionalCFM(torch.nn.Module):
         self.estimator = estimator
         self.inference_cfg_rate = inference_cfg_rate
         self.out_channels = estimator.out_channels
-
-        # TODO: propagate max_batch_size from outside
-        self.max_batch_size = 8
-
-        # a maximum of 600s
-        self.register_buffer(
-            "rand_noise",
-            torch.randn([self.max_batch_size, self.out_channels, 50 * 600]),
-            persistent=False,
-        )
-        self.register_buffer(
-            "cnn_cache_buffer",
-            torch.zeros(16, 16, 2 * self.max_batch_size, 1024, 2),
-            persistent=False,
-        )
-        self.register_buffer(
-            "att_cache_buffer",
-            torch.zeros(16, 16, 2 * self.max_batch_size, 8, 1000, 128),
-            persistent=False,
-        )
 
     def scatter_cuda_graph(self, enable_cuda_graph: bool):
         if enable_cuda_graph:
@@ -1001,20 +969,16 @@ class CausalConditionalCFM(torch.nn.Module):
             cnn_cache = [None for _ in range(len(t_span) - 1)]
         if att_cache is None:
             att_cache = [None for _ in range(len(t_span) - 1)]
-        # next chunk's cache at each timestep
-
-        if att_cache[0] is not None:
-            last_att_len = att_cache.shape[4]
-        else:
-            last_att_len = 0
 
         # constant during denoising
         mu_in = torch.cat([mu, torch.zeros_like(mu)], dim=0)
         spks_in = torch.cat([spks, torch.zeros_like(spks)], dim=0)
         cond_in = torch.cat([cond, torch.zeros_like(cond)], dim=0)
+
+        new_cnn_caches = []
+        new_att_caches = []
+
         for step in range(1, len(t_span)):
-            # torch.cuda.memory._record_memory_history(max_entries=100000)
-            # torch.cuda.memory._record_memory_history(max_entries=100000)
             this_att_cache = att_cache[step - 1]
             this_cnn_cache = cnn_cache[step - 1]
 
@@ -1034,11 +998,12 @@ class CausalConditionalCFM(torch.nn.Module):
             if step < len(t_span) - 1:
                 dt = t_span[step + 1] - t
 
-            self.cnn_cache_buffer[step - 1, :, :2 * mu.size(0)] = this_new_cnn_cache
-            self.att_cache_buffer[step - 1][:, :2 * mu.size(0), :, : x.shape[2] + last_att_len, :] = this_new_att_cache
+            new_cnn_caches.append(this_new_cnn_cache)
+            new_att_caches.append(this_new_att_cache)
 
-        cnn_cache = self.cnn_cache_buffer[:, :, :2 * mu.size(0), :, :]
-        att_cache = self.att_cache_buffer[:, :, :2 * mu.size(0), :, : x.shape[2] + last_att_len, :]
+        # Stack collected caches
+        cnn_cache = torch.stack(new_cnn_caches, dim=0)
+        att_cache = torch.stack(new_att_caches, dim=0)
         return x, cnn_cache, att_cache
 
     @torch.inference_mode()
@@ -1060,9 +1025,10 @@ class CausalConditionalCFM(torch.nn.Module):
             cnn_cache: shape (n_time, depth, b, c1+c2, 2)
             att_cache: shape (n_time, depth, b, nh, t, c * 2)
         """
-        # get offset from att_cache
+        # Generate a single random noise and replicate across batch for identical start
         offset = att_cache.shape[4] if att_cache is not None else 0
-        z = self.rand_noise[:mu.size(0), :, offset : offset + mu.size(2)] * temperature
+        single_noise = torch.randn(1, mu.size(1), mu.size(2), device=mu.device, dtype=mu.dtype) * temperature
+        z = single_noise.expand(mu.size(0), -1, -1)
         t_span = torch.linspace(0, 1, n_timesteps + 1, device=mu.device, dtype=mu.dtype)
         # cosine scheduling
         t_span = 1 - torch.cos(t_span * 0.5 * torch.pi)
