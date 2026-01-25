@@ -1039,7 +1039,9 @@ class CosyVoice2Decoder(nn.Module):
                 cache_len = new_flow_decoder_cache.att_cache.shape[5]
                 if cache_len > self.MAX_CACHE_LEN:
                     prefix = new_flow_decoder_cache.att_cache[:, :, :, :, :, :self.PREFIX_LEN, :]
-                    suffix = new_flow_decoder_cache.att_cache[:, :, :, :, :, -(self.MAX_CACHE_LEN - self.PREFIX_LEN):, :]
+                    suffix = new_flow_decoder_cache.att_cache[
+                        :, :, :, :, :, -(self.MAX_CACHE_LEN - self.PREFIX_LEN):, :
+                    ]
                     new_flow_decoder_cache.att_cache = torch.cat([prefix, suffix], dim=5)
 
         # HiFT forward pass with caching

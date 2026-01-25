@@ -2692,7 +2692,9 @@ class CausalConditionalCFM(torch.nn.Module):
 
         return output, updated_cache
 
-    def solve_euler_with_cache(self, x, t_span, mu, spks, cond, cnn_cache=None, att_cache=None, streaming=True, return_cache=True):
+    def solve_euler_with_cache(
+        self, x, t_span, mu, spks, cond, cnn_cache=None, att_cache=None, streaming=True, return_cache=True
+    ):
         """
         Euler solver with layer-wise caching support for streaming inference.
 
