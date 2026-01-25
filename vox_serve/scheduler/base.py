@@ -296,7 +296,12 @@ class Scheduler:
 
             # req.next_audio_decode_idx[-1] is the last decode index
             next_decode_idx = req.next_audio_decode_idx[-1] + step if req.next_audio_decode_idx else 0
-            if req.done_lm_generation or next_decode_idx + detokenize_interval <= len(req.lm_output_audio_tokens):
+            if req.done_lm_generation:
+                # Only schedule if there are tokens left to decode
+                if next_decode_idx < len(req.lm_output_audio_tokens):
+                    req.next_audio_decode_idx = [next_decode_idx]
+                    detokenize_requests.append(req)
+            elif next_decode_idx + detokenize_interval <= len(req.lm_output_audio_tokens):
                 req.next_audio_decode_idx = [next_decode_idx]
                 detokenize_requests.append(req)
 

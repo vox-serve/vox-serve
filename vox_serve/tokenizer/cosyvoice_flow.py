@@ -2455,6 +2455,7 @@ class CausalConditionalDecoder(ConditionalDecoder):
         cnn_cache: Optional[List[torch.Tensor]] = None,
         att_cache: Optional[torch.Tensor] = None,
         streaming: bool = True,
+        return_cache: bool = True,
     ) -> Tuple[torch.Tensor, List[torch.Tensor], torch.Tensor]:
         """Forward pass with layer-wise caching for streaming inference.
 
@@ -2467,14 +2468,15 @@ class CausalConditionalDecoder(ConditionalDecoder):
             cnn_cache: List of CNN layer caches, one per resnet layer
             att_cache: Attention layer cache (batch, n_layers, num_heads, seq_len, 2*head_dim)
             streaming: Whether to use streaming mode
+            return_cache: Whether to return updated caches (False saves memory in shared prompt mode)
 
         Returns:
             Tuple of (output, updated_cnn_cache, updated_att_cache)
         """
 
-        # Cache update buffers
-        new_cnn_cache = []
-        new_att_cache = []
+        # Cache update buffers (only allocate if we need to return them)
+        new_cnn_cache = [] if return_cache else None
+        new_att_cache = [] if return_cache else None
 
         t = self.time_embeddings(t).to(t.dtype)
         t = self.time_mlp(t)
@@ -2496,7 +2498,7 @@ class CausalConditionalDecoder(ConditionalDecoder):
             x, resnet_cnn_cache = resnet.forward_chunk(
                 x, t, cnn_cache=cnn_cache[cnn_layer_idx] if cnn_cache is not None else None
             )
-            if resnet_cnn_cache is not None:
+            if return_cache and resnet_cnn_cache is not None:
                 new_cnn_cache.append(resnet_cnn_cache)
             cnn_layer_idx += 1
 
@@ -2510,7 +2512,7 @@ class CausalConditionalDecoder(ConditionalDecoder):
                     timestep=t,
                 )
                 # Update attention cache for this layer
-                if layer_cache is not None:
+                if return_cache and layer_cache is not None:
                     new_att_cache.append(layer_cache)
                 att_layer_idx += 1
 
@@ -2522,7 +2524,7 @@ class CausalConditionalDecoder(ConditionalDecoder):
             x, resnet_cnn_cache = resnet.forward_chunk(
                 x, t, cnn_cache=cnn_cache[cnn_layer_idx] if cnn_cache is not None else None
             )
-            if resnet_cnn_cache is not None:
+            if return_cache and resnet_cnn_cache is not None:
                 new_cnn_cache.append(resnet_cnn_cache)
             cnn_layer_idx += 1
 
@@ -2536,7 +2538,7 @@ class CausalConditionalDecoder(ConditionalDecoder):
                     timestep=t,
                 )
                 # Update attention cache for this layer
-                if layer_cache is not None:
+                if return_cache and layer_cache is not None:
                     new_att_cache.append(layer_cache)
                 att_layer_idx += 1
 
@@ -2548,7 +2550,7 @@ class CausalConditionalDecoder(ConditionalDecoder):
             x, resnet_cnn_cache = resnet.forward_chunk(
                 x, t, cnn_cache=cnn_cache[cnn_layer_idx] if cnn_cache is not None else None
             )
-            if resnet_cnn_cache is not None:
+            if return_cache and resnet_cnn_cache is not None:
                 new_cnn_cache.append(resnet_cnn_cache)
             cnn_layer_idx += 1
 
@@ -2562,7 +2564,7 @@ class CausalConditionalDecoder(ConditionalDecoder):
                     timestep=t,
                 )
                 # Update attention cache for this layer
-                if layer_cache is not None:
+                if return_cache and layer_cache is not None:
                     new_att_cache.append(layer_cache)
                 att_layer_idx += 1
 
@@ -2572,7 +2574,11 @@ class CausalConditionalDecoder(ConditionalDecoder):
         x = self.final_block(x, mask=torch.ones_like(x))
         output = self.final_proj(x)
 
-        new_att_cache = torch.stack(new_att_cache, dim=0).transpose(0, 1)
+        # Only create stacked cache if needed (expensive operation)
+        if return_cache:
+            new_att_cache = torch.stack(new_att_cache, dim=0).transpose(0, 1)
+        else:
+            new_att_cache = None
 
         return output, new_cnn_cache, new_att_cache
 
@@ -2643,6 +2649,7 @@ class CausalConditionalCFM(torch.nn.Module):
         spks: Optional[torch.Tensor] = None,
         cond: Optional[torch.Tensor] = None,
         last_chunk: bool = False,
+        return_cache: bool = True,
     ) -> Tuple[torch.Tensor, FlowDecoderCache]:
         """Forward with caching for streaming inference.
 
@@ -2654,6 +2661,7 @@ class CausalConditionalCFM(torch.nn.Module):
             spks: Speaker embeddings (batch_size, spk_emb_dim)
             cond: Conditional features (placeholder)
             last_chunk: Whether this is the last chunk
+            return_cache: Whether to return updated caches (False saves memory in shared prompt mode)
 
         Returns:
             Tuple of (generated_chunk, updated_cache)
@@ -2669,17 +2677,24 @@ class CausalConditionalCFM(torch.nn.Module):
         # Solve with layer-wise caches
         output, new_cnn_cache, new_att_cache = self.solve_euler_with_cache(
             z, t_span=t_span, mu=mu, spks=spks, cond=cond,
-            cnn_cache=cache.cnn_cache, att_cache=cache.att_cache, streaming=True
+            cnn_cache=cache.cnn_cache, att_cache=cache.att_cache, streaming=True,
+            return_cache=return_cache,
         )
 
-        updated_cache = FlowDecoderCache(
-            cnn_cache=new_cnn_cache,
-            att_cache=new_att_cache,
-        )
+        if return_cache:
+            updated_cache = FlowDecoderCache(
+                cnn_cache=new_cnn_cache,
+                att_cache=new_att_cache,
+            )
+        else:
+            # Return original cache unchanged
+            updated_cache = cache
 
         return output, updated_cache
 
-    def solve_euler_with_cache(self, x, t_span, mu, spks, cond, cnn_cache=None, att_cache=None, streaming=True):
+    def solve_euler_with_cache(
+        self, x, t_span, mu, spks, cond, cnn_cache=None, att_cache=None, streaming=True, return_cache=True
+    ):
         """
         Euler solver with layer-wise caching support for streaming inference.
 
@@ -2692,6 +2707,7 @@ class CausalConditionalCFM(torch.nn.Module):
             cnn_cache: CNN layer cache - List of lists: outer=n_timesteps, inner=n_layers
             att_cache: Attention layer cache (n_timesteps, n_layers, batch, num_heads, seq_len, 2*head_dim)
             streaming: whether to use streaming mode
+            return_cache: Whether to return updated caches (False saves memory in shared prompt mode)
 
         Returns:
             Generated features and updated caches
@@ -2712,8 +2728,8 @@ class CausalConditionalCFM(torch.nn.Module):
         spks_in[:batch_size] = spks
         cond_in[:batch_size] = cond
 
-        new_cnn_cache = []
-        new_att_cache = []
+        new_cnn_cache = [] if return_cache else None
+        new_att_cache = [] if return_cache else None
 
         for step in range(1, len(t_span)):
             x_in[:batch_size] = x
@@ -2741,16 +2757,17 @@ class CausalConditionalCFM(torch.nn.Module):
                 cond=cond_in,
                 cnn_cache=this_cnn_cache,
                 att_cache=this_att_cache,
-                streaming=streaming
+                streaming=streaming,
+                return_cache=return_cache,
             )
-            if this_new_cnn_cache is not None:
+            if return_cache and this_new_cnn_cache is not None:
                 reshaped_cnn_cache = [
                     cache.reshape(2, batch_size, *cache.shape[1:]).transpose(0, 1) if cache is not None else None
                     for cache in this_new_cnn_cache
                 ]
                 new_cnn_cache.append(reshaped_cnn_cache)
 
-            if this_new_att_cache is not None:
+            if return_cache and this_new_att_cache is not None:
                 reshaped_att_cache = (
                     this_new_att_cache.reshape(2, batch_size, *this_new_att_cache.shape[1:]).transpose(0, 1)
                 )
@@ -2765,12 +2782,16 @@ class CausalConditionalCFM(torch.nn.Module):
             if step < len(t_span) - 1:
                 dt = t_span[step + 1] - t
 
-        if len(new_att_cache) > 0:
-            new_att_cache = torch.stack(new_att_cache, dim=0).transpose(0, 1).transpose(1, 2)
+        if return_cache:
+            if len(new_att_cache) > 0:
+                new_att_cache = torch.stack(new_att_cache, dim=0).transpose(0, 1).transpose(1, 2)
+            else:
+                new_att_cache = None
+
+            new_cnn_cache = None if len(new_cnn_cache) == 0 else new_cnn_cache
         else:
             new_att_cache = None
-
-        new_cnn_cache = None if len(new_cnn_cache) == 0 else new_cnn_cache
+            new_cnn_cache = None
 
         return x, new_cnn_cache, new_att_cache
 
@@ -2895,6 +2916,7 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
         encoder_cache: FlowEncoderCache,
         decoder_cache: FlowDecoderCache,
         last_chunk: bool = False,
+        return_cache: bool = True,
     ) -> Tuple[torch.Tensor, torch.Tensor, FlowEncoderCache, FlowDecoderCache]:
         """Forward with caching for streaming inference.
 
@@ -2907,6 +2929,7 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
             encoder_cache: Encoder cache state
             decoder_cache: Decoder cache state
             last_chunk: Whether this is the last chunk
+            return_cache: Whether to return updated caches (False saves memory in shared prompt mode)
 
         Returns:
             Tuple of (features, h_lengths, updated_encoder_cache, updated_decoder_cache)
@@ -2951,6 +2974,7 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
             cond=conds,
             n_timesteps=10,
             last_chunk=last_chunk,
+            return_cache=return_cache,
         )
 
         return feat.float(), new_encoder_cache, new_decoder_cache

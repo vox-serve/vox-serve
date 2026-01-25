@@ -102,12 +102,15 @@ class OnlineScheduler(Scheduler):
         step = detokenize_interval - detokenize_overlap
 
         # Get all requests that are ready for detokenization
-        detokenize_candidates = [
-            req for req in self.active_requests
-            if req.done_lm_generation or (
-                req.next_audio_decode_idx[-1] + step if req.next_audio_decode_idx else 0
-            ) + detokenize_interval <= len(req.lm_output_audio_tokens)
-        ]
+        detokenize_candidates = []
+        for req in self.active_requests:
+            next_decode_idx = req.next_audio_decode_idx[-1] + step if req.next_audio_decode_idx else 0
+            if req.done_lm_generation:
+                # Only include if there are tokens left to decode
+                if next_decode_idx < len(req.lm_output_audio_tokens):
+                    detokenize_candidates.append(req)
+            elif next_decode_idx + detokenize_interval <= len(req.lm_output_audio_tokens):
+                detokenize_candidates.append(req)
 
         if not detokenize_candidates:
             return []
@@ -175,7 +178,7 @@ class OnlineScheduler(Scheduler):
                 remaining -= 1
 
             # If generation is done, try to include the final index if there's still budget
-            if req.done_lm_generation and remaining > 0:
+            if req.done_lm_generation and remaining > 0 and next_decode_idx < len(req.lm_output_audio_tokens):
                 audio_idx_list.append(next_decode_idx)
                 remaining -= 1
 
@@ -208,7 +211,7 @@ class OnlineScheduler(Scheduler):
                     next_decode_idx += step
                     remaining_slots -= 1
 
-                if req.done_lm_generation and remaining_slots > 0:
+                if req.done_lm_generation and remaining_slots > 0 and next_decode_idx < len(req.lm_output_audio_tokens):
                     audio_idx_list.append(next_decode_idx)
                     remaining_slots -= 1
 

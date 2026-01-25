@@ -305,11 +305,22 @@ class CosyVoice2ForCausalLM(nn.Module):
 
 
 class CosyVoice2Model(BaseLM):
-    def __init__(self, model_name, dtype=torch.bfloat16, device="cuda:0", enable_torch_compile=False):
+    def __init__(
+        self,
+        model_name,
+        dtype=torch.bfloat16,
+        device="cuda:0",
+        enable_torch_compile=False,
+        use_detokenizer_cache=False,
+    ):
         if model_name == "cosyvoice2":
             model_name = "FunAudioLLM/CosyVoice2-0.5B"
         super().__init__(model_name, device, dtype, enable_torch_compile)
         self.logger = get_logger(__name__)
+        # use_detokenizer_cache controls cache behavior:
+        # - True: Per-request evolving cache (each request has its own cache that updates)
+        # - False: Shared prompt cache mode (single static cache shared across all requests/timesteps)
+        self.use_detokenizer_cache = use_detokenizer_cache
         # fixed config for now
         self.config = CosyVoice2Config()
 
@@ -354,6 +365,7 @@ class CosyVoice2Model(BaseLM):
         self.audio_decoder = CosyVoice2Decoder(
             model_path=model_name,
             device=device,
+            shared_prompt_cache_mode=(not self.use_detokenizer_cache),
         )
         self.audio_decoder.to(device)
 
@@ -382,6 +394,11 @@ class CosyVoice2Model(BaseLM):
 
         # Initialize decoder cache after default conditions are set
         self._audio_decoder_initial_cache = self.audio_decoder.init_cache(self.default_speaker_ref_dict)
+
+        # For prompt caching mode (use_detokenizer_cache=False), store the precomputed prompt cache
+        # This will be shared across all requests and reused for every timestep
+        if not self.use_detokenizer_cache:
+            self._shared_prompt_cache = self._audio_decoder_initial_cache
 
     def _expand_flow_encoder_cache(self, cache: FlowEncoderCache, batch_size: int) -> FlowEncoderCache:
         """Expand flow encoder cache to match the given batch size."""
@@ -479,7 +496,20 @@ class CosyVoice2Model(BaseLM):
         )
 
     def audio_decoder_initial_cache(self, batch_size: int):
-        """Create initial decoder cache for the given batch size."""
+        """Create initial decoder cache for the given batch size.
+
+        When use_detokenizer_cache=False (prompt caching mode):
+            Returns None - the shared prompt cache is stored in self._shared_prompt_cache
+            and will be used directly in postprocess() without worker management.
+
+        When use_detokenizer_cache=True (per-request caching mode):
+            Returns a per-request copy of the cache that the worker will manage and update.
+        """
+        if not self.use_detokenizer_cache:
+            # Prompt caching mode: return None so worker doesn't manage the cache
+            # The shared prompt cache is stored in self._shared_prompt_cache
+            return None
+
         base_cache = self._audio_decoder_initial_cache
 
         # Expand flow caches to match the batch size
@@ -1027,7 +1057,19 @@ class CosyVoice2Model(BaseLM):
 
         return output_ids, task
 
-    def postprocess(self, token_ids: torch.Tensor, decoder_cache: CosyVoice2DecoderCache):
+    def postprocess(self, token_ids: torch.Tensor, decoder_cache: CosyVoice2DecoderCache | None = None):
+        if not self.use_detokenizer_cache:
+            # Prompt caching mode: use shared prompt cache for all requests
+            audio_tensor, _ = self.audio_decoder.decode_chunk(
+                token_ids[:, :, 0],
+                speech_token_lens=self.detokenize_interval,
+                decoder_cache=self._shared_prompt_cache,
+                ref_dict=self.default_speaker_ref_dict,
+            )
+            # Don't update the cache - it's shared and static
+            return audio_tensor[:, None, :]  # add channel dimension
+
+        # Per-request caching mode: use and update per-request cache
         audio_tensor, new_decoder_cache = self.audio_decoder.decode_chunk(
             token_ids[:, :, 0],
             speech_token_lens=self.detokenize_interval,

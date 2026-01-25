@@ -451,9 +451,11 @@ class HiFTGenerator(nn.Module):
         lrelu_slope: float = 0.1,
         audio_limit: float = 0.99,
         f0_predictor: torch.nn.Module = None,
+        device: torch.device = torch.device("cuda"),
     ):
         super(HiFTGenerator, self).__init__()
 
+        self.device = device
         self.out_channels = 1
         self.nb_harmonics = nb_harmonics
         self.sampling_rate = sampling_rate
@@ -520,7 +522,7 @@ class HiFTGenerator(nn.Module):
         self.reflection_pad = nn.ReflectionPad1d((1, 0))
         self.stft_window = torch.from_numpy(
             get_window("hann", istft_params["n_fft"], fftbins=True).astype(np.float32)
-        ).to("cuda")
+        ).to(self.device)
         self.f0_predictor = ConvRNNF0Predictor() if f0_predictor is None else f0_predictor
 
     def remove_weight_norm(self):
@@ -557,7 +559,7 @@ class HiFTGenerator(nn.Module):
             torch.complex(real.to(torch.float32), img.to(torch.float32)),
             self.istft_params["n_fft"],
             self.istft_params["hop_len"],
-            self.stft_window.to(magnitude.dtype)
+            self.stft_window.to(magnitude.device).to(magnitude.dtype)
         ).to(magnitude.dtype)
         return inverse_transform
 
