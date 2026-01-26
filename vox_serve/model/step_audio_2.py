@@ -639,18 +639,6 @@ class StepAudio2Model(BaseLM):
     def audio_decoder_initial_cache(self, batch_size: int):
         base_cache = self._audio_decoder_initial_cache
 
-        # Default: clone per-tensor to create an independent cache instance
-        # IMPORTANT: Ensure all tensors are contiguous to avoid memory allocation during CUDA graph capture
-        # The .repeat() operation creates views which may not be contiguous.
-        #
-        # For multi-GPU setups: Since base_cache is already on audio_decoder_device (set during __init__),
-        # the .repeat() operations will create views on the same device. We avoid .to() calls to prevent
-        # device transfer operations during CUDA graph capture. Instead, we ensure tensors are contiguous
-        # which is safe during capture as it only reorganizes memory layout.
-        #
-        # Note: .repeat() creates views that share memory but may not be contiguous. We call .contiguous()
-        # to create new tensors with contiguous memory layout, which is required for CUDA graph capture.
-        # This also ensures the tensors are properly on the same device as base_cache.
         return StepAudio2DecoderCache(
             spk_emb=base_cache.spk_emb.repeat(batch_size, 1).contiguous(),
             conformer_cnn_cache=base_cache.conformer_cnn_cache.repeat(batch_size, 1, 1).contiguous(),

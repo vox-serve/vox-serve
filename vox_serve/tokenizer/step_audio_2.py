@@ -1752,8 +1752,6 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
         estimator_att_cache = cache["estimator_att_cache"]
 
         # Permute cache tensors for internal use
-        # NOTE: Skip .contiguous() to avoid memory allocation during CUDA graph capture
-        # PyTorch operations work fine with non-contiguous permuted tensors
         if isinstance(conformer_att_cache, torch.Tensor):
             conformer_att_cache = conformer_att_cache.permute(1, 0, 2, 3, 4)
         if isinstance(estimator_cnn_cache, torch.Tensor):
@@ -1786,7 +1784,6 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
         )
 
         # Permute back to batch-first format for output cache
-        # NOTE: Skip .contiguous() to avoid memory allocation during CUDA graph capture
         if isinstance(conformer_att_cache, torch.Tensor):
             conformer_att_cache = conformer_att_cache.permute(1, 0, 2, 3, 4)
         if isinstance(estimator_cnn_cache, torch.Tensor):

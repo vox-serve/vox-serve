@@ -1,6 +1,7 @@
 import asyncio
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import List, Set
 
 import torch
@@ -45,6 +46,9 @@ class MultiGpuScheduler(Scheduler):
         # Track which requests are currently being detokenized to avoid duplicates
         self.detokenizing_request_ids: Set[str] = set()
 
+        # Thread pool executor for running blocking GPU operations
+        self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="detokenize")
+
         self.logger.info(
             "MultiGpuScheduler initialized with parallel LM and detokenization loops"
         )
@@ -79,6 +83,9 @@ class MultiGpuScheduler(Scheduler):
                 await lm_task
                 lm_task = None
 
+            # Always queue requests that are ready for detokenization.
+            await self._queue_detokenize_requests()
+
             # Select requests for LM processing (inherited from base)
             async with self.requests_lock:
                 lm_requests = self._select_lm_requests()
@@ -100,9 +107,6 @@ class MultiGpuScheduler(Scheduler):
             if coro:
                 lm_task = asyncio.create_task(coro)
 
-            # Queue requests that are ready for detokenization
-            await self._queue_detokenize_requests()
-
             await asyncio.sleep(0)  # Yield control
 
     async def _detokenizer_loop(self):
@@ -123,12 +127,34 @@ class MultiGpuScheduler(Scheduler):
             # Mark requests as being processed
             for req in detokenize_requests:
                 self.detokenizing_request_ids.add(req.request_id)
+                # Copy next_audio_decode_idx to audio_decode_idx before detokenization
+                # (this is done in prepare_lm_inputs for base scheduler, but we call run_detokenize directly)
+                if req.next_audio_decode_idx:
+                    req.audio_decode_idx = req.next_audio_decode_idx.copy()
+                else:
+                    self.logger.warning(f"Request {req.request_id} has no next_audio_decode_idx, skipping detokenization")
+                    continue
 
-            # Run detokenization on GPU 1
-            self.model_worker.run_detokenize(detokenize_requests)
+            # Run detokenization on GPU 1 in executor to avoid blocking the event loop
+            try:
+                await asyncio.get_event_loop().run_in_executor(
+                    self.executor,
+                    self.model_worker.run_detokenize,
+                    detokenize_requests
+                )
+            except Exception as e:
+                self.logger.error(f"Error in detokenization: {e}")
+                import traceback
+                self.logger.error(f"Traceback: {traceback.format_exc()}")
+                continue
 
             # Send responses back to clients (inherited from base)
-            await self._send_responses_async(detokenize_requests)
+            try:
+                await self._send_responses_async(detokenize_requests)
+            except Exception as e:
+                self.logger.error(f"Error sending responses: {e}")
+                import traceback
+                self.logger.error(f"Traceback: {traceback.format_exc()}")
 
             # Unmark requests
             for req in detokenize_requests:
@@ -192,7 +218,15 @@ class MultiGpuScheduler(Scheduler):
         """
         Override to handle request removal with locking.
         """
+        self.logger.debug(f"Sending responses for {len(detokenize_requests)} requests")
         for req in detokenize_requests:
+            self.logger.debug(f"Sending responses for request {req.request_id}")
+            self.logger.debug(f"Output done all: {req.done_all}")
+            self.logger.debug(f"Output queue size: {req.output_audio.qsize()}")
+            self.logger.debug(f"Output done lm generation: {req.done_lm_generation}")
+            self.logger.debug(f"Output audio decode idx: {req.audio_decode_idx}")
+            self.logger.debug(f"Output audio decode idx length: {len(req.audio_decode_idx)}")
+            self.logger.debug(f"Output audio tokens length: {len(req.lm_output_audio_tokens)}")
             while not req.output_audio.empty():
                 # Send audio chunk
                 audio_chunk = req.output_audio.get()
@@ -205,7 +239,13 @@ class MultiGpuScheduler(Scheduler):
                     req.chunk_durations.append(duration)
 
                 message = req.request_id.encode("utf-8") + b"|AUDIO|" + audio_chunk
-                await self.result_socket.send(message)
+                try:
+                    self.logger.debug(f"Sending audio chunk for request {req.request_id}, size: {len(audio_chunk)} bytes")
+                    await self.result_socket.send(message)
+                    self.logger.debug(f"Sent audio chunk for request {req.request_id}, size: {len(audio_chunk)} bytes")
+                except Exception as e:
+                    self.logger.error(f"Error sending audio chunk for request {req.request_id}: {e}")
+                    raise
 
             # Send completion notification for finished requests
             if req.done_all:
@@ -220,7 +260,13 @@ class MultiGpuScheduler(Scheduler):
                     req.request_id.encode("utf-8") + b"|COMPLETION|" + json.dumps(completion_message).encode("utf-8")
                 )
                 self.logger.debug("Sending completion for request %s", req.request_id)
-                await self.result_socket.send(completion_payload)
+                try:
+                    self.logger.debug(f"Sending completion for request {req.request_id}, size: {len(completion_payload)} bytes")
+                    await self.result_socket.send(completion_payload)
+                    self.logger.debug("Successfully sent completion for request %s", req.request_id)
+                except Exception as e:
+                    self.logger.error(f"Error sending completion for request {req.request_id}: {e}")
+                    raise
 
     async def _prepare_requests_async(self):
         """
