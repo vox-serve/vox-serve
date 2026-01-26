@@ -22,7 +22,7 @@ from typing import List, Optional
 
 import aiohttp
 import numpy as np
-from datasets import load_dataset
+from datasets import DatasetDict, load_dataset
 
 
 @dataclass
@@ -104,7 +104,7 @@ class BenchmarkClient:
     def _load_dataset(self, data_source: str):
         """Load dataset based on data source specification."""
         repo_id = "efficient-speech/tts-serving-benchmark"
-        
+
         if data_source == "hifi":
             ds = load_dataset(repo_id, data_dir="hifi-tts_clean")
             self.dataset = ds["test"]
@@ -117,9 +117,36 @@ class BenchmarkClient:
             ds = load_dataset(repo_id, data_dir="lj-speech_default")
             self.dataset = ds["train"]  # Only train split
             self.text_column = "normalized_text"
+        elif data_source == "alpacaeval":
+            sts_repo_id = "efficient-speech/sts-serving-benchmark"
+            ds = load_dataset(sts_repo_id, data_dir="alpacaeval")
+            # Try test split first, otherwise use the dataset directly
+            if isinstance(ds, DatasetDict) and "test" in ds:
+                self.dataset = ds["test"]
+            else:
+                self.dataset = ds
+            self.text_column = "prompt"
+        elif data_source == "commoneval":
+            sts_repo_id = "efficient-speech/sts-serving-benchmark"
+            ds = load_dataset(sts_repo_id, data_dir="commoneval")
+            # Try test split first, otherwise use the dataset directly
+            if isinstance(ds, DatasetDict) and "test" in ds:
+                self.dataset = ds["test"]
+            else:
+                self.dataset = ds
+            self.text_column = "prompt"
+        elif data_source == "wildvoice":
+            sts_repo_id = "efficient-speech/sts-serving-benchmark"
+            ds = load_dataset(sts_repo_id, data_dir="wildvoice")
+            # Try test split first, otherwise use the dataset directly
+            if isinstance(ds, DatasetDict) and "test" in ds:
+                self.dataset = ds["test"]
+            else:
+                self.dataset = ds
+            self.text_column = "prompt"
         else:
             raise ValueError(f"Unknown data source: {data_source}")
-        
+
         self.dataset_size = len(self.dataset)
         print(f"Loaded dataset '{data_source}': {self.dataset_size} samples, column '{self.text_column}'")
 
@@ -537,7 +564,7 @@ async def main():
                        help="Arrival burstiness parameter (default: 1.0 for Poisson). Lower values = more bursty")
     parser.add_argument("--save-audio", action="store_true", help="Save generated audio files")
     parser.add_argument("--data-source", type=str, default="fixed",
-                       choices=["fixed", "hifi", "libritts", "lj-speech"],
+                       choices=["fixed", "hifi", "libritts", "lj-speech", "alpacaeval", "commoneval", "wildvoice"],
                        help="Input data source: 'fixed' for fixed text, or dataset name (default: fixed)")
     parser.add_argument("--seed", type=int, default=42,
                        help="Random seed for reproducible experiments (default: 42)")
