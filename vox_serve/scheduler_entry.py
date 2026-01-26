@@ -40,15 +40,19 @@ def _run_scheduler_daemon(
 ) -> None:
     """Entry point for scheduler daemon that sets CUDA_VISIBLE_DEVICES before importing torch."""
     # DEBUG: Check if torch is already imported (should NOT be!)
-    torch_already_imported = 'torch' in sys.modules
+    torch_already_imported = "torch" in sys.modules
     print(f"[DP ENTRY] Rank {dp_rank}: Starting, torch already imported: {torch_already_imported}", flush=True)
-    print(f"[DP ENTRY] Rank {dp_rank}: CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', 'not set')}", flush=True)
+    print(
+        f"[DP ENTRY] Rank {dp_rank}: CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', 'not set')}",
+        flush=True,
+    )
 
     # Now import torch (will see the CUDA_VISIBLE_DEVICES set by parent process)
     import torch
 
     print(f"[DP ENTRY] Rank {dp_rank}: torch imported, available devices: {torch.cuda.device_count()}", flush=True)
-    print(f"[DP ENTRY] Rank {dp_rank}: Current device: {torch.cuda.current_device() if torch.cuda.is_available() else 'N/A'}", flush=True)
+    current_device = torch.cuda.current_device() if torch.cuda.is_available() else "N/A"
+    print(f"[DP ENTRY] Rank {dp_rank}: Current device: {current_device}", flush=True)
 
     if dp_size > 1:
         torch.cuda.empty_cache()
@@ -62,7 +66,9 @@ def _run_scheduler_daemon(
     logger = get_logger(__name__)
 
     if dp_size > 1:
-        logger.info(f"DP rank {dp_rank} using CUDA device {os.environ['CUDA_VISIBLE_DEVICES']}, torch sees {torch.cuda.device_count()} devices")
+        cuda_device = os.environ["CUDA_VISIBLE_DEVICES"]
+        device_count = torch.cuda.device_count()
+        logger.info(f"DP rank {dp_rank} using CUDA device {cuda_device}, torch sees {device_count} devices")
 
     # Adjust device for data parallel
     device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")

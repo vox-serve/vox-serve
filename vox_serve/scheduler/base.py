@@ -71,7 +71,11 @@ class Scheduler:
             self.logger.info(f"Using CudaGraphWorker{opt_text}")
             self.model_worker = CudaGraphWorker(**worker_kwargs)
         else:
-            opt_text = " with disaggregation optimization" if enable_disaggregation else " without CUDA graph optimization"
+            opt_text = (
+                " with disaggregation optimization"
+                if enable_disaggregation
+                else " without CUDA graph optimization"
+            )
             self.logger.info(f"Using ModelWorker{opt_text}")
             self.model_worker = ModelWorker(**worker_kwargs)
 

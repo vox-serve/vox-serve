@@ -152,6 +152,7 @@ class APIServer:
 
                 # Parse existing CUDA_VISIBLE_DEVICES mask if present
                 import os
+
                 existing_cuda_mask = os.environ.get("CUDA_VISIBLE_DEVICES", None)
                 if existing_cuda_mask is not None:
                     # User has pre-set a GPU mask, respect it
@@ -163,7 +164,7 @@ class APIServer:
                         )
                         raise ValueError(f"Insufficient GPUs in CUDA_VISIBLE_DEVICES mask for dp_size={self.dp_size}")
                     self.logger.info(f"Using existing CUDA_VISIBLE_DEVICES mask: {existing_cuda_mask}")
-                    gpu_mapping = available_gpus[:self.dp_size]
+                    gpu_mapping = available_gpus[: self.dp_size]
                 else:
                     # No mask set, use 0, 1, 2, ... dp_size-1
                     gpu_mapping = list(range(self.dp_size))
@@ -182,15 +183,24 @@ class APIServer:
                         sys.executable,
                         "-m",
                         "vox_serve.scheduler_entry",
-                        "--dp-rank", str(rank),
-                        "--dp-size", str(self.dp_size),
-                        "--model-name", self.model_name,
-                        "--scheduler-type", self.scheduler_type,
-                        "--max-batch-size", str(self.max_batch_size),
-                        "--page-size", str(self.page_size),
-                        "--request-socket-path", request_socket_path,
-                        "--result-socket-path", result_socket_path,
-                        "--log-level", get_global_log_level(),
+                        "--dp-rank",
+                        str(rank),
+                        "--dp-size",
+                        str(self.dp_size),
+                        "--model-name",
+                        self.model_name,
+                        "--scheduler-type",
+                        self.scheduler_type,
+                        "--max-batch-size",
+                        str(self.max_batch_size),
+                        "--page-size",
+                        str(self.page_size),
+                        "--request-socket-path",
+                        request_socket_path,
+                        "--result-socket-path",
+                        result_socket_path,
+                        "--log-level",
+                        get_global_log_level(),
                     ]
 
                     # Add optional parameters
@@ -228,7 +238,9 @@ class APIServer:
                     self.logger.info(f"Starting DP rank {rank} with CUDA_VISIBLE_DEVICES={gpu_mapping[rank]}")
                     process = subprocess.Popen(cmd, env=env)
                     self.scheduler_processes.append(process)
-                    self.logger.info(f"Started scheduler process (DP rank {rank}/{self.dp_size}) with PID: {process.pid}")
+                    self.logger.info(
+                        f"Started scheduler process (DP rank {rank}/{self.dp_size}) with PID: {process.pid}"
+                    )
             else:
                 # Single scheduler mode - use subprocess for consistency
                 self.scheduler_processes = None
@@ -242,15 +254,24 @@ class APIServer:
                     sys.executable,
                     "-m",
                     "vox_serve.scheduler_entry",
-                    "--dp-rank", "0",
-                    "--dp-size", "1",
-                    "--model-name", self.model_name,
-                    "--scheduler-type", self.scheduler_type,
-                    "--max-batch-size", str(self.max_batch_size),
-                    "--page-size", str(self.page_size),
-                    "--request-socket-path", request_socket_path,
-                    "--result-socket-path", result_socket_path,
-                    "--log-level", get_global_log_level(),
+                    "--dp-rank",
+                    "0",
+                    "--dp-size",
+                    "1",
+                    "--model-name",
+                    self.model_name,
+                    "--scheduler-type",
+                    self.scheduler_type,
+                    "--max-batch-size",
+                    str(self.max_batch_size),
+                    "--page-size",
+                    str(self.page_size),
+                    "--request-socket-path",
+                    request_socket_path,
+                    "--result-socket-path",
+                    result_socket_path,
+                    "--log-level",
+                    get_global_log_level(),
                 ]
 
                 # Add optional parameters
@@ -344,9 +365,7 @@ class APIServer:
                             )
                         else:
                             # Log when we receive messages for unknown requests
-                            self.logger.warning(
-                                f"Received {message_type} message for unknown request {request_id}"
-                            )
+                            self.logger.warning(f"Received {message_type} message for unknown request {request_id}")
 
             except zmq.Again:
                 # No message available, sleep briefly to avoid busy waiting
@@ -375,7 +394,7 @@ class APIServer:
                         except Exception as e:
                             self.logger.error(f"Error stopping scheduler {i}: {e}")
                 self.logger.info("All scheduler processes stopped")
-        elif hasattr(self, 'scheduler_process') and self.scheduler_process and self.scheduler_process.poll() is None:
+        elif hasattr(self, "scheduler_process") and self.scheduler_process and self.scheduler_process.poll() is None:
             self.logger.info("Stopping scheduler process...")
             try:
                 self.scheduler_process.terminate()
@@ -623,11 +642,7 @@ api_server = None
 
 
 @app.post("/generate")
-async def generate(
-    text: str = Form(...),
-    audio: Optional[UploadFile] = File(None),
-    streaming: bool = Form(True)
-):
+async def generate(text: str = Form(...), audio: Optional[UploadFile] = File(None), streaming: bool = Form(True)):
     """
     Generate speech from text and return audio file or streaming response.
 
@@ -710,7 +725,6 @@ async def generate(
             cleanup_thread.start()
 
 
-
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
@@ -754,140 +768,77 @@ def main():
         type=str,
         default="base",
         choices=["base", "online", "offline"],
-        help="Type of scheduler to use (default: base)"
+        help="Type of scheduler to use (default: base)",
     )
+    parser.add_argument("--async-scheduling", action="store_true", help="Enable async scheduling mode (default: False)")
+    parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind the server to (default: 0.0.0.0)")
+    parser.add_argument("--port", type=int, default=8000, help="Port to bind the server to (default: 8000)")
+    parser.add_argument("--max-batch-size", type=int, default=8, help="Maximum batch size for inference (default: 8)")
     parser.add_argument(
-        "--async-scheduling",
-        action="store_true",
-        help="Enable async scheduling mode (default: False)"
+        "--max-num-pages", type=int, default=2048, help="Maximum number of KV cache pages (default: 1024)"
     )
+    parser.add_argument("--page-size", type=int, default=128, help="Size of each KV cache page (default: 128)")
+    parser.add_argument("--top-p", type=float, default=None, help="Top-p sampling parameter (default: None)")
+    parser.add_argument("--top-k", type=int, default=None, help="Top-k sampling parameter (default: None)")
+    parser.add_argument("--min-p", type=float, default=None, help="Min-p sampling parameter (default: None)")
+    parser.add_argument("--temperature", type=float, default=None, help="Temperature for sampling (default: None)")
     parser.add_argument(
-        "--host",
-        type=str,
-        default="0.0.0.0",
-        help="Host to bind the server to (default: 0.0.0.0)"
+        "--max-tokens", type=int, default=None, help="Maximum number of tokens to generate (default: model-specific)"
     )
-    parser.add_argument(
-        "--port",
-        type=int,
-        default=8000,
-        help="Port to bind the server to (default: 8000)"
-    )
-    parser.add_argument(
-        "--max-batch-size",
-        type=int,
-        default=8,
-        help="Maximum batch size for inference (default: 8)"
-    )
-    parser.add_argument(
-        "--max-num-pages",
-        type=int,
-        default=2048,
-        help="Maximum number of KV cache pages (default: 1024)"
-    )
-    parser.add_argument(
-        "--page-size",
-        type=int,
-        default=128,
-        help="Size of each KV cache page (default: 128)"
-    )
-    parser.add_argument(
-        "--top-p",
-        type=float,
-        default=None,
-        help="Top-p sampling parameter (default: None)"
-    )
-    parser.add_argument(
-        "--top-k",
-        type=int,
-        default=None,
-        help="Top-k sampling parameter (default: None)"
-    )
-    parser.add_argument(
-        "--min-p",
-        type=float,
-        default=None,
-        help="Min-p sampling parameter (default: None)"
-    )
-    parser.add_argument(
-        "--temperature",
-        type=float,
-        default=None,
-        help="Temperature for sampling (default: None)"
-    )
-    parser.add_argument(
-        "--max-tokens",
-        type=int,
-        default=None,
-        help="Maximum number of tokens to generate (default: model-specific)"
-    )
-    parser.add_argument(
-        "--repetition-penalty",
-        type=float,
-        default=None,
-        help="Repetition penalty (default: None)"
-    )
-    parser.add_argument(
-        "--repetition-window",
-        type=int,
-        default=None,
-        help="Repetition window size (default: None)"
-    )
-    parser.add_argument(
-        "--cfg-scale",
-        type=float,
-        default=None,
-        help="CFG scale for guidance (default: None)"
-    )
+    parser.add_argument("--repetition-penalty", type=float, default=None, help="Repetition penalty (default: None)")
+    parser.add_argument("--repetition-window", type=int, default=None, help="Repetition window size (default: None)")
+    parser.add_argument("--cfg-scale", type=float, default=None, help="CFG scale for guidance (default: None)")
     parser.add_argument(
         "--greedy",
         action="store_true",
-        help="Enable greedy sampling (ignores top-k, top-p, min-p, and temperature parameters)"
+        help="Enable greedy sampling (ignores top-k, top-p, min-p, and temperature parameters)",
     )
     parser.add_argument(
         "--enable-cuda-graph",
         action="store_true",
         default=True,
-        help="Enable CUDA graph optimization for decode phase (default: True)"
+        help="Enable CUDA graph optimization for decode phase (default: True)",
     )
     parser.add_argument(
-        "--disable-cuda-graph",
-        action="store_true",
-        help="Disable CUDA graph optimization for decode phase"
+        "--disable-cuda-graph", action="store_true", help="Disable CUDA graph optimization for decode phase"
     )
     parser.add_argument(
         "--enable-disaggregation",
         action="store_true",
-        help="Enable disaggregation mode (requires at least 2 GPUs): LLM on GPU 0, detokenizer on GPU 1 (default: False)"
+        help=(
+            "Enable disaggregation mode (requires at least 2 GPUs): "
+            "LLM on GPU 0, detokenizer on GPU 1 (default: False)"
+        ),
     )
     parser.add_argument(
         "--dp-size",
         type=int,
         default=1,
-        help="Enable data parallel mode with N replicas (default: 1, disables DP). Cannot be used with --enable-disaggregation. Requires N <= available GPUs."
+        help=(
+            "Enable data parallel mode with N replicas (default: 1, disables DP). "
+            "Cannot be used with --enable-disaggregation. Requires N <= available GPUs."
+        ),
     )
     parser.add_argument(
         "--log-level",
         type=str,
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
-        help="Set the logging level (default: INFO)"
+        help="Set the logging level (default: INFO)",
     )
     parser.add_argument(
-        "--enable-nvtx",
-        action="store_true",
-        help="Enable NVTX profiling for performance analysis (default: False)"
+        "--enable-nvtx", action="store_true", help="Enable NVTX profiling for performance analysis (default: False)"
     )
     parser.add_argument(
         "--enable-torch-compile",
         action="store_true",
-        help="Enable torch.compile optimization for model inference (default: False)"
+        help="Enable torch.compile optimization for model inference (default: False)",
     )
     parser.add_argument(
         "--socket-suffix",
         type=str,
         default="",
-        help="Suffix to append to IPC socket paths to avoid conflicts (default: empty)"
+        help="Suffix to append to IPC socket paths to avoid conflicts (default: empty)",
     )
     args = parser.parse_args()
 
@@ -911,7 +862,9 @@ def main():
 
     # Check mutual exclusion between DP and disaggregation
     if args.dp_size > 1 and args.enable_disaggregation:
-        logger.error("Cannot enable both data parallel mode (--dp-size > 1) and disaggregation mode (--enable-disaggregation)")
+        logger.error(
+            "Cannot enable both data parallel mode (--dp-size > 1) and disaggregation mode (--enable-disaggregation)"
+        )
         logger.error("Please use one or the other")
         sys.exit(1)
 
@@ -921,12 +874,14 @@ def main():
         if args.dp_size > available_gpus:
             logger.error(f"--dp-size {args.dp_size} exceeds available GPU count {available_gpus}")
             sys.exit(1)
-        logger.info(f"Data parallel mode enabled with {args.dp_size} replicas (using GPUs 0-{args.dp_size-1})")
+        logger.info(f"Data parallel mode enabled with {args.dp_size} replicas (using GPUs 0-{args.dp_size - 1})")
 
     # Automatically select disaggregation scheduler if enable_disaggregation is set with CUDA graphs
     scheduler_type = args.scheduler_type
     if args.enable_disaggregation and enable_cuda_graph:
-        logger.info("Disaggregation mode enabled: using 'disaggregation' scheduler with parallel LM and detokenization loops")
+        logger.info(
+            "Disaggregation mode enabled: using 'disaggregation' scheduler with parallel LM and detokenization loops"
+        )
         scheduler_type = "disaggregation"
 
     # Construct socket paths with optional suffix

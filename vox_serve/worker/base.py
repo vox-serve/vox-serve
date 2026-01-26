@@ -55,8 +55,9 @@ class ModelWorker:
         # Check disaggregation setup
         if self.detokenizer_device != self.device:
             if torch.cuda.device_count() < 2:
+                gpu_count = torch.cuda.device_count()
                 raise RuntimeError(
-                    f"Disaggregation setup requires at least 2 GPUs, but only {torch.cuda.device_count()} GPU(s) available."
+                    f"Disaggregation setup requires at least 2 GPUs, but only {gpu_count} GPU(s) available."
                 )
             self.logger.info(f"Disaggregation mode: LLM on {self.device}, Detokenizer on {self.detokenizer_device}")
 
