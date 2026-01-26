@@ -22,10 +22,7 @@ from typing import List, Optional
 
 import aiohttp
 import numpy as np
-
-# Set random seed for reproducible results
-random.seed(42)
-np.random.seed(42)
+from datasets import load_dataset
 
 
 @dataclass
@@ -80,25 +77,60 @@ class BenchmarkResults:
 class BenchmarkClient:
     """Client for benchmarking vox-serve TTS server."""
 
-    def __init__(self, host: str, port: int, save_audio: bool = False):
+    def __init__(self, host: str, port: int, save_audio: bool = False, data_source: str = "fixed"):
         self.base_url = f"http://{host}:{port}"
         self.save_audio = save_audio
         self.output_dir = "benchmark_output"
         self.metrics: List[RequestMetrics] = []
+        self.data_source = data_source
+        self.dataset = None
+        self.dataset_size = 0
+        self.text_column = None
 
         if self.save_audio:
             os.makedirs(self.output_dir, exist_ok=True)
 
-        # Sample texts for generation
+        # Sample texts for generation (used when data_source is "fixed")
         self.sample_texts = [
-            "Hello world!",
-            # "Hello world, this is a test message for benchmarking the performance of the text-to-speech server. "
+            "Hello world! How are you?",
+            # "Hello world, this is a test message for benchmarking the performance of the text-to-speech server."
             # "We want to measure the time it takes to receive the first audio and the overall latency.",
         ]
 
+        # Load dataset if specified
+        if data_source != "fixed":
+            self._load_dataset(data_source)
+
+    def _load_dataset(self, data_source: str):
+        """Load dataset based on data source specification."""
+        repo_id = "efficient-speech/tts-serving-benchmark"
+        
+        if data_source == "hifi":
+            ds = load_dataset(repo_id, data_dir="hifi-tts_clean")
+            self.dataset = ds["test"]
+            self.text_column = "text"
+        elif data_source == "libritts":
+            ds = load_dataset(repo_id, data_dir="libritts_clean")
+            self.dataset = ds["test"]
+            self.text_column = "text_normalized"
+        elif data_source == "lj-speech":
+            ds = load_dataset(repo_id, data_dir="lj-speech_default")
+            self.dataset = ds["train"]  # Only train split
+            self.text_column = "normalized_text"
+        else:
+            raise ValueError(f"Unknown data source: {data_source}")
+        
+        self.dataset_size = len(self.dataset)
+        print(f"Loaded dataset '{data_source}': {self.dataset_size} samples, column '{self.text_column}'")
+
     def generate_random_text(self, min_words: int = 5, max_words: int = 20) -> str:
         """Generate random text for testing."""
-        return random.choice(self.sample_texts)
+        if self.data_source == "fixed":
+            return random.choice(self.sample_texts)
+        else:
+            # Randomly select an index from the dataset
+            idx = random.randint(0, self.dataset_size - 1)
+            return self.dataset[idx][self.text_column]
 
     def get_audio_duration(self, audio_data: bytes) -> float:
         """Calculate audio duration from WAV data."""
@@ -504,8 +536,17 @@ async def main():
     parser.add_argument("--burstiness", type=float, default=1.0,
                        help="Arrival burstiness parameter (default: 1.0 for Poisson). Lower values = more bursty")
     parser.add_argument("--save-audio", action="store_true", help="Save generated audio files")
+    parser.add_argument("--data-source", type=str, default="fixed",
+                       choices=["fixed", "hifi", "libritts", "lj-speech"],
+                       help="Input data source: 'fixed' for fixed text, or dataset name (default: fixed)")
+    parser.add_argument("--seed", type=int, default=42,
+                       help="Random seed for reproducible experiments (default: 42)")
 
     args = parser.parse_args()
+
+    # Set random seed for reproducible results
+    random.seed(args.seed)
+    np.random.seed(args.seed)
 
     # Validate arguments
     for rate in args.rate:
@@ -522,7 +563,7 @@ async def main():
         return 1
 
     # Create and run benchmark
-    client = BenchmarkClient(args.host, args.port, args.save_audio)
+    client = BenchmarkClient(args.host, args.port, args.save_audio, args.data_source)
 
     # Always use multiple benchmark approach
     print(f"Running benchmarks at rates: {args.rate}")

@@ -12,6 +12,7 @@ import argparse
 import asyncio
 import io
 import os
+import random
 import struct
 import time
 import wave
@@ -19,6 +20,7 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 import aiohttp
+from datasets import load_dataset
 
 
 @dataclass
@@ -53,16 +55,20 @@ class ThroughputResults:
 class ThroughputBenchmark:
     """Throughput benchmark client for vox-serve TTS server."""
 
-    def __init__(self, host: str, port: int, save_audio: bool = False):
+    def __init__(self, host: str, port: int, save_audio: bool = False, data_source: str = "fixed"):
         self.base_url = f"http://{host}:{port}"
         self.save_audio = save_audio
         self.output_dir = "benchmark_output"
         self.metrics: List[ThroughputMetrics] = []
+        self.data_source = data_source
+        self.dataset = None
+        self.dataset_size = 0
+        self.text_column = None
 
         if self.save_audio:
             os.makedirs(self.output_dir, exist_ok=True)
 
-        # Sample texts for generation
+        # Sample texts for generation (used when data_source is "fixed")
         self.sample_texts = [
             "Hello world!",
             "This is a test message for benchmarking throughput.",
@@ -70,6 +76,39 @@ class ThroughputBenchmark:
             "Testing the performance of the text-to-speech server.",
             "Measuring end-to-end latency and throughput metrics.",
         ]
+
+        # Load dataset if specified
+        if data_source != "fixed":
+            self._load_dataset(data_source)
+
+    def _load_dataset(self, data_source: str):
+        """Load dataset based on data source specification."""
+        repo_id = "efficient-speech/tts-serving-benchmark"
+        
+        if data_source == "hifi":
+            ds = load_dataset(repo_id, data_dir="hifi-tts_clean")
+            self.dataset = ds["test"]
+            self.text_column = "text"
+        elif data_source == "libritts":
+            ds = load_dataset(repo_id, data_dir="libritts_clean")
+            self.dataset = ds["test"]
+            self.text_column = "text_normalized"
+        elif data_source == "lj-speech":
+            ds = load_dataset(repo_id, data_dir="lj-speech_default")
+            self.dataset = ds["train"]  # Only train split
+            self.text_column = "normalized_text"
+        else:
+            raise ValueError(f"Unknown data source: {data_source}")
+        
+        self.dataset_size = len(self.dataset)
+        print(f"Loaded dataset '{data_source}': {self.dataset_size} samples, column '{self.text_column}'")
+
+    def get_text(self, index: int) -> str:
+        """Get text for a given index."""
+        if self.data_source == "fixed":
+            return self.sample_texts[index % len(self.sample_texts)]
+        else:
+            return self.dataset[index % self.dataset_size][self.text_column]
 
     def get_audio_duration(self, audio_data: bytes) -> float:
         """Calculate audio duration from WAV data."""
@@ -206,7 +245,7 @@ class ThroughputBenchmark:
             tasks = []
             for i in range(num_requests):
                 request_id = f"req_{i+1:06d}"
-                text = self.sample_texts[i % len(self.sample_texts)]
+                text = self.get_text(i)
                 task = asyncio.create_task(self.make_request(session, request_id, text))
                 tasks.append(task)
 
@@ -283,8 +322,16 @@ async def main():
     parser.add_argument("--num-requests", type=int, default=10,
                        help="Number of simultaneous requests to send (default: 10)")
     parser.add_argument("--save-audio", action="store_true", help="Save generated audio files")
+    parser.add_argument("--data-source", type=str, default="fixed",
+                       choices=["fixed", "hifi", "libritts", "lj-speech"],
+                       help="Input data source: 'fixed' for fixed text, or dataset name (default: fixed)")
+    parser.add_argument("--seed", type=int, default=42,
+                       help="Random seed for reproducible experiments (default: 42)")
 
     args = parser.parse_args()
+
+    # Set random seed for reproducible results
+    random.seed(args.seed)
 
     # Validate arguments
     if args.num_requests <= 0:
@@ -292,7 +339,7 @@ async def main():
         return 1
 
     # Create and run benchmark
-    benchmark = ThroughputBenchmark(args.host, args.port, args.save_audio)
+    benchmark = ThroughputBenchmark(args.host, args.port, args.save_audio, args.data_source)
 
     # Run throughput benchmark
     results = await benchmark.run_throughput_benchmark(args.num_requests)
