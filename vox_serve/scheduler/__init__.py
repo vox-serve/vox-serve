@@ -1,7 +1,7 @@
 from typing import Dict, Type
 
 from .base import Scheduler
-from .multi_gpu import MultiGpuScheduler
+from .disaggregation import DisaggregationScheduler
 from .offline import OfflineScheduler
 from .online import OnlineScheduler
 
@@ -10,7 +10,7 @@ SCHEDULER_REGISTRY: Dict[str, Type[Scheduler]] = {
     "base": Scheduler,
     "online": OnlineScheduler,
     "offline": OfflineScheduler,
-    "multi_gpu": MultiGpuScheduler,
+    "disaggregation": DisaggregationScheduler,
 }
 
 

@@ -52,13 +52,13 @@ class ModelWorker:
         self.max_batch_size = max_batch_size
         self.logger = get_logger(__name__)
 
-        # Check multi-GPU setup
+        # Check disaggregation setup
         if self.detokenizer_device != self.device:
             if torch.cuda.device_count() < 2:
                 raise RuntimeError(
-                    f"Multi-GPU setup requires at least 2 GPUs, but only {torch.cuda.device_count()} GPU(s) available."
+                    f"Disaggregation setup requires at least 2 GPUs, but only {torch.cuda.device_count()} GPU(s) available."
                 )
-            self.logger.info(f"Multi-GPU mode: LLM on {self.device}, Detokenizer on {self.detokenizer_device}")
+            self.logger.info(f"Disaggregation mode: LLM on {self.device}, Detokenizer on {self.detokenizer_device}")
 
         # Set NVTX profiling based on parameter
         self.nvtx_enabled = enable_nvtx

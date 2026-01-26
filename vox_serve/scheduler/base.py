@@ -32,7 +32,7 @@ class Scheduler:
         cfg_scale: float = None,
         greedy: bool = False,
         enable_cuda_graph: bool = True,
-        enable_multi_gpu: bool = False,
+        enable_disaggregation: bool = False,
         enable_nvtx: bool = False,
         enable_torch_compile: bool = False,
         async_scheduling: bool = False,
@@ -63,15 +63,15 @@ class Scheduler:
         }
 
         # Simplified worker selection logic
-        if enable_multi_gpu:
+        if enable_disaggregation:
             worker_kwargs["detokenizer_device"] = "cuda:1"
 
         if enable_cuda_graph:
-            opt_text = " with multi-GPU optimization" if enable_multi_gpu else " with CUDA graph optimization"
+            opt_text = " with disaggregation optimization" if enable_disaggregation else " with CUDA graph optimization"
             self.logger.info(f"Using CudaGraphWorker{opt_text}")
             self.model_worker = CudaGraphWorker(**worker_kwargs)
         else:
-            opt_text = " with multi-GPU optimization" if enable_multi_gpu else " without CUDA graph optimization"
+            opt_text = " with disaggregation optimization" if enable_disaggregation else " without CUDA graph optimization"
             self.logger.info(f"Using ModelWorker{opt_text}")
             self.model_worker = ModelWorker(**worker_kwargs)
 

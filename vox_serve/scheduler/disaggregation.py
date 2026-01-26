@@ -11,9 +11,9 @@ from ..requests import Request
 from .base import Scheduler
 
 
-class MultiGpuScheduler(Scheduler):
+class DisaggregationScheduler(Scheduler):
     """
-    Scheduler optimized for multi-GPU inference with parallel LM and detokenization pipelines.
+    Scheduler optimized for disaggregated inference with parallel LM and detokenization pipelines.
 
     Extends the base Scheduler but runs two independent async loops:
     - LM loop (GPU 0): Handles prefill and decode operations
@@ -24,16 +24,16 @@ class MultiGpuScheduler(Scheduler):
     """
 
     def __init__(self, **kwargs):
-        # Check multi-GPU availability
+        # Check disaggregation availability (requires at least 2 GPUs)
         if torch.cuda.device_count() < 2:
             raise RuntimeError(
-                f"MultiGpuScheduler requires at least 2 GPUs, "
+                f"DisaggregationScheduler requires at least 2 GPUs, "
                 f"but only {torch.cuda.device_count()} GPU(s) available."
             )
 
-        # Force CUDA graph and multi-GPU mode
+        # Force CUDA graph and disaggregation mode
         kwargs["enable_cuda_graph"] = True
-        kwargs["enable_multi_gpu"] = True
+        kwargs["enable_disaggregation"] = True
         kwargs["async_scheduling"] = True  # Force async mode for parallel loops
 
         # Initialize parent scheduler
@@ -50,7 +50,7 @@ class MultiGpuScheduler(Scheduler):
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="detokenize")
 
         self.logger.info(
-            "MultiGpuScheduler initialized with parallel LM and detokenization loops"
+            "DisaggregationScheduler initialized with parallel LM and detokenization loops"
         )
 
     def run_forever(self):
