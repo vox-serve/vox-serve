@@ -83,13 +83,13 @@ class Scheduler:
             self.request_socket = self.context.socket(zmq.PULL)
             self.request_socket.bind(f"ipc://{request_socket_path}")
             self.result_socket = self.context.socket(zmq.PUSH)
-            self.result_socket.bind(f"ipc://{result_socket_path}")
+            self.result_socket.connect(f"ipc://{result_socket_path}")
         else:
             self.context = zmq.Context()
             self.request_socket = self.context.socket(zmq.PULL)
             self.request_socket.bind(f"ipc://{request_socket_path}")
             self.result_socket = self.context.socket(zmq.PUSH)
-            self.result_socket.bind(f"ipc://{result_socket_path}")
+            self.result_socket.connect(f"ipc://{result_socket_path}")
 
         # Set socket HWMs to reduce blocking under bursty load
         try:
