@@ -96,6 +96,8 @@ def _run_scheduler_daemon(
         enable_nvtx=enable_nvtx,
         enable_torch_compile=enable_torch_compile,
         async_scheduling=async_scheduling,
+        dp_rank=dp_rank,
+        dp_size=dp_size,
     )
     logger.info(f"Scheduler (DP rank {dp_rank}/{dp_size}) started successfully with model: {model_name}")
     scheduler.run_forever()

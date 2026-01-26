@@ -36,11 +36,26 @@ class Scheduler:
         enable_nvtx: bool = False,
         enable_torch_compile: bool = False,
         async_scheduling: bool = False,
+        dp_rank: int = 0,
+        dp_size: int = 1,
     ):
         self.device = device
         self.max_batch_size = max_batch_size
         self.async_scheduling = async_scheduling
-        self.logger = get_logger(__name__)
+        self.dp_rank = dp_rank
+        self.dp_size = dp_size
+
+        # Create logger with rank prefix for data parallel mode
+        base_logger = get_logger(__name__)
+        if dp_size > 1:
+            # Use LoggerAdapter to add rank prefix
+            import logging
+            self.logger = logging.LoggerAdapter(base_logger, {'dp_rank': dp_rank})
+            # Override the process method to add rank prefix
+            self.logger.process = lambda msg, kwargs: (f"[DP {dp_rank}/{dp_size}] {msg}", kwargs)
+        else:
+            self.logger = base_logger
+
         self.logger.info(f"Using {'async' if async_scheduling else 'sync'} scheduling mode")
 
         # Choose worker based on user configuration
@@ -60,6 +75,8 @@ class Scheduler:
             "page_size": page_size,
             "enable_nvtx": enable_nvtx,
             "enable_torch_compile": enable_torch_compile,
+            "dp_rank": dp_rank,
+            "dp_size": dp_size,
         }
 
         # Simplified worker selection logic

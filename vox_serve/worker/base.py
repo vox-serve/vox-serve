@@ -30,6 +30,8 @@ class ModelWorker:
         enable_nvtx: bool = False,
         enable_torch_compile: bool = False,
         detokenizer_device: Optional[str] = None,
+        dp_rank: int = 0,
+        dp_size: int = 1,
     ):
         # Load model with sampling parameters
         self.model = load_model(
@@ -50,7 +52,19 @@ class ModelWorker:
         self.device = "cuda:0"
         self.detokenizer_device = detokenizer_device or self.device
         self.max_batch_size = max_batch_size
-        self.logger = get_logger(__name__)
+        self.dp_rank = dp_rank
+        self.dp_size = dp_size
+
+        # Create logger with rank prefix for data parallel mode
+        base_logger = get_logger(__name__)
+        if dp_size > 1:
+            # Use LoggerAdapter to add rank prefix
+            import logging
+            self.logger = logging.LoggerAdapter(base_logger, {'dp_rank': dp_rank})
+            # Override the process method to add rank prefix
+            self.logger.process = lambda msg, kwargs: (f"[DP {dp_rank}/{dp_size}] {msg}", kwargs)
+        else:
+            self.logger = base_logger
 
         # Check disaggregation setup
         if self.detokenizer_device != self.device:
