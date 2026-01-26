@@ -520,7 +520,6 @@ class CudaGraphWorker(ModelWorker):
         )
 
         # Use the appropriate CUDA graph pool (separate pool if multi-GPU)
-        # graph_pool = self.detokenizer_cuda_graph_pool if self.detokenizer_cuda_graph_pool is not None else self.cuda_graph_pool
         graph_pool = self.cuda_graph_pool
 
         for batch_size in self.cuda_graph_batch_sizes:

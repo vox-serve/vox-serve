@@ -132,7 +132,9 @@ class MultiGpuScheduler(Scheduler):
                 if req.next_audio_decode_idx:
                     req.audio_decode_idx = req.next_audio_decode_idx.copy()
                 else:
-                    self.logger.warning(f"Request {req.request_id} has no next_audio_decode_idx, skipping detokenization")
+                    self.logger.warning(
+                        f"Request {req.request_id} has no next_audio_decode_idx, skipping detokenization"
+                    )
                     continue
 
             # Run detokenization on GPU 1 in executor to avoid blocking the event loop
@@ -240,7 +242,9 @@ class MultiGpuScheduler(Scheduler):
 
                 message = req.request_id.encode("utf-8") + b"|AUDIO|" + audio_chunk
                 try:
-                    self.logger.debug(f"Sending audio chunk for request {req.request_id}, size: {len(audio_chunk)} bytes")
+                    self.logger.debug(
+                        f"Sending audio chunk for request {req.request_id}, size: {len(audio_chunk)} bytes"
+                    )
                     await self.result_socket.send(message)
                     self.logger.debug(f"Sent audio chunk for request {req.request_id}, size: {len(audio_chunk)} bytes")
                 except Exception as e:
@@ -261,7 +265,9 @@ class MultiGpuScheduler(Scheduler):
                 )
                 self.logger.debug("Sending completion for request %s", req.request_id)
                 try:
-                    self.logger.debug(f"Sending completion for request {req.request_id}, size: {len(completion_payload)} bytes")
+                    self.logger.debug(
+                        f"Sending completion for request {req.request_id}, size: {len(completion_payload)} bytes"
+                    )
                     await self.result_socket.send(completion_payload)
                     self.logger.debug("Successfully sent completion for request %s", req.request_id)
                 except Exception as e:

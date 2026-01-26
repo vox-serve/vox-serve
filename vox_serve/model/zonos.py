@@ -531,7 +531,9 @@ class ZonosForCausalLM(nn.Module):
 
 
 class ZonosModel(BaseLM):
-    def __init__(self, model_name, dtype=torch.bfloat16, device="cuda:0", enable_torch_compile=False, audio_decoder_device=None):
+    def __init__(
+        self, model_name, dtype=torch.bfloat16, device="cuda:0", enable_torch_compile=False, audio_decoder_device=None
+    ):
         # TODO: Zonos hybrid model is not yet supported
         if model_name == "zonos":
             model_name = "Zyphra/Zonos-v0.1-transformer"

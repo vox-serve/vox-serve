@@ -406,7 +406,9 @@ class CosyVoice2Model(BaseLM):
         self._init_default_cond()
 
         # Initialize decoder cache after default conditions are set
-        self._audio_decoder_initial_cache = self.audio_decoder.init_cache(self.default_speaker_ref_dict).to(self.audio_decoder_device)
+        self._audio_decoder_initial_cache = (
+            self.audio_decoder.init_cache(self.default_speaker_ref_dict).to(self.audio_decoder_device)
+        )
 
         # For prompt caching mode (use_detokenizer_cache=False), store the precomputed prompt cache
         # This will be shared across all requests and reused for every timestep

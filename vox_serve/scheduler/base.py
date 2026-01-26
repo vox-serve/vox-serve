@@ -67,14 +67,12 @@ class Scheduler:
             worker_kwargs["detokenizer_device"] = "cuda:1"
 
         if enable_cuda_graph:
-            self.logger.info(
-                f"Using CudaGraphWorker{' with multi-GPU optimization' if enable_multi_gpu else ' with CUDA graph optimization'}"
-            )
+            opt_text = " with multi-GPU optimization" if enable_multi_gpu else " with CUDA graph optimization"
+            self.logger.info(f"Using CudaGraphWorker{opt_text}")
             self.model_worker = CudaGraphWorker(**worker_kwargs)
         else:
-            self.logger.info(
-                f"Using ModelWorker{' with multi-GPU optimization' if enable_multi_gpu else ' without CUDA graph optimization'}"
-            )
+            opt_text = " with multi-GPU optimization" if enable_multi_gpu else " without CUDA graph optimization"
+            self.logger.info(f"Using ModelWorker{opt_text}")
             self.model_worker = ModelWorker(**worker_kwargs)
 
         self.active_requests: List[Request] = []
