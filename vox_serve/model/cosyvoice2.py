@@ -406,9 +406,10 @@ class CosyVoice2Model(BaseLM):
         self._init_default_cond()
 
         # Initialize decoder cache after default conditions are set
-        self._audio_decoder_initial_cache = (
-            self.audio_decoder.init_cache(self.default_speaker_ref_dict).to(self.audio_decoder_device)
-        )
+        with torch.cuda.device(self.audio_decoder_device):
+            self._audio_decoder_initial_cache = (
+                self.audio_decoder.init_cache(self.default_speaker_ref_dict_audio_decoder).to(self.audio_decoder_device)
+            )
 
         # For prompt caching mode (use_detokenizer_cache=False), store the precomputed prompt cache
         # This will be shared across all requests and reused for every timestep
@@ -899,6 +900,7 @@ class CosyVoice2Model(BaseLM):
         speech_feat, speech_feat_len = speech_feat[:, : 2 * token_len], 2 * token_len
         speech_token, speech_token_len = speech_token[:, :token_len], token_len
 
+        # Create copy on main device for preprocess()
         self.default_speaker_ref_dict = {
             "ref_text_ids": ref_text_ids,
             "prompt_feat": speech_feat.to(torch.bfloat16),
@@ -906,6 +908,16 @@ class CosyVoice2Model(BaseLM):
             "prompt_speech_token": speech_token,
             "prompt_speech_token_len": speech_token_len,
             "embedding": embedding.to(torch.bfloat16),
+        }
+
+        # Create copy on audio_decoder_device for postprocess()
+        self.default_speaker_ref_dict_audio_decoder = {
+            "ref_text_ids": ref_text_ids.to(self.audio_decoder_device),
+            "prompt_feat": speech_feat.to(torch.bfloat16).to(self.audio_decoder_device),
+            "prompt_feat_len": speech_feat_len,
+            "prompt_speech_token": speech_token.to(self.audio_decoder_device),
+            "prompt_speech_token_len": speech_token_len,
+            "embedding": embedding.to(torch.bfloat16).to(self.audio_decoder_device),
         }
 
     @torch.no_grad()
@@ -1085,7 +1097,7 @@ class CosyVoice2Model(BaseLM):
                 token_ids[:, :, 0],
                 speech_token_lens=self.detokenize_interval,
                 decoder_cache=self._shared_prompt_cache,
-                ref_dict=self.default_speaker_ref_dict,
+                ref_dict=self.default_speaker_ref_dict_audio_decoder,
             )
             # Don't update the cache - it's shared and static
             return audio_tensor[:, None, :]  # add channel dimension
@@ -1095,7 +1107,7 @@ class CosyVoice2Model(BaseLM):
             token_ids[:, :, 0],
             speech_token_lens=self.detokenize_interval,
             decoder_cache=decoder_cache,
-            ref_dict=self.default_speaker_ref_dict,
+            ref_dict=self.default_speaker_ref_dict_audio_decoder,
         )
 
         # Update cache in place to maintain state across chunks (required for CUDA graphs)
