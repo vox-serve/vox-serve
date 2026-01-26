@@ -43,6 +43,7 @@ def run_scheduler_daemon(
     cfg_scale: Optional[float],
     greedy: bool,
     enable_cuda_graph: bool,
+    enable_multi_gpu: bool,
     enable_nvtx: bool,
     enable_torch_compile: bool,
     async_scheduling: bool,
@@ -70,6 +71,7 @@ def run_scheduler_daemon(
         cfg_scale=cfg_scale,
         greedy=greedy,
         enable_cuda_graph=enable_cuda_graph,
+        enable_multi_gpu=enable_multi_gpu,
         enable_nvtx=enable_nvtx,
         enable_torch_compile=enable_torch_compile,
         async_scheduling=async_scheduling,
@@ -98,6 +100,7 @@ class APIServer:
         cfg_scale: float = None,
         greedy: bool = False,
         enable_cuda_graph: bool = True,
+        enable_multi_gpu: bool = False,
         enable_nvtx: bool = False,
         enable_torch_compile: bool = False,
         max_num_pages: int = None,
@@ -123,6 +126,7 @@ class APIServer:
         self.cfg_scale = cfg_scale
         self.greedy = greedy
         self.enable_cuda_graph = enable_cuda_graph
+        self.enable_multi_gpu = enable_multi_gpu
         self.enable_nvtx = enable_nvtx
         self.enable_torch_compile = enable_torch_compile
         self.max_num_pages = max_num_pages
@@ -203,6 +207,7 @@ class APIServer:
                     'cfg_scale': self.cfg_scale,
                     'greedy': self.greedy,
                     'enable_cuda_graph': self.enable_cuda_graph,
+                    'enable_multi_gpu': self.enable_multi_gpu,
                     'enable_nvtx': self.enable_nvtx,
                     'enable_torch_compile': self.enable_torch_compile,
                     'async_scheduling': self.async_scheduling,
@@ -756,6 +761,11 @@ def main():
         help="Disable CUDA graph optimization for decode phase"
     )
     parser.add_argument(
+        "--enable-multi-gpu",
+        action="store_true",
+        help="Enable multi-GPU mode (requires at least 2 GPUs): LLM on GPU 0, detokenizer on GPU 1 (default: False)"
+    )
+    parser.add_argument(
         "--log-level",
         type=str,
         default="INFO",
@@ -793,6 +803,12 @@ def main():
     # Determine final CUDA graph setting
     enable_cuda_graph = args.enable_cuda_graph and not args.disable_cuda_graph
 
+    # Automatically select multi_gpu scheduler if enable_multi_gpu is set with CUDA graphs
+    scheduler_type = args.scheduler_type
+    if args.enable_multi_gpu and enable_cuda_graph:
+        logger.info("Multi-GPU mode enabled: using 'multi_gpu' scheduler with parallel LM and detokenization loops")
+        scheduler_type = "multi_gpu"
+
     # Construct socket paths with optional suffix
     request_socket_path = f"/tmp/vox_serve_request{args.socket_suffix}.ipc"
     result_socket_path = f"/tmp/vox_serve_result{args.socket_suffix}.ipc"
@@ -801,7 +817,7 @@ def main():
     global api_server
     api_server = APIServer(
         model_name=args.model,
-        scheduler_type=args.scheduler_type,
+        scheduler_type=scheduler_type,
         request_socket_path=request_socket_path,
         result_socket_path=result_socket_path,
         max_batch_size=args.max_batch_size,
@@ -817,6 +833,7 @@ def main():
         cfg_scale=args.cfg_scale,
         greedy=args.greedy,
         enable_cuda_graph=enable_cuda_graph,
+        enable_multi_gpu=args.enable_multi_gpu,
         enable_nvtx=args.enable_nvtx,
         enable_torch_compile=args.enable_torch_compile,
         async_scheduling=args.async_scheduling,

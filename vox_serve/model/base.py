@@ -40,11 +40,14 @@ class BaseLM(ABC):
         device: str = "cuda",
         dtype: torch.dtype = torch.bfloat16,
         enable_torch_compile: bool = False,
+        audio_decoder_device: str = None,
     ):
         self.model_name = model_name
         self.device = device
         self.dtype = dtype
         self.enable_torch_compile = enable_torch_compile
+        # Audio decoder device defaults to main device if not specified
+        self.audio_decoder_device = audio_decoder_device or device
 
     @property
     @abstractmethod
@@ -109,9 +112,11 @@ class BaseLM(ABC):
     @property
     def use_repetition_penalty(self) -> bool:
         """Indicates if the model has repetition penalty enabled in default sampling config."""
-        return (hasattr(self, 'default_sampling_config') and
-                self.default_sampling_config.repetition_penalty is not None and
-                self.default_sampling_config.repetition_penalty != 1.0)
+        return (
+            hasattr(self, "default_sampling_config")
+            and self.default_sampling_config.repetition_penalty is not None
+            and self.default_sampling_config.repetition_penalty != 1.0
+        )
 
     def audio_decoder_initial_cache(self, batch_size: int) -> Optional[DecoderCache]:
         """
@@ -247,11 +252,7 @@ class BaseLM(ABC):
         pass
 
     @abstractmethod
-    def postprocess(
-        self,
-        token_ids: torch.Tensor,
-        **kwargs
-    ) -> torch.Tensor:
+    def postprocess(self, token_ids: torch.Tensor, **kwargs) -> torch.Tensor:
         """
         Convert model output tokens to audio bytes. This should include model-specific logic
         on when to do detokenization for each request.
@@ -277,8 +278,9 @@ class BaseLMWithDepth(BaseLM):
         device: str = "cuda",
         dtype: torch.dtype = torch.bfloat16,
         enable_torch_compile: bool = False,
+        audio_decoder_device: str = None,
     ):
-        super().__init__(model_name, device, dtype, enable_torch_compile)
+        super().__init__(model_name, device, dtype, enable_torch_compile, audio_decoder_device)
 
     @property
     def has_depth_transformer(self) -> bool:

@@ -320,10 +320,11 @@ class CSMModel(BaseLMWithDepth):
         device="cuda:0",
         tokenizer_path="meta-llama/Llama-3.2-1B",
         enable_torch_compile=False,
+        audio_decoder_device=None,
     ):
         if model_name == "csm":
             model_name = "sesame/csm-1b"
-        super().__init__(model_name, device, dtype, enable_torch_compile)
+        super().__init__(model_name, device, dtype, enable_torch_compile, audio_decoder_device)
         self.logger = get_logger(__name__)
         self.model = CsmForConditionalGeneration.from_pretrained(model_name)
         self.model.to(dtype).to(device)
@@ -331,11 +332,12 @@ class CSMModel(BaseLMWithDepth):
         # Use provided tokenizer path or default to model_name
         self.text_tokenizer = self._load_tokenizer(tokenizer_path)
 
-        self.audio_tokenizer = MimiDecoder(
+        # Initialize audio decoder on specified device (may differ from main device)
+        self.audio_decoder = MimiDecoder(
             model_repo="kyutai/moshiko-pytorch-bf16",
             model_path="tokenizer-e351c8d8-checkpoint125.safetensors",
             num_codebooks=32,
-            device=device,
+            device=self.audio_decoder_device,
         )
 
         self._num_attention_heads = self.model.config.num_attention_heads
@@ -477,7 +479,7 @@ class CSMModel(BaseLMWithDepth):
 
         # (K, T)
         audio = audio.to(self.device)
-        audio_tokens = self.audio_tokenizer.encode(audio.unsqueeze(0).unsqueeze(0))[0]
+        audio_tokens = self.audio_decoder.encode(audio.unsqueeze(0).unsqueeze(0))[0]
         # add EOS frame
         eos_frame = torch.zeros(audio_tokens.size(0), 1).to(self.device)
         audio_tokens = torch.cat([audio_tokens, eos_frame], dim=1)
@@ -522,7 +524,7 @@ class CSMModel(BaseLMWithDepth):
                     "but like yeah I'm trying to like yeah I noticed this yesterday that like Mondays I "
                     "sort of start the day with this not like a panic but like a"
                 ),
-                "audio": load_prompt_audio(prompt_filepath_conversational_a, self.audio_tokenizer.sample_rate),
+                "audio": load_prompt_audio(prompt_filepath_conversational_a, self.audio_decoder.sample_rate),
             },
             "conversational_b": {
                 "text": (
@@ -533,7 +535,7 @@ class CSMModel(BaseLMWithDepth):
                     "come out. So like everyone, when they come into the park, they get like this little "
                     "bracelet and then you can go punching question blocks around."
                 ),
-                "audio": load_prompt_audio(prompt_filepath_conversational_b, self.audio_tokenizer.sample_rate),
+                "audio": load_prompt_audio(prompt_filepath_conversational_b, self.audio_decoder.sample_rate),
             },
         }
 
@@ -760,7 +762,7 @@ class CSMModel(BaseLMWithDepth):
 
         # mimi decoder
         # TODO: caching for mimi
-        audio_tensor = self.audio_tokenizer.decode(tokens_to_process)
+        audio_tensor = self.audio_decoder.decode(tokens_to_process)
         # audio_tensor: (batch_size, 1, N)
 
         return audio_tensor

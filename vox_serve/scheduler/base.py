@@ -32,6 +32,7 @@ class Scheduler:
         cfg_scale: float = None,
         greedy: bool = False,
         enable_cuda_graph: bool = True,
+        enable_multi_gpu: bool = False,
         enable_nvtx: bool = False,
         enable_torch_compile: bool = False,
         async_scheduling: bool = False,
@@ -42,45 +43,39 @@ class Scheduler:
         self.logger = get_logger(__name__)
         self.logger.info(f"Using {'async' if async_scheduling else 'sync'} scheduling mode")
 
-        # Switch between CudaGraphWorker and ModelWorker based on user input
+        # Choose worker based on user configuration
+        worker_kwargs = {
+            "model_name": model_name_or_path,
+            "max_batch_size": max_batch_size,
+            "top_p": top_p,
+            "top_k": top_k,
+            "min_p": min_p,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "repetition_penalty": repetition_penalty,
+            "repetition_window": repetition_window,
+            "cfg_scale": cfg_scale,
+            "greedy": greedy,
+            "max_num_pages": max_num_pages,
+            "page_size": page_size,
+            "enable_nvtx": enable_nvtx,
+            "enable_torch_compile": enable_torch_compile,
+        }
+
+        # Simplified worker selection logic
+        if enable_multi_gpu:
+            worker_kwargs["detokenizer_device"] = "cuda:1"
+
         if enable_cuda_graph:
-            self.logger.info("Using CudaGraphWorker with CUDA graph optimization")
-            self.model_worker = CudaGraphWorker(
-                model_name_or_path,
-                max_batch_size=max_batch_size,
-                top_p=top_p,
-                top_k=top_k,
-                min_p=min_p,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                repetition_penalty=repetition_penalty,
-                repetition_window=repetition_window,
-                cfg_scale=cfg_scale,
-                greedy=greedy,
-                max_num_pages=max_num_pages,
-                page_size=page_size,
-                enable_nvtx=enable_nvtx,
-                enable_torch_compile=enable_torch_compile,
+            self.logger.info(
+                f"Using CudaGraphWorker{' with multi-GPU optimization' if enable_multi_gpu else ' with CUDA graph optimization'}"
             )
+            self.model_worker = CudaGraphWorker(**worker_kwargs)
         else:
-            self.logger.info("Using ModelWorker without CUDA graph optimization")
-            self.model_worker = ModelWorker(
-                model_name_or_path,
-                max_batch_size=max_batch_size,
-                top_p=top_p,
-                top_k=top_k,
-                min_p=min_p,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                repetition_penalty=repetition_penalty,
-                repetition_window=repetition_window,
-                cfg_scale=cfg_scale,
-                greedy=greedy,
-                max_num_pages=max_num_pages,
-                page_size=page_size,
-                enable_nvtx=enable_nvtx,
-                enable_torch_compile=enable_torch_compile,
+            self.logger.info(
+                f"Using ModelWorker{' with multi-GPU optimization' if enable_multi_gpu else ' without CUDA graph optimization'}"
             )
+            self.model_worker = ModelWorker(**worker_kwargs)
 
         self.active_requests: List[Request] = []
 

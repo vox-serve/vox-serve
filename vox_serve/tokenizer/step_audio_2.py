@@ -1751,12 +1751,15 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
         estimator_cnn_cache = cache["estimator_cnn_cache"]
         estimator_att_cache = cache["estimator_att_cache"]
 
+        # Permute cache tensors for internal use
+        # NOTE: Skip .contiguous() to avoid memory allocation during CUDA graph capture
+        # PyTorch operations work fine with non-contiguous permuted tensors
         if isinstance(conformer_att_cache, torch.Tensor):
-            conformer_att_cache = conformer_att_cache.permute(1, 0, 2, 3, 4).contiguous()
+            conformer_att_cache = conformer_att_cache.permute(1, 0, 2, 3, 4)
         if isinstance(estimator_cnn_cache, torch.Tensor):
-            estimator_cnn_cache = estimator_cnn_cache.permute(1, 2, 0, 3, 4).contiguous()
+            estimator_cnn_cache = estimator_cnn_cache.permute(1, 2, 0, 3, 4)
         if isinstance(estimator_att_cache, torch.Tensor):
-            estimator_att_cache = estimator_att_cache.permute(1, 2, 0, 3, 4, 5).contiguous()
+            estimator_att_cache = estimator_att_cache.permute(1, 2, 0, 3, 4, 5)
 
         spk = F.normalize(spk, dim=1)
         spk = self.spk_embed_affine_layer(spk)
@@ -1771,6 +1774,7 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
         h = self.encoder_proj(h)
 
         cond = torch.zeros_like(h)
+        # For freshly created tensors (mu, cond), we need .contiguous() for downstream ops
         feat, estimator_cnn_cache, estimator_att_cache = self.decoder.forward_chunk(
             mu=h.transpose(1, 2).contiguous(),
             spks=spk,
@@ -1781,12 +1785,14 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
             att_cache=estimator_att_cache,
         )
 
+        # Permute back to batch-first format for output cache
+        # NOTE: Skip .contiguous() to avoid memory allocation during CUDA graph capture
         if isinstance(conformer_att_cache, torch.Tensor):
-            conformer_att_cache = conformer_att_cache.permute(1, 0, 2, 3, 4).contiguous()
+            conformer_att_cache = conformer_att_cache.permute(1, 0, 2, 3, 4)
         if isinstance(estimator_cnn_cache, torch.Tensor):
-            estimator_cnn_cache = estimator_cnn_cache.permute(2, 0, 1, 3, 4).contiguous()
+            estimator_cnn_cache = estimator_cnn_cache.permute(2, 0, 1, 3, 4)
         if isinstance(estimator_att_cache, torch.Tensor):
-            estimator_att_cache = estimator_att_cache.permute(2, 0, 1, 3, 4, 5).contiguous()
+            estimator_att_cache = estimator_att_cache.permute(2, 0, 1, 3, 4, 5)
 
         new_cache = {
             "conformer_cnn_cache": conformer_cnn_cache,
@@ -1907,7 +1913,7 @@ class StepAudio2Decoder(nn.Module):
         spk_feat = spk_feat - spk_feat.mean(dim=0, keepdim=True)
         spk_emb = torch.tensor(
             self.spk_model.run(None, {self.spk_model.get_inputs()[0].name: spk_feat.unsqueeze(dim=0).cpu().numpy()})[0],
-            device="cuda",
+            device=self.device,
             dtype=torch.float16,
         )
 
@@ -1917,7 +1923,7 @@ class StepAudio2Decoder(nn.Module):
             audio = torchaudio.transforms.Resample(orig_freq=sample_rate, new_freq=24000)(audio)
         prompt_mel = mel_spectrogram(audio).transpose(1, 2).squeeze(0)  # [T, num_mels]
         prompt_mels = prompt_mel.unsqueeze(0).to(self.device, dtype=torch.float16)
-        prompt_mels_lens = torch.tensor([prompt_mels.shape[1]], dtype=torch.int32, device="cuda")
+        prompt_mels_lens = torch.tensor([prompt_mels.shape[1]], dtype=torch.int32, device=self.device)
         prompt_mels = torch.nn.functional.pad(
             prompt_mels,
             (0, 0, 0, prompt_speech_tokens.shape[1] * self.flow.up_rate - prompt_mels.shape[1]),
@@ -1964,8 +1970,8 @@ class StepAudio2Decoder(nn.Module):
             estimator_cnn_cache=estimator_cnn_cache,
             estimator_att_cache=estimator_att_cache,
             hift_mel_cache=initial_mel_cache,
-            hift_source_cache=torch.zeros(1, 1, self.source_cache_len, device="cuda"),
-            hift_speech_cache=torch.zeros(1, self.source_cache_len, device="cuda"),
+            hift_source_cache=torch.zeros(1, 1, self.source_cache_len, device=self.device),
+            hift_speech_cache=torch.zeros(1, self.source_cache_len, device=self.device),
         )
         return new_cache
 

@@ -229,10 +229,11 @@ class OrpheusModel(BaseLM):
         device="cuda:0",
         tokenizer_path="canopylabs/orpheus-3b-0.1-ft",
         enable_torch_compile=False,
+        audio_decoder_device=None,
     ):
         if model_name == "orpheus":
             model_name = "canopylabs/orpheus-3b-0.1-ft"
-        super().__init__(model_name, device, dtype, enable_torch_compile)
+        super().__init__(model_name, device, dtype, enable_torch_compile, audio_decoder_device)
         self.model_name = model_name
         self.model = OrpheusForCausalLM.from_pretrained(model_name)
         self.model.to(dtype).to(device)
@@ -241,10 +242,12 @@ class OrpheusModel(BaseLM):
 
         # Use provided tokenizer path or default to model_name
         self.text_tokenizer = self._load_tokenizer(tokenizer_path)
-        self.audio_tokenizer = SNAC.from_pretrained(
-            "hubertsiuzdak/snac_24khz",
-            enable_torch_compile=enable_torch_compile,
-        ).eval().to(device)
+        with torch.cuda.device(self.audio_decoder_device):
+            # Initialize audio decoder on specified device (may differ from main device)
+            self.audio_decoder = SNAC.from_pretrained(
+                "hubertsiuzdak/snac_24khz",
+                enable_torch_compile=enable_torch_compile,
+            ).eval().to(self.audio_decoder_device)
 
         self._num_attention_heads = self.model.config.num_attention_heads
         self._num_key_value_heads = self.model.config.num_key_value_heads
@@ -265,8 +268,8 @@ class OrpheusModel(BaseLM):
         )
 
         # for cuda graph-ing of postprocess
-        self.idx_14 = torch.tensor([1, 4], dtype=torch.long, device="cuda")
-        self.idx_2356 = torch.tensor([2, 3, 5, 6], dtype=torch.long, device="cuda")
+        self.idx_14 = torch.tensor([1, 4], dtype=torch.long, device=self.audio_decoder_device)
+        self.idx_2356 = torch.tensor([2, 3, 5, 6], dtype=torch.long, device=self.audio_decoder_device)
 
     @property
     def n_codebooks(self):
@@ -497,7 +500,7 @@ class OrpheusModel(BaseLM):
         codes = [codes_0, codes_1, codes_2]
 
         with torch.inference_mode():
-            audio_tensor = self.audio_tokenizer.decode(codes)
+            audio_tensor = self.audio_decoder.decode(codes)
 
         # Slice [2048:4096]
         audio_tensor = audio_tensor[:, :, 2048:4096]

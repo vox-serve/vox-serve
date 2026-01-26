@@ -28,6 +28,13 @@ class CudaGraphWorker(ModelWorker):
         self.cuda_graphs_depth_decode: Dict[int, torch.cuda.CUDAGraph] = {}
         self.cuda_graph_buffers: Dict[str, torch.Tensor] = {}
 
+        # Create separate CUDA graph pool for detokenizer if on different device
+        if self.detokenizer_device != self.device:
+            with torch.cuda.device(self.detokenizer_device):
+                self.detokenizer_cuda_graph_pool = torch.cuda.graph_pool_handle()
+        else:
+            self.detokenizer_cuda_graph_pool = None
+
         # Initialize CUDA graphs after parent initialization
         original_nvtx_enable = self.nvtx_enabled
         self.nvtx_enabled = False  # Disable NVTX during initialization to reduce overhead
@@ -479,24 +486,29 @@ class CudaGraphWorker(ModelWorker):
 
     def _initialize_detokenization_cuda_graphs(self):
         """Initialize CUDA graphs for detokenization phase."""
-        detokenize_input_buffer = torch.zeros(
-            self.max_batch_size,
-            self.model.detokenize_interval,
-            self.model.n_codebooks,
-            dtype=torch.int32,
-            device=self.device,
-        )
+        # Use detokenizer device for all detokenization buffers
+        with torch.cuda.device(self.detokenizer_device):
+            detokenize_input_buffer = torch.zeros(
+                self.max_batch_size,
+                self.model.detokenize_interval,
+                self.model.n_codebooks,
+                dtype=torch.int32,
+                device=self.detokenizer_device,
+            )
 
-        detokenize_output_buffer = torch.zeros(
-            self.max_batch_size,
-            self.model.n_channels,
-            self.model.output_audio_length,
-            dtype=torch.float32,
-            device=self.device,
-        )
+            detokenize_output_buffer = torch.zeros(
+                self.max_batch_size,
+                self.model.n_channels,
+                self.model.output_audio_length,
+                dtype=torch.float32,
+                device=self.detokenizer_device,
+            )
 
-        # Prepare decoder cache for models that require it
-        detokenize_cache_buffer = self.model.audio_decoder_initial_cache(self.max_batch_size)
+            # Prepare decoder cache for models that require it
+            # Ensure cache is created on the detokenizer device with proper synchronization
+            detokenize_cache_buffer = self.model.audio_decoder_initial_cache(self.max_batch_size)
+            # Synchronize to ensure all cache tensors are properly on device before CUDA graph capture
+            torch.cuda.synchronize(self.detokenizer_device)
 
         # Add detokenization buffers to unified buffer dictionary
         self.cuda_graph_buffers.update(
@@ -507,68 +519,78 @@ class CudaGraphWorker(ModelWorker):
             }
         )
 
+        # Use the appropriate CUDA graph pool (separate pool if multi-GPU)
+        # graph_pool = self.detokenizer_cuda_graph_pool if self.detokenizer_cuda_graph_pool is not None else self.cuda_graph_pool
+        graph_pool = self.cuda_graph_pool
+
         for batch_size in self.cuda_graph_batch_sizes:
             if batch_size > self.max_batch_size:
                 continue
 
             self.logger.info(f"Capturing detokenization CUDA graph for batch size {batch_size}")
 
-            # Log GPU memory usage before capturing the CUDA graph
-            gpu_memory_allocated = torch.cuda.memory_allocated(self.device) / (1024 ** 2)
-            gpu_memory_reserved = torch.cuda.memory_reserved(self.device) / (1024 ** 2)
-            self.logger.debug(
-                "GPU memory usage before capturing CUDA graph: "
-                "allocated=%.2f MB, reserved=%.2f MB",
-                gpu_memory_allocated, gpu_memory_reserved
-            )
+            with torch.cuda.device(self.detokenizer_device):
+                # Log GPU memory usage before capturing the CUDA graph
+                gpu_memory_allocated = torch.cuda.memory_allocated(self.detokenizer_device) / (1024 ** 2)
+                gpu_memory_reserved = torch.cuda.memory_reserved(self.detokenizer_device) / (1024 ** 2)
+                self.logger.debug(
+                    "GPU memory usage before capturing CUDA graph: "
+                    "allocated=%.2f MB, reserved=%.2f MB",
+                    gpu_memory_allocated, gpu_memory_reserved
+                )
 
-            # Warmup runs for detokenization
-            for _ in range(5):
-                if self.cuda_graph_buffers["detokenize_cache"] is not None:
-                    audio_output = self.model.postprocess(
-                        self.cuda_graph_buffers["detokenize_input"][:batch_size],
-                        decoder_cache=self.cuda_graph_buffers["detokenize_cache"][:batch_size],
-                    )
-                else:
-                    audio_output = self.model.postprocess(
-                        self.cuda_graph_buffers["detokenize_input"][:batch_size]
-                    )
-            torch.cuda.synchronize()
+                s = torch.cuda.Stream(device=self.detokenizer_device)
+                s.wait_stream(torch.cuda.current_stream(self.detokenizer_device))
 
-            detokenize_graph = torch.cuda.CUDAGraph()
+                # Warmup runs for detokenization
+                with torch.cuda.stream(s):
+                    for _ in range(5):
+                        if self.cuda_graph_buffers["detokenize_cache"] is not None:
+                            audio_output = self.model.postprocess(
+                                self.cuda_graph_buffers["detokenize_input"][:batch_size],
+                                decoder_cache=self.cuda_graph_buffers["detokenize_cache"][:batch_size],
+                            )
+                        else:
+                            audio_output = self.model.postprocess(
+                                self.cuda_graph_buffers["detokenize_input"][:batch_size]
+                            )
+                torch.cuda.current_stream(self.detokenizer_device).wait_stream(s)
+                torch.cuda.synchronize(self.detokenizer_device)
 
-            with torch.cuda.graph(detokenize_graph, pool=self.cuda_graph_pool):
-                if self.cuda_graph_buffers["detokenize_cache"] is not None:
-                    audio_output = self.model.postprocess(
-                        self.cuda_graph_buffers["detokenize_input"][:batch_size],
-                        decoder_cache=self.cuda_graph_buffers["detokenize_cache"][:batch_size],
-                    )
-                else:
-                    audio_output = self.model.postprocess(
-                        self.cuda_graph_buffers["detokenize_input"][:batch_size]
-                    )
+                detokenize_graph = torch.cuda.CUDAGraph()
 
-                self.cuda_graph_buffers["detokenize_output"][:batch_size].copy_(audio_output)
+                with torch.cuda.graph(detokenize_graph, stream=s):
+                    if self.cuda_graph_buffers["detokenize_cache"] is not None:
+                        audio_output = self.model.postprocess(
+                            self.cuda_graph_buffers["detokenize_input"][:batch_size],
+                            decoder_cache=self.cuda_graph_buffers["detokenize_cache"][:batch_size],
+                        )
+                    else:
+                        audio_output = self.model.postprocess(
+                            self.cuda_graph_buffers["detokenize_input"][:batch_size]
+                        )
 
-            self.cuda_graphs_detokenization[batch_size] = detokenize_graph
+                    self.cuda_graph_buffers["detokenize_output"][:batch_size].copy_(audio_output)
 
-            # Test replay latency
-            for _ in range(3):
-                detokenize_graph.replay()
-            torch.cuda.synchronize()
-            times = []
-            for _ in range(10):
-                start = torch.cuda.Event(enable_timing=True)
-                end = torch.cuda.Event(enable_timing=True)
-                start.record()
-                detokenize_graph.replay()
-                end.record()
-                torch.cuda.synchronize()
-                times.append(start.elapsed_time(end))
-            self.logger.debug(
-                "Detokenization CUDA graph (batch=%d) avg replay: %.3fms",
-                batch_size, sum(times)/len(times)
-            )
+                self.cuda_graphs_detokenization[batch_size] = detokenize_graph
+
+                # Test replay latency
+                for _ in range(3):
+                    detokenize_graph.replay()
+                torch.cuda.synchronize(self.detokenizer_device)
+                times = []
+                for _ in range(10):
+                    start = torch.cuda.Event(enable_timing=True)
+                    end = torch.cuda.Event(enable_timing=True)
+                    start.record()
+                    detokenize_graph.replay()
+                    end.record()
+                    torch.cuda.synchronize(self.detokenizer_device)
+                    times.append(start.elapsed_time(end))
+                self.logger.debug(
+                    "Detokenization CUDA graph (batch=%d) avg replay: %.3fms",
+                    batch_size, sum(times)/len(times)
+                )
 
         self.logger.info("CUDA graphs for detokenization phase initialized.")
 
@@ -1180,9 +1202,16 @@ class CudaGraphWorker(ModelWorker):
             "Using detokenization CUDA graph with padded batch size %d (actual: %d)",
             padded_batch_size, actual_batch_size
         )
-        # token_ids_tensor = torch.tensor(token_ids, device=self.device, dtype=torch.int32)
 
-        self.cuda_graph_buffers["detokenize_input"][:actual_batch_size].copy_(torch.stack(token_ids, dim=0))
+        # Stack token_ids and transfer to detokenizer device if needed
+        token_ids_stacked = torch.stack(token_ids, dim=0)
+        if self.detokenizer_device != self.device:
+            self.nvtx_range_push("transfer_to_detokenizer")
+            token_ids_stacked = token_ids_stacked.to(self.detokenizer_device, non_blocking=True)
+            torch.cuda.synchronize(device=self.detokenizer_device)
+            self.nvtx_range_pop()
+
+        self.cuda_graph_buffers["detokenize_input"][:actual_batch_size].copy_(token_ids_stacked)
 
         # If a decoder cache is required, batch-merge request caches and copy into the CUDA buffer
         if self.cuda_graph_buffers["detokenize_cache"] is not None:
@@ -1194,10 +1223,12 @@ class CudaGraphWorker(ModelWorker):
 
         graph = self.cuda_graphs_detokenization[padded_batch_size]
 
-        self.nvtx_range_push("detokenize_replay")
-        graph.replay()
-        torch.cuda.synchronize()
-        self.nvtx_range_pop()
+        # Execute on the correct device
+        with torch.cuda.device(self.detokenizer_device):
+            self.nvtx_range_push("detokenize_replay")
+            graph.replay()
+            torch.cuda.synchronize()
+            self.nvtx_range_pop()
 
         # Only take outputs for actual batch size
         audio_tensors = self.cuda_graph_buffers["detokenize_output"][:actual_batch_size]
