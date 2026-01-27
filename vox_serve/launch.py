@@ -54,6 +54,9 @@ class APIServer:
         page_size: int = 2048,
         async_scheduling: bool = False,
         dp_size: int = 1,
+        remote_detokenizer: bool = False,
+        detokenizer_token_endpoint: Optional[str] = None,
+        detokenizer_audio_endpoint: Optional[str] = None,
     ):
         self.model_name = model_name
         self.request_socket_path = request_socket_path
@@ -82,6 +85,9 @@ class APIServer:
         self.scheduler_type = scheduler_type
         self.async_scheduling = async_scheduling
         self.dp_size = dp_size
+        self.remote_detokenizer = remote_detokenizer
+        self.detokenizer_token_endpoint = detokenizer_token_endpoint
+        self.detokenizer_audio_endpoint = detokenizer_audio_endpoint
         self.scheduler_processes = None  # Will be a list for DP mode
         self.logger = get_logger(__name__)
 
@@ -228,6 +234,12 @@ class APIServer:
                         cmd.append("--enable-cuda-graph")
                     if self.enable_disaggregation:
                         cmd.append("--enable-disaggregation")
+                    if self.remote_detokenizer:
+                        cmd.append("--remote-detokenizer")
+                        if self.detokenizer_token_endpoint:
+                            cmd.extend(["--detokenizer-token-endpoint", self.detokenizer_token_endpoint])
+                        if self.detokenizer_audio_endpoint:
+                            cmd.extend(["--detokenizer-audio-endpoint", self.detokenizer_audio_endpoint])
                     if self.enable_nvtx:
                         cmd.append("--enable-nvtx")
                     if self.enable_torch_compile:
@@ -299,6 +311,12 @@ class APIServer:
                     cmd.append("--enable-cuda-graph")
                 if self.enable_disaggregation:
                     cmd.append("--enable-disaggregation")
+                if self.remote_detokenizer:
+                    cmd.append("--remote-detokenizer")
+                    if self.detokenizer_token_endpoint:
+                        cmd.extend(["--detokenizer-token-endpoint", self.detokenizer_token_endpoint])
+                    if self.detokenizer_audio_endpoint:
+                        cmd.extend(["--detokenizer-audio-endpoint", self.detokenizer_audio_endpoint])
                 if self.enable_nvtx:
                     cmd.append("--enable-nvtx")
                 if self.enable_torch_compile:
@@ -811,6 +829,23 @@ def main():
         ),
     )
     parser.add_argument(
+        "--remote-detokenizer",
+        action="store_true",
+        help="Enable remote detokenizer mode (single GPU per node, TCP transport)",
+    )
+    parser.add_argument(
+        "--detokenizer-token-endpoint",
+        type=str,
+        default="tcp://127.0.0.1:5557",
+        help="Remote detokenizer token endpoint (default: tcp://127.0.0.1:5557)",
+    )
+    parser.add_argument(
+        "--detokenizer-audio-endpoint",
+        type=str,
+        default="tcp://127.0.0.1:5558",
+        help="Remote detokenizer audio endpoint (default: tcp://127.0.0.1:5558)",
+    )
+    parser.add_argument(
         "--dp-size",
         type=int,
         default=1,
@@ -867,6 +902,12 @@ def main():
         )
         logger.error("Please use one or the other")
         sys.exit(1)
+    if args.remote_detokenizer and args.enable_disaggregation:
+        logger.error("Cannot enable both --remote-detokenizer and --enable-disaggregation")
+        sys.exit(1)
+    if args.remote_detokenizer and args.dp_size > 1:
+        logger.error("Remote detokenizer mode does not support --dp-size > 1")
+        sys.exit(1)
 
     # Check GPU availability for data parallel
     if args.dp_size > 1:
@@ -909,6 +950,9 @@ def main():
         greedy=args.greedy,
         enable_cuda_graph=enable_cuda_graph,
         enable_disaggregation=args.enable_disaggregation,
+        remote_detokenizer=args.remote_detokenizer,
+        detokenizer_token_endpoint=args.detokenizer_token_endpoint,
+        detokenizer_audio_endpoint=args.detokenizer_audio_endpoint,
         enable_nvtx=args.enable_nvtx,
         enable_torch_compile=args.enable_torch_compile,
         async_scheduling=args.async_scheduling,

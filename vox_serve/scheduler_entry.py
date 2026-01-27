@@ -37,6 +37,9 @@ def _run_scheduler_daemon(
     enable_torch_compile: bool,
     async_scheduling: bool,
     log_level: str,
+    remote_detokenizer: bool,
+    detokenizer_token_endpoint: str | None,
+    detokenizer_audio_endpoint: str | None,
 ) -> None:
     """Entry point for scheduler daemon that sets CUDA_VISIBLE_DEVICES before importing torch."""
     # DEBUG: Check if torch is already imported (should NOT be!)
@@ -98,6 +101,9 @@ def _run_scheduler_daemon(
         async_scheduling=async_scheduling,
         dp_rank=dp_rank,
         dp_size=dp_size,
+        remote_detokenizer=remote_detokenizer,
+        detokenizer_token_endpoint=detokenizer_token_endpoint,
+        detokenizer_audio_endpoint=detokenizer_audio_endpoint,
     )
     logger.info(f"Scheduler (DP rank {dp_rank}/{dp_size}) started successfully with model: {model_name}")
     scheduler.run_forever()
@@ -130,6 +136,23 @@ def main():
     parser.add_argument("--enable-nvtx", action="store_true")
     parser.add_argument("--enable-torch-compile", action="store_true")
     parser.add_argument("--async-scheduling", action="store_true")
+    parser.add_argument(
+        "--remote-detokenizer",
+        action="store_true",
+        help="Enable remote detokenizer mode (master sends tokens over TCP)",
+    )
+    parser.add_argument(
+        "--detokenizer-token-endpoint",
+        type=str,
+        default=None,
+        help="Remote detokenizer token endpoint (e.g., tcp://host:5557)",
+    )
+    parser.add_argument(
+        "--detokenizer-audio-endpoint",
+        type=str,
+        default=None,
+        help="Remote detokenizer audio endpoint (e.g., tcp://host:5558)",
+    )
 
     args = parser.parse_args()
 
@@ -158,6 +181,9 @@ def main():
         enable_torch_compile=args.enable_torch_compile,
         async_scheduling=args.async_scheduling,
         log_level=args.log_level,
+        remote_detokenizer=args.remote_detokenizer,
+        detokenizer_token_endpoint=args.detokenizer_token_endpoint,
+        detokenizer_audio_endpoint=args.detokenizer_audio_endpoint,
     )
 
 

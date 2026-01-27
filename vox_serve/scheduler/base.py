@@ -7,6 +7,7 @@ import torch
 import zmq
 import zmq.asyncio
 
+from ..remote_detokenizer import RemoteDetokenizerClient
 from ..requests import Request
 from ..utils import get_logger
 from ..worker import CudaGraphWorker, ModelWorker
@@ -38,12 +39,24 @@ class Scheduler:
         async_scheduling: bool = False,
         dp_rank: int = 0,
         dp_size: int = 1,
+        remote_detokenizer: bool = False,
+        detokenizer_token_endpoint: str | None = None,
+        detokenizer_audio_endpoint: str | None = None,
     ):
         self.device = device
         self.max_batch_size = max_batch_size
         self.async_scheduling = async_scheduling
         self.dp_rank = dp_rank
         self.dp_size = dp_size
+        self.remote_detokenizer_enabled = remote_detokenizer
+        self.detokenizer_token_endpoint = detokenizer_token_endpoint
+        self.detokenizer_audio_endpoint = detokenizer_audio_endpoint
+        self.requests_by_id = {}
+
+        if self.remote_detokenizer_enabled and enable_disaggregation:
+            raise ValueError("Remote detokenizer cannot be used with local disaggregation.")
+        if self.remote_detokenizer_enabled and dp_size > 1:
+            raise ValueError("Remote detokenizer does not support data-parallel mode.")
 
         # Create logger with rank prefix for data parallel mode
         base_logger = get_logger(__name__)
@@ -98,6 +111,30 @@ class Scheduler:
 
         self.active_requests: List[Request] = []
 
+        if self.remote_detokenizer_enabled:
+            if not self.detokenizer_token_endpoint or not self.detokenizer_audio_endpoint:
+                raise ValueError("Remote detokenizer enabled but endpoints are not configured.")
+
+            def _on_audio_chunk(header, audio_bytes):
+                request_id = header.get("request_id")
+                req = self.requests_by_id.get(request_id)
+                if req is None:
+                    return
+                req.output_audio.put(audio_bytes)
+                if header.get("is_final"):
+                    req.done_all = True
+                    if req.finish_reason is None:
+                        req.finish_reason = "completed"
+
+            self.remote_detokenizer = RemoteDetokenizerClient(
+                token_endpoint=self.detokenizer_token_endpoint,
+                audio_endpoint=self.detokenizer_audio_endpoint,
+                on_audio_chunk=_on_audio_chunk,
+                logger=self.logger,
+            )
+        else:
+            self.remote_detokenizer = None
+
         # Initialize ZMQ contexts based on scheduling mode
         if self.async_scheduling:
             self.context = zmq.asyncio.Context()
@@ -148,10 +185,13 @@ class Scheduler:
         lm_inputs = self.model_worker.prepare_lm_inputs(lm_requests, detokenize_requests)
 
         # run detokenization if needed
-        self.model_worker.run_detokenize(detokenize_requests)
+        if self.remote_detokenizer_enabled:
+            self._dispatch_remote_detokenize(detokenize_requests)
+        else:
+            self.model_worker.run_detokenize(detokenize_requests)
 
         # return results to clients
-        self._send_responses(detokenize_requests)
+        self._send_responses(self.active_requests)
 
         if lm_inputs is not None and lm_inputs["is_prefill"]:
             task = self.model_worker.run_lm_prefill(lm_requests, lm_inputs)
@@ -176,10 +216,13 @@ class Scheduler:
 
         async def run_model():
             # run detokenization if needed
-            self.model_worker.run_detokenize(detokenize_requests)
+            if self.remote_detokenizer_enabled:
+                self._dispatch_remote_detokenize(detokenize_requests)
+            else:
+                self.model_worker.run_detokenize(detokenize_requests)
 
             # return results to clients
-            await self._send_responses_async(detokenize_requests)
+            await self._send_responses_async(self.active_requests)
 
             if lm_inputs is not None and lm_inputs["is_prefill"]:
                 coro = self.model_worker.run_lm_prefill(lm_requests, lm_inputs)
@@ -341,7 +384,7 @@ class Scheduler:
                 self.result_socket.send(message)
 
             # send completion notification for finished requests
-            if req.done_all:
+            if req.done_all and not req.completion_sent:
                 self.model_worker.free_kv_cache(req)
                 completion_message = {"status": "completed", "reason": req.finish_reason or "unknown"}
                 # Send completion message: request_id|COMPLETION|json_data
@@ -350,6 +393,7 @@ class Scheduler:
                 )
                 self.logger.debug("Sending completion for request %s", req.request_id)
                 self.result_socket.send(completion_payload)
+                req.completion_sent = True
 
     async def _send_responses_async(self, detokenize_requests):
         """
@@ -371,7 +415,7 @@ class Scheduler:
                 await self.result_socket.send(message)
 
             # send completion notification for finished requests
-            if req.done_all:
+            if req.done_all and not req.completion_sent:
                 self.model_worker.free_kv_cache(req)
                 completion_message = {"status": "completed", "reason": req.finish_reason or "unknown"}
                 # Send completion message: request_id|COMPLETION|json_data
@@ -380,6 +424,7 @@ class Scheduler:
                 )
                 self.logger.debug("Sending completion for request %s", req.request_id)
                 await self.result_socket.send(completion_payload)
+                req.completion_sent = True
 
     def _calculate_chunk_duration(self, audio_chunk: bytes) -> float:
         """
@@ -429,6 +474,7 @@ class Scheduler:
                 new_request = self._handle_request_payload(message_payload)
                 if new_request:
                     self.active_requests.append(new_request)
+                    self.requests_by_id[new_request.request_id] = new_request
             except zmq.Again:
                 break
             except Exception as e:
@@ -439,6 +485,7 @@ class Scheduler:
 
         # Filter out completed requests
         self.active_requests = [req for req in self.active_requests if not req.done_all]
+        self.requests_by_id = {req.request_id: req for req in self.active_requests}
 
     async def _prepare_requests_async(self):
         """
@@ -453,6 +500,7 @@ class Scheduler:
                 new_request = self._handle_request_payload(message_payload)
                 if new_request:
                     self.active_requests.append(new_request)
+                    self.requests_by_id[new_request.request_id] = new_request
             except zmq.Again:
                 break
             except Exception as e:
@@ -463,4 +511,46 @@ class Scheduler:
 
         # Filter out completed requests
         self.active_requests = [req for req in self.active_requests if not req.done_all]
+        self.requests_by_id = {req.request_id: req for req in self.active_requests}
 
+    def _dispatch_remote_detokenize(self, detokenize_requests: List[Request]):
+        if not self.remote_detokenizer:
+            return
+
+        detokenize_interval = self.model_worker.detokenize_interval
+        for req in detokenize_requests:
+            if not req.next_audio_decode_idx:
+                continue
+
+            req.audio_decode_idx = req.next_audio_decode_idx.copy()
+
+            for decode_idx in req.audio_decode_idx:
+                new_tokens = req.lm_output_audio_tokens[decode_idx : decode_idx + detokenize_interval]
+                token_count = len(new_tokens)
+                if token_count == 0:
+                    continue
+                if token_count < detokenize_interval:
+                    new_tokens.extend([new_tokens[-1]] * (detokenize_interval - token_count))
+
+                token_tensor = torch.cat(new_tokens, dim=0)
+                is_final = (
+                    req.done_lm_generation
+                    and (
+                        decode_idx + detokenize_interval >
+                        len(req.lm_output_audio_tokens)
+                    )
+                )
+
+                decoder_cache = None
+                if req.decoder_cache is not None and not req.remote_cache_sent:
+                    decoder_cache = req.decoder_cache
+                    req.remote_cache_sent = True
+
+                self.remote_detokenizer.send_token_chunk(
+                    request_id=req.request_id,
+                    chunk_id=decode_idx,
+                    token_tensor=token_tensor,
+                    token_count=token_count,
+                    is_final=is_final,
+                    decoder_cache=decoder_cache,
+                )

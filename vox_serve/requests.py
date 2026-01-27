@@ -54,6 +54,8 @@ class Request:
     done_lm_generation: bool = False
     done_all: bool = False
     finish_reason: str = None
+    completion_sent: bool = False
+    remote_cache_sent: bool = False
 
     is_pressing: bool = False
     is_streaming: bool = False
