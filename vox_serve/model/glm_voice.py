@@ -305,10 +305,12 @@ class GLMVoiceForCausalLM(nn.Module):
 
 
 class GLMVoiceModel(BaseLM):
-    def __init__(self, model_name, dtype=torch.bfloat16, device="cuda:0", enable_torch_compile=False):
+    def __init__(
+        self, model_name, dtype=torch.bfloat16, device="cuda:0", enable_torch_compile=False, audio_decoder_device=None
+    ):
         if model_name == "glm":
             model_name = "zai-org/glm-4-voice-9b"
-        super().__init__(model_name, device, dtype, enable_torch_compile)
+        super().__init__(model_name, device, dtype, enable_torch_compile, audio_decoder_device)
         self.logger = get_logger(__name__)
         config_path = hf_hub_download(repo_id=model_name, filename="config.json", revision=None)
         self.config = GLMVoiceConfig.from_dict(json.load(open(config_path)))
@@ -334,14 +336,15 @@ class GLMVoiceModel(BaseLM):
         audio_decoder_config_path = hf_hub_download(repo_id=audio_decoder_repo, filename="config.yaml", revision=None)
         audio_decoder_flow_path = hf_hub_download(repo_id=audio_decoder_repo, filename="flow.pt", revision=None)
         audio_decoder_hift_path = hf_hub_download(repo_id=audio_decoder_repo, filename="hift.pt", revision=None)
+        # Initialize audio decoder on specified device (may differ from main device)
         self.audio_decoder = GLMAudioDecoder(
             config_path=audio_decoder_config_path,
             flow_path=audio_decoder_flow_path,
             hift_path=audio_decoder_hift_path,
-            device=device,
+            device=self.audio_decoder_device,
             enable_torch_compile=enable_torch_compile,
         )
-        self.audio_decoder.to(device)
+        self.audio_decoder.to(self.audio_decoder_device)
 
         self._num_attention_heads = self.config.num_attention_heads
         self._num_key_value_heads = self.config.multi_query_group_num
@@ -496,9 +499,11 @@ class GLMVoiceModel(BaseLM):
         # Create repetition cache if repetition penalty is enabled
         repetition_cache = None
         config = self.default_sampling_config
-        if (config.repetition_penalty is not None and
-            config.repetition_window is not None and
-            config.repetition_penalty != 1.0):
+        if (
+            config.repetition_penalty is not None
+            and config.repetition_window is not None
+            and config.repetition_penalty != 1.0
+        ):
             repetition_cache = torch.zeros(
                 config.repetition_window if config.repetition_window > 0 else 1,
                 self.n_codebooks,
@@ -543,9 +548,7 @@ class GLMVoiceModel(BaseLM):
             sampling_params = self.default_sampling_config
 
         if repetition_cache is not None:
-            logits = Sampler.apply_repetition_penalty(
-                logits, repetition_cache, sampling_params.repetition_penalty
-            )
+            logits = Sampler.apply_repetition_penalty(logits, repetition_cache, sampling_params.repetition_penalty)
 
         output_ids = Sampler.run_sampling(logits.view(-1, self.vocab_size), config=sampling_params)
         output_ids = output_ids.view(logits.shape[0], logits.shape[1])
@@ -561,9 +564,11 @@ class GLMVoiceModel(BaseLM):
             req.input_tokens = output_ids[i : i + 1]
 
         async def update_req_states():
-            stop_mask = (output_ids[:, 0] == self.stop_token_ids[0]) | \
-                        (output_ids[:, 0] == self.stop_token_ids[1]) | \
-                        (output_ids[:, 0] == self.stop_token_ids[2])
+            stop_mask = (
+                (output_ids[:, 0] == self.stop_token_ids[0])
+                | (output_ids[:, 0] == self.stop_token_ids[1])
+                | (output_ids[:, 0] == self.stop_token_ids[2])
+            )
             audio_mask = output_ids[:, 0] >= self.audio_offset
 
             for i, req in enumerate(requests):

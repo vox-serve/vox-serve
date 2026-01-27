@@ -458,7 +458,8 @@ class BlockRelPositionMultiHeadedAttention(MultiHeadedAttention):
 
         # 先不考虑seen_length创建一个grid mask：
         if fill_triangle:
-            mask = 1 - torch.triu(torch.ones(seq_length, seq_length, device="cuda"), diagonal=1)
+            # Don't specify device - will be moved to correct device by caller
+            mask = 1 - torch.triu(torch.ones(seq_length, seq_length), diagonal=1)
             # 下三角与主对角线都为1
         else:
             mask = torch.zeros(seq_length, seq_length)
@@ -2258,9 +2259,17 @@ class SineGen(torch.nn.Module):
 
         # NOTE (keisuke): this is for compatibility with cuda graph
         self.f0_shapes = None
-        low = torch.tensor(-np.pi, device="cuda")
-        high = torch.tensor(np.pi, device="cuda")
-        self.u_dist = torch.distributions.uniform.Uniform(low=low, high=high)
+        # Register as buffers so they move with the model
+        self.register_buffer("_low", torch.tensor(-np.pi))
+        self.register_buffer("_high", torch.tensor(np.pi))
+        self._u_dist = None  # Will be initialized lazily
+
+    @property
+    def u_dist(self):
+        """Lazy initialization of uniform distribution to ensure correct device."""
+        if self._u_dist is None:
+            self._u_dist = torch.distributions.uniform.Uniform(low=self._low, high=self._high)
+        return self._u_dist
 
     def _f02uv(self, f0):
         # generate uv signal
@@ -2446,9 +2455,13 @@ class GLMHiFTModel(nn.Module):
         self.ups.apply(init_weights)
         self.conv_post.apply(init_weights)
         self.reflection_pad = nn.ReflectionPad1d((1, 0))
-        self.stft_window = torch.from_numpy(
-            scipy.signal.get_window("hann", istft_params["n_fft"], fftbins=True).astype(np.float32)
-        ).to("cuda")
+        # Register as buffer so it moves with the model
+        self.register_buffer(
+            "stft_window",
+            torch.from_numpy(
+                scipy.signal.get_window("hann", istft_params["n_fft"], fftbins=True).astype(np.float32)
+            ),
+        )
         self.f0_predictor = f0_predictor
 
     def _f02source(self, f0: torch.Tensor) -> torch.Tensor:

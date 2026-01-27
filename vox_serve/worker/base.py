@@ -29,6 +29,9 @@ class ModelWorker:
         greedy: bool = False,
         enable_nvtx: bool = False,
         enable_torch_compile: bool = False,
+        detokenizer_device: Optional[str] = None,
+        dp_rank: int = 0,
+        dp_size: int = 1,
     ):
         # Load model with sampling parameters
         self.model = load_model(
@@ -44,10 +47,33 @@ class ModelWorker:
             cfg_scale=cfg_scale,
             greedy=greedy,
             enable_torch_compile=enable_torch_compile,
+            audio_decoder_device=detokenizer_device,
         )
         self.device = "cuda:0"
+        self.detokenizer_device = detokenizer_device or self.device
         self.max_batch_size = max_batch_size
-        self.logger = get_logger(__name__)
+        self.dp_rank = dp_rank
+        self.dp_size = dp_size
+
+        # Create logger with rank prefix for data parallel mode
+        base_logger = get_logger(__name__)
+        if dp_size > 1:
+            # Use LoggerAdapter to add rank prefix
+            import logging
+            self.logger = logging.LoggerAdapter(base_logger, {'dp_rank': dp_rank})
+            # Override the process method to add rank prefix
+            self.logger.process = lambda msg, kwargs: (f"[DP {dp_rank}/{dp_size}] {msg}", kwargs)
+        else:
+            self.logger = base_logger
+
+        # Check disaggregation setup
+        if self.detokenizer_device != self.device:
+            if torch.cuda.device_count() < 2:
+                gpu_count = torch.cuda.device_count()
+                raise RuntimeError(
+                    f"Disaggregation setup requires at least 2 GPUs, but only {gpu_count} GPU(s) available."
+                )
+            self.logger.info(f"Disaggregation mode: LLM on {self.device}, Detokenizer on {self.detokenizer_device}")
 
         # Set NVTX profiling based on parameter
         self.nvtx_enabled = enable_nvtx
@@ -78,15 +104,17 @@ class ModelWorker:
             self.watermarker_type = self.model.watermarker_type
             if self.watermarker_type == "silentcipher":
                 from ..watermarker import silentcipher
+
                 self.watermark_model = silentcipher.get_model(
                     model_type="44.1k",
-                    device=self.device,
+                    device=self.detokenizer_device,
                 )
                 # TODO: This should be specified at server start time
                 self.watermark_key = [11, 91, 60, 147, 209]
             elif self.watermarker_type == "parth":
                 from ..watermarker.perth import PerthImplicitWatermarker
-                self.watermark_model = PerthImplicitWatermarker(device=self.device)
+
+                self.watermark_model = PerthImplicitWatermarker(device=self.detokenizer_device)
             else:
                 raise ValueError(f"Unknown watermarker type: {self.watermarker_type}")
 
@@ -231,7 +259,7 @@ class ModelWorker:
                     req.decoder_cache = preprocess_output.decoder_cache
 
                 # input_ids.append(req.input_tokens.to(self.device, non_blocking=True)) # (seq, codebook)
-                input_ids_list.append(req.input_tokens.to(self.device, non_blocking=True)) # (seq, codebook)
+                input_ids_list.append(req.input_tokens.to(self.device, non_blocking=True))  # (seq, codebook)
                 position_ids_list.extend([i for i in range(len(req.input_tokens))])
                 input_features_list.append(req.input_features)
                 input_masks_list.append(req.input_masks)
@@ -255,7 +283,7 @@ class ModelWorker:
 
             else:
                 # decode request
-                input_ids_list.append(req.input_tokens) # (1, codebook)
+                input_ids_list.append(req.input_tokens)  # (1, codebook)
                 input_features_list.append(req.input_features)
                 input_masks_list.append(req.input_masks)
                 repetition_cache_list.append(req.repetition_cache)
@@ -360,11 +388,7 @@ class ModelWorker:
                 repetition_cache=repetition_cache,
             )
 
-            output_ids = self.run_lm_depth(
-                output_ids,
-                hidden_for_depth,
-                requests
-            )
+            output_ids = self.run_lm_depth(output_ids, hidden_for_depth, requests)
         else:
             logits = self.model.forward(
                 input_ids=input_ids,
@@ -434,11 +458,7 @@ class ModelWorker:
                 repetition_cache=repetition_cache,
             )
 
-            output_ids = self.run_lm_depth(
-                output_ids,
-                hidden_for_depth,
-                requests
-            )
+            output_ids = self.run_lm_depth(output_ids, hidden_for_depth, requests)
         else:
             logits = self.model.forward(
                 input_ids=input_ids,
@@ -539,9 +559,7 @@ class ModelWorker:
             # Process multiple chunks from the same request if available
             for chunk_idx in range(len(req.audio_decode_idx)):
                 decode_idx = req.audio_decode_idx[chunk_idx]
-                new_tokens = req.lm_output_audio_tokens[
-                    decode_idx : decode_idx + self.detokenize_interval
-                ]
+                new_tokens = req.lm_output_audio_tokens[decode_idx : decode_idx + self.detokenize_interval]
 
                 if len(new_tokens) < self.detokenize_interval:
                     new_tokens.extend([new_tokens[-1]] * (self.detokenize_interval - len(new_tokens)))
@@ -553,6 +571,11 @@ class ModelWorker:
             return
 
         token_ids = torch.stack(token_ids, dim=0)
+
+        # Transfer to detokenizer device if different from main device
+        if self.detokenizer_device != self.device:
+            token_ids = token_ids.to(self.detokenizer_device, non_blocking=True)
+            torch.cuda.synchronize(device=self.detokenizer_device)
 
         audio_tensors = self.model.postprocess(token_ids)
         self.logger.debug("Audio tensors: %s", audio_tensors)
@@ -569,11 +592,7 @@ class ModelWorker:
             audio = audio_tensors[i].detach().cpu().numpy()
             audio_int16 = (audio * 32767).astype(np.int16)
 
-            last_chunk_len = len(
-                req.lm_output_audio_tokens[
-                    decode_idx : decode_idx + self.detokenize_interval
-                ]
-            )
+            last_chunk_len = len(req.lm_output_audio_tokens[decode_idx : decode_idx + self.detokenize_interval])
             if last_chunk_len < self.detokenize_interval:
                 # remove the padded audio
                 audio_int16 = audio_int16[: int(audio_int16.shape[1] * last_chunk_len / self.detokenize_interval)]

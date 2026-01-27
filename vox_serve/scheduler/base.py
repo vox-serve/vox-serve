@@ -32,55 +32,69 @@ class Scheduler:
         cfg_scale: float = None,
         greedy: bool = False,
         enable_cuda_graph: bool = True,
+        enable_disaggregation: bool = False,
         enable_nvtx: bool = False,
         enable_torch_compile: bool = False,
         async_scheduling: bool = False,
+        dp_rank: int = 0,
+        dp_size: int = 1,
     ):
         self.device = device
         self.max_batch_size = max_batch_size
         self.async_scheduling = async_scheduling
-        self.logger = get_logger(__name__)
+        self.dp_rank = dp_rank
+        self.dp_size = dp_size
+
+        # Create logger with rank prefix for data parallel mode
+        base_logger = get_logger(__name__)
+        if dp_size > 1:
+            # Use LoggerAdapter to add rank prefix
+            import logging
+            self.logger = logging.LoggerAdapter(base_logger, {'dp_rank': dp_rank})
+            # Override the process method to add rank prefix
+            self.logger.process = lambda msg, kwargs: (f"[DP {dp_rank}/{dp_size}] {msg}", kwargs)
+        else:
+            self.logger = base_logger
+
         self.logger.info(f"Using {'async' if async_scheduling else 'sync'} scheduling mode")
 
-        # Switch between CudaGraphWorker and ModelWorker based on user input
+        # Choose worker based on user configuration
+        worker_kwargs = {
+            "model_name": model_name_or_path,
+            "max_batch_size": max_batch_size,
+            "top_p": top_p,
+            "top_k": top_k,
+            "min_p": min_p,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "repetition_penalty": repetition_penalty,
+            "repetition_window": repetition_window,
+            "cfg_scale": cfg_scale,
+            "greedy": greedy,
+            "max_num_pages": max_num_pages,
+            "page_size": page_size,
+            "enable_nvtx": enable_nvtx,
+            "enable_torch_compile": enable_torch_compile,
+            "dp_rank": dp_rank,
+            "dp_size": dp_size,
+        }
+
+        # Simplified worker selection logic
+        if enable_disaggregation:
+            worker_kwargs["detokenizer_device"] = "cuda:1"
+
         if enable_cuda_graph:
-            self.logger.info("Using CudaGraphWorker with CUDA graph optimization")
-            self.model_worker = CudaGraphWorker(
-                model_name_or_path,
-                max_batch_size=max_batch_size,
-                top_p=top_p,
-                top_k=top_k,
-                min_p=min_p,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                repetition_penalty=repetition_penalty,
-                repetition_window=repetition_window,
-                cfg_scale=cfg_scale,
-                greedy=greedy,
-                max_num_pages=max_num_pages,
-                page_size=page_size,
-                enable_nvtx=enable_nvtx,
-                enable_torch_compile=enable_torch_compile,
-            )
+            opt_text = " with disaggregation optimization" if enable_disaggregation else " with CUDA graph optimization"
+            self.logger.info(f"Using CudaGraphWorker{opt_text}")
+            self.model_worker = CudaGraphWorker(**worker_kwargs)
         else:
-            self.logger.info("Using ModelWorker without CUDA graph optimization")
-            self.model_worker = ModelWorker(
-                model_name_or_path,
-                max_batch_size=max_batch_size,
-                top_p=top_p,
-                top_k=top_k,
-                min_p=min_p,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                repetition_penalty=repetition_penalty,
-                repetition_window=repetition_window,
-                cfg_scale=cfg_scale,
-                greedy=greedy,
-                max_num_pages=max_num_pages,
-                page_size=page_size,
-                enable_nvtx=enable_nvtx,
-                enable_torch_compile=enable_torch_compile,
+            opt_text = (
+                " with disaggregation optimization"
+                if enable_disaggregation
+                else " without CUDA graph optimization"
             )
+            self.logger.info(f"Using ModelWorker{opt_text}")
+            self.model_worker = ModelWorker(**worker_kwargs)
 
         self.active_requests: List[Request] = []
 
@@ -90,13 +104,13 @@ class Scheduler:
             self.request_socket = self.context.socket(zmq.PULL)
             self.request_socket.bind(f"ipc://{request_socket_path}")
             self.result_socket = self.context.socket(zmq.PUSH)
-            self.result_socket.bind(f"ipc://{result_socket_path}")
+            self.result_socket.connect(f"ipc://{result_socket_path}")
         else:
             self.context = zmq.Context()
             self.request_socket = self.context.socket(zmq.PULL)
             self.request_socket.bind(f"ipc://{request_socket_path}")
             self.result_socket = self.context.socket(zmq.PUSH)
-            self.result_socket.bind(f"ipc://{result_socket_path}")
+            self.result_socket.connect(f"ipc://{result_socket_path}")
 
         # Set socket HWMs to reduce blocking under bursty load
         try:

@@ -406,14 +406,15 @@ class ChatterboxModel(BaseLM):
         dtype=torch.bfloat16,
         device="cuda:0",
         enable_torch_compile=False,
+        audio_decoder_device=None,
     ):
         if model_name == "chatterbox":
             model_name = "ResembleAI/chatterbox"
-        super().__init__(model_name, device, dtype, enable_torch_compile)
+        super().__init__(model_name, device, dtype, enable_torch_compile, audio_decoder_device)
         self.model_name = model_name
         self.config = ChatterboxConfig.english_only() if "chatterbox" in model_name else ChatterboxConfig.multilingual()
         self.model = ChatterboxForCausalLM(self.config)
-        self.audio_tokenizer = ChatterboxDecoder()
+        self.audio_decoder = ChatterboxDecoder()
 
         state_dict = {}
         with safe_open(
@@ -425,6 +426,7 @@ class ChatterboxModel(BaseLM):
         self.model.load_state_dict(state_dict, strict=True)
         self.model.to(dtype).to(device)
 
+        # Initialize audio decoder on specified device (may differ from main device)
         detokenizer_state_dict = {}
         with safe_open(
             hf_hub_download(repo_id=model_name, filename="s3gen.safetensors", revision=None),
@@ -432,8 +434,8 @@ class ChatterboxModel(BaseLM):
         ) as f:
             for key in f.keys():
                 detokenizer_state_dict[key] = f.get_tensor(key)
-        self.audio_tokenizer.load_state_dict(detokenizer_state_dict, strict=False)
-        self.audio_tokenizer.to(device).eval()
+        self.audio_decoder.load_state_dict(detokenizer_state_dict, strict=False)
+        self.audio_decoder.to(self.audio_decoder_device).eval()
 
         # Use provided tokenizer path or default to model_name
         self.text_tokenizer = self._load_tokenizer(model_name)
@@ -811,7 +813,7 @@ class ChatterboxModel(BaseLM):
     def postprocess(self, token_ids: torch.Tensor):
         """Convert token IDs to audio bytes."""
         # TODO: currently lacking the way to have request-specific ref_dict
-        audio_tensor = self.audio_tokenizer.decode(
+        audio_tensor = self.audio_decoder.decode(
             token_ids[:, :, 0],
             speech_token_lens=self.detokenize_interval,
             ref_dict=self.default_conds.gen,

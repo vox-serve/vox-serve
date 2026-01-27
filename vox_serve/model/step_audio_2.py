@@ -192,10 +192,9 @@ class StepAudio2BackboneModel(nn.Module):
         super().__init__()
 
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
-        self.layers = nn.ModuleList([
-            StepAudio2DecoderLayer(config, layer_idx)
-            for layer_idx in range(config.num_hidden_layers)
-        ])
+        self.layers = nn.ModuleList(
+            [StepAudio2DecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
+        )
         self.norm = StepAudio2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
@@ -221,13 +220,7 @@ class StepAudio2BackboneModel(nn.Module):
 
 
 class StepAudio2Adaptor(nn.Module):
-    def __init__(
-        self,
-        n_state: int = 1280,
-        n_hidden: int = 3072,
-        kernel_size: int = 7,
-        stride: int = 4
-    ):
+    def __init__(self, n_state: int = 1280, n_hidden: int = 3072, kernel_size: int = 7, stride: int = 4):
         super().__init__()
         self.stride = stride
         if self.stride != -1:
@@ -257,13 +250,13 @@ class StepAudio2ForCausalLM(nn.Module):
             n_ctx=config.audio_encoder_config.n_audio_ctx,
             n_state=config.audio_encoder_config.n_audio_state,
             n_head=config.audio_encoder_config.n_audio_head,
-            n_layer=config.audio_encoder_config.n_audio_layer
+            n_layer=config.audio_encoder_config.n_audio_layer,
         )
         self.adapter = StepAudio2Adaptor(
             n_state=config.audio_encoder_config.n_audio_state,
             n_hidden=config.audio_encoder_config.llm_dim,
             kernel_size=config.audio_encoder_config.kernel_size,
-            stride=config.audio_encoder_config.adapter_stride
+            stride=config.audio_encoder_config.adapter_stride,
         )
         self.lm_head = torch.nn.Linear(
             config.text_config.hidden_size,
@@ -294,10 +287,12 @@ class StepAudio2ForCausalLM(nn.Module):
 
 
 class StepAudio2Model(BaseLM):
-    def __init__(self, model_name, dtype=torch.bfloat16, device="cuda:0", enable_torch_compile=False):
+    def __init__(
+        self, model_name, dtype=torch.bfloat16, device="cuda:0", enable_torch_compile=False, audio_decoder_device=None
+    ):
         if model_name == "step":
             model_name = "stepfun-ai/Step-Audio-2-mini"
-        super().__init__(model_name, device, dtype, enable_torch_compile)
+        super().__init__(model_name, device, dtype, enable_torch_compile, audio_decoder_device)
         self.logger = get_logger(__name__)
         config_path = hf_hub_download(repo_id=model_name, filename="config.json", revision=None)
         self.config = StepAudio2Config.from_dict(json.load(open(config_path)))
@@ -314,13 +309,14 @@ class StepAudio2Model(BaseLM):
         )
         self.model.to(dtype).to(device)
 
+        # Initialize audio decoder on specified device (may differ from main device)
         self.audio_decoder = StepAudio2Decoder(
             model_path=model_name,
-            device=device,
+            device=self.audio_decoder_device,
             float16=True,
         )
-        self.audio_decoder.to(device)
-        self._audio_decoder_initial_cache = self.audio_decoder.init_cache()
+        self.audio_decoder.to(self.audio_decoder_device)
+        self._audio_decoder_initial_cache = self.audio_decoder.init_cache().to(self.audio_decoder_device)
 
         self._num_attention_heads = self.config.text_config.num_attention_heads
         self._num_key_value_heads = self.config.text_config.num_key_value_heads
@@ -481,12 +477,12 @@ class StepAudio2Model(BaseLM):
         # Then through adaptor (parameters from config file):
         padding = 1
         kernel_size = 3  # from config: audio_encoder_config.kernel_size
-        stride = 2      # from config: audio_encoder_config.adapter_stride
+        stride = 2  # from config: audio_encoder_config.adapter_stride
         adapter_output_dim = (encoder_output_dim + 2 * padding - kernel_size) // stride + 1
         return adapter_output_dim
 
     def _padding_mels(self, data: List[torch.Tensor]):
-        """ Padding the data into batch data
+        """Padding the data into batch data
 
         Parameters
         ----------
@@ -498,12 +494,9 @@ class StepAudio2Model(BaseLM):
         """
         sample = data
         assert isinstance(sample, list)
-        feats_lengths = torch.tensor([s.size(1)-2 for s in sample],
-                                    dtype=torch.int32)
+        feats_lengths = torch.tensor([s.size(1) - 2 for s in sample], dtype=torch.int32)
         feats = [s.t() for s in sample]
-        padded_feats = pad_sequence(feats,
-                                    batch_first=True,
-                                    padding_value=0)
+        padded_feats = pad_sequence(feats, batch_first=True, padding_value=0)
 
         return padded_feats.transpose(1, 2), feats_lengths
 
@@ -517,7 +510,7 @@ class StepAudio2Model(BaseLM):
                 role = "human"
             if isinstance(content, str):
                 text_with_audio = f"<|BOT|>{role}\n{content}"
-                text_with_audio += '<|EOT|>' if msg.get('eot', True) else ''
+                text_with_audio += "<|EOT|>" if msg.get("eot", True) else ""
                 results.append(text_with_audio)
             elif isinstance(content, list):
                 results.append(f"<|BOT|>{role}\n")
@@ -525,16 +518,16 @@ class StepAudio2Model(BaseLM):
                     if item["type"] == "text":
                         results.append(f"{item['text']}")
                     elif item["type"] == "audio":
-                        audio = self._load_audio(item['audio'])
+                        audio = self._load_audio(item["audio"])
                         for i in range(0, audio.shape[0], 16000 * 25):
-                            mel = self._log_mel_spectrogram(audio[i:i+16000*25], n_mels=128, padding=479)
+                            mel = self._log_mel_spectrogram(audio[i : i + 16000 * 25], n_mels=128, padding=479)
                             mels.append(mel.to(self.device, dtype=self.dtype))
                             audio_tokens = "<audio_patch>" * self._compute_token_num(mel.shape[1])
                             results.append(f"<audio_start>{audio_tokens}<audio_end>")
                     elif item["type"] == "token":
                         results.append(item["token"])
-                if msg.get('eot', True):
-                    results.append('<|EOT|>')
+                if msg.get("eot", True):
+                    results.append("<|EOT|>")
             elif content is None:
                 results.append(f"<|BOT|>{role}\n")
             else:
@@ -548,13 +541,13 @@ class StepAudio2Model(BaseLM):
             messages = [
                 {"role": "system", "content": "You are a helpful assistant."},
                 {"role": "human", "content": prompt},
-                {"role": "assistant", "content": "<tts_start>", "eot": False}, # Insert <tts_start> for speech response
+                {"role": "assistant", "content": "<tts_start>", "eot": False},  # Insert <tts_start> for speech response
             ]
         else:
             messages = [
                 {"role": "system", "content": "You are a helpful assistant."},
                 {"role": "human", "content": [{"type": "audio", "audio": audio_path}]},
-                {"role": "assistant", "content": "<tts_start>", "eot": False}, # Insert <tts_start> for speech response
+                {"role": "assistant", "content": "<tts_start>", "eot": False},  # Insert <tts_start> for speech response
             ]
 
         messages, mels = self._apply_chat_template(messages)
@@ -590,7 +583,7 @@ class StepAudio2Model(BaseLM):
             prompt=prompt,
             audio_path=audio_path,
         )
-        input_ids = prompt_ids.view(-1, 1) # add codebook dimension
+        input_ids = prompt_ids.view(-1, 1)  # add codebook dimension
 
         input_features = torch.zeros(
             input_ids.shape[0],
@@ -613,15 +606,17 @@ class StepAudio2Model(BaseLM):
             insert_location[:, 0] += 1
             for idx in range(len(insert_location)):
                 s, _ = insert_location[idx]
-                input_features[s : s + feat_lens[idx], :] = out[idx, :feat_lens[idx]]
+                input_features[s : s + feat_lens[idx], :] = out[idx, : feat_lens[idx]]
                 input_masks[s : s + feat_lens[idx], :] = 1
 
         # Create repetition cache if repetition penalty is enabled
         repetition_cache = None
         config = self.default_sampling_config
-        if (config.repetition_penalty is not None and
-            config.repetition_window is not None and
-            config.repetition_penalty != 1.0):
+        if (
+            config.repetition_penalty is not None
+            and config.repetition_window is not None
+            and config.repetition_penalty != 1.0
+        ):
             repetition_cache = torch.zeros(
                 config.repetition_window if config.repetition_window > 0 else 1,
                 self.n_codebooks,
@@ -644,16 +639,15 @@ class StepAudio2Model(BaseLM):
     def audio_decoder_initial_cache(self, batch_size: int):
         base_cache = self._audio_decoder_initial_cache
 
-        # Default: clone per-tensor to create an independent cache instance
         return StepAudio2DecoderCache(
-            spk_emb=base_cache.spk_emb.repeat(batch_size, 1),
-            conformer_cnn_cache=base_cache.conformer_cnn_cache.repeat(batch_size, 1, 1),
-            conformer_att_cache=base_cache.conformer_att_cache.repeat(batch_size, 1, 1, 1, 1),
-            estimator_cnn_cache=base_cache.estimator_cnn_cache.repeat(batch_size, 1, 1, 1, 1, 1),
-            estimator_att_cache=base_cache.estimator_att_cache.repeat(batch_size, 1, 1, 1, 1, 1, 1),
-            hift_mel_cache=base_cache.hift_mel_cache.repeat(batch_size, 1, 1),
-            hift_source_cache=base_cache.hift_source_cache.repeat(batch_size, 1, 1),
-            hift_speech_cache=base_cache.hift_speech_cache.repeat(batch_size, 1),
+            spk_emb=base_cache.spk_emb.repeat(batch_size, 1).contiguous(),
+            conformer_cnn_cache=base_cache.conformer_cnn_cache.repeat(batch_size, 1, 1).contiguous(),
+            conformer_att_cache=base_cache.conformer_att_cache.repeat(batch_size, 1, 1, 1, 1).contiguous(),
+            estimator_cnn_cache=base_cache.estimator_cnn_cache.repeat(batch_size, 1, 1, 1, 1, 1).contiguous(),
+            estimator_att_cache=base_cache.estimator_att_cache.repeat(batch_size, 1, 1, 1, 1, 1, 1).contiguous(),
+            hift_mel_cache=base_cache.hift_mel_cache.repeat(batch_size, 1, 1).contiguous(),
+            hift_source_cache=base_cache.hift_source_cache.repeat(batch_size, 1, 1).contiguous(),
+            hift_speech_cache=base_cache.hift_speech_cache.repeat(batch_size, 1).contiguous(),
         )
 
     def forward(
@@ -694,9 +688,7 @@ class StepAudio2Model(BaseLM):
             sampling_params = self.default_sampling_config
 
         if repetition_cache is not None:
-            logits = Sampler.apply_repetition_penalty(
-                logits, repetition_cache, sampling_params.repetition_penalty
-            )
+            logits = Sampler.apply_repetition_penalty(logits, repetition_cache, sampling_params.repetition_penalty)
 
         output_ids = Sampler.run_sampling(logits.view(-1, self.vocab_size), config=sampling_params)
         output_ids = output_ids.view(logits.shape[0], logits.shape[1])
@@ -739,10 +731,7 @@ class StepAudio2Model(BaseLM):
         return output_ids, task
 
     def postprocess(self, token_ids: torch.Tensor, decoder_cache: StepAudio2DecoderCache):
-        audio_tensor, new_decoder_cache = self.audio_decoder(
-            token_ids[:, :, 0] - self.audio_offset,
-            decoder_cache
-        )
+        audio_tensor, new_decoder_cache = self.audio_decoder(token_ids[:, :, 0] - self.audio_offset, decoder_cache)
         decoder_cache.spk_emb[:] = new_decoder_cache.spk_emb
         decoder_cache.conformer_cnn_cache[:] = new_decoder_cache.conformer_cnn_cache
         decoder_cache.conformer_att_cache[:] = new_decoder_cache.conformer_att_cache

@@ -11,6 +11,7 @@ class DecoderCache:
     This is an empty dataclass intended to be inherited by
     model-specific decoder cache containers.
     """
+
     def __getitem__(self, index: Any):
         """Return a sliced view of the cache along the batch dimension.
 
@@ -25,10 +26,7 @@ class DecoderCache:
             if isinstance(obj, DecoderCache):
                 return obj[index]
             if isinstance(obj, list):
-                return [
-                    _slice(x)
-                    for x in obj
-                ]
+                return [_slice(x) for x in obj]
             if isinstance(obj, tuple):
                 return tuple(_slice(x) for x in obj)
             if isinstance(obj, dict):
@@ -123,10 +121,7 @@ class DecoderCache:
             if isinstance(first, list):
                 if not all(isinstance(v, list) and len(v) == len(first) for v in values):
                     raise ValueError("List fields must have the same length to merge")
-                return [
-                    _merge([v[i] for v in values])
-                    for i in range(len(first))
-                ]
+                return [_merge([v[i] for v in values]) for i in range(len(first))]
 
             if isinstance(first, tuple):
                 if not all(isinstance(v, tuple) and len(v) == len(first) for v in values):
@@ -149,3 +144,29 @@ class DecoderCache:
 
         merged_values = {f.name: _merge([getattr(c, f.name) for c in caches]) for f in fields(cache_type)}
         return cache_type(**merged_values)
+
+    def to(self, device) -> "DecoderCache":
+        """Move all tensors in the cache to the specified device.
+
+        Args:
+            device: Target device (e.g., 'cuda:0', 'cuda:1', torch.device('cuda:1'))
+
+        Returns:
+            New DecoderCache instance with all tensors on the target device.
+        """
+
+        def _to_device(obj: Any) -> Any:
+            if torch.is_tensor(obj):
+                return obj.to(device)
+            if isinstance(obj, DecoderCache):
+                return obj.to(device)
+            if isinstance(obj, list):
+                return [_to_device(x) for x in obj]
+            if isinstance(obj, tuple):
+                return tuple(_to_device(x) for x in obj)
+            if isinstance(obj, dict):
+                return {k: _to_device(v) for k, v in obj.items()}
+            return obj
+
+        moved_values = {f.name: _to_device(getattr(self, f.name)) for f in fields(self)}
+        return type(self)(**moved_values)

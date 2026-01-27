@@ -531,11 +531,13 @@ class ZonosForCausalLM(nn.Module):
 
 
 class ZonosModel(BaseLM):
-    def __init__(self, model_name, dtype=torch.bfloat16, device="cuda:0", enable_torch_compile=False):
+    def __init__(
+        self, model_name, dtype=torch.bfloat16, device="cuda:0", enable_torch_compile=False, audio_decoder_device=None
+    ):
         # TODO: Zonos hybrid model is not yet supported
         if model_name == "zonos":
             model_name = "Zyphra/Zonos-v0.1-transformer"
-        super().__init__(model_name, device, dtype, enable_torch_compile)
+        super().__init__(model_name, device, dtype, enable_torch_compile, audio_decoder_device)
         self.logger = get_logger(__name__)
         config_path = hf_hub_download(repo_id=model_name, filename="config.json", revision=None)
         model_path = hf_hub_download(repo_id=model_name, filename="model.safetensors", revision=None)
@@ -543,7 +545,10 @@ class ZonosModel(BaseLM):
         self.config = ZonosConfig.from_dict(json.load(open(config_path)))
         self.model = ZonosForCausalLM(self.config, enable_torch_compile=self.enable_torch_compile)
         self.model.to(dtype).to(device)
-        self.model.autoencoder.dac.to(dtype).to(device)
+        # Initialize audio decoder on specified device (may differ from main device)
+        self.model.autoencoder.dac.to(dtype).to(self.audio_decoder_device)
+        # Alias for naming consistency
+        self.audio_decoder = self.model.autoencoder.dac
         self.speaker_encoder = ZonosSpeakerEmbeddingLDA(device=device)
         self.device = device
 
