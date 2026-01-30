@@ -760,6 +760,10 @@ class CSMModel(BaseLMWithDepth):
         # there are 33 codebooks including text
         tokens_to_process = token_ids[:, :, :-1].transpose(1, 2)  # (batch_size, 32, interval)
 
+        # Clamp tokens to valid Mimi decoder range [0, 2047]
+        # Mimi cardinality is 2048, so valid tokens are in [0, 2047]
+        tokens_to_process = tokens_to_process.clamp(0, 2047)
+
         # mimi decoder
         # TODO: caching for mimi
         audio_tensor = self.audio_decoder.decode(tokens_to_process)

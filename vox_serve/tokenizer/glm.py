@@ -452,23 +452,34 @@ class BlockRelPositionMultiHeadedAttention(MultiHeadedAttention):
         torch.nn.init.xavier_uniform_(self.pos_bias_u)
         torch.nn.init.xavier_uniform_(self.pos_bias_v)
         self.block_size = block_size
+        # Cache for grid masks to avoid tensor creation during CUDA graph capture
+        self._mask_cache = {}
 
-    def _create_grid_mask(self, seq_length, trunck_length, fill_triangle):
+    def _create_grid_mask(self, seq_length, trunck_length, fill_triangle, device=None, dtype=None):
         assert seq_length > 0
+
+        # Use cache to avoid creating tensors during CUDA graph capture
+        # Cache key includes device and dtype to avoid cross-device issues
+        cache_key = (seq_length, trunck_length, fill_triangle, device, dtype)
+        if cache_key in self._mask_cache:
+            return self._mask_cache[cache_key]
 
         # 先不考虑seen_length创建一个grid mask：
         if fill_triangle:
-            # Don't specify device - will be moved to correct device by caller
-            mask = 1 - torch.triu(torch.ones(seq_length, seq_length), diagonal=1)
+            # Create directly on target device if specified
+            mask = 1 - torch.triu(torch.ones(seq_length, seq_length, device=device, dtype=dtype), diagonal=1)
             # 下三角与主对角线都为1
         else:
-            mask = torch.zeros(seq_length, seq_length)
+            mask = torch.zeros(seq_length, seq_length, device=device, dtype=dtype)
 
         for i in range(seq_length):
             trunck_idx = i // trunck_length
             trunck_start = trunck_idx * trunck_length
             trunck_end = trunck_length + trunck_start
             mask[i][trunck_start:trunck_end] = 1
+
+        # Cache the mask on the target device
+        self._mask_cache[cache_key] = mask
 
         return mask
 
@@ -525,7 +536,14 @@ class BlockRelPositionMultiHeadedAttention(MultiHeadedAttention):
         # mask = torch.tril(torch.ones(time_len, time_len).to(mask), diagonal=0).int()
         # block_size = self.block_size
         # mask[:, 0:block_size] = 1
-        block_mask = self._create_grid_mask(time_len, self.block_size, fill_triangle=True).to(query).int()
+        # Create mask directly on the target device to avoid .to() during CUDA graph capture
+        block_mask = self._create_grid_mask(
+            time_len,
+            self.block_size,
+            fill_triangle=True,
+            device=query.device,
+            dtype=query.dtype,
+        ).int()
         block_mask = block_mask[None].repeat(bs, 1, 1)
         mask = block_mask
 
@@ -2260,8 +2278,8 @@ class SineGen(torch.nn.Module):
         # NOTE (keisuke): this is for compatibility with cuda graph
         self.f0_shapes = None
         # Register as buffers so they move with the model
-        self.register_buffer("_low", torch.tensor(-np.pi))
-        self.register_buffer("_high", torch.tensor(np.pi))
+        self.register_buffer("_low", torch.tensor(-np.pi), persistent=False)
+        self.register_buffer("_high", torch.tensor(np.pi), persistent=False)
         self._u_dist = None  # Will be initialized lazily
 
     @property
@@ -2461,6 +2479,7 @@ class GLMHiFTModel(nn.Module):
             torch.from_numpy(
                 scipy.signal.get_window("hann", istft_params["n_fft"], fftbins=True).astype(np.float32)
             ),
+            persistent=False,
         )
         self.f0_predictor = f0_predictor
 

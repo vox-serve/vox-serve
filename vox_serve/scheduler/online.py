@@ -71,6 +71,9 @@ class OnlineScheduler(Scheduler):
                     if current_batch_size >= max_prefill_batch_size:
                         break
 
+                # allow only one prefill request for now
+                break
+
             max_batch_size_this_cycle = max_prefill_batch_size
 
         else:

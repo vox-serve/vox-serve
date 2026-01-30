@@ -278,6 +278,9 @@ class Scheduler:
                     if current_batch_size >= max_prefill_batch_size:
                         break
 
+                # allow only one prefill request for now
+                break
+
             remaining_slots = max_prefill_batch_size - len(lm_requests)
 
         else:
