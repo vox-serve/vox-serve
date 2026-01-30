@@ -41,7 +41,7 @@ class OfflineScheduler(Scheduler):
             current_seq_len = 0
 
             for req in prefill_requests:
-                req_seq_len = req.input_length if req.input_length else 0
+                req_seq_len = req.input_length if req.input_length else 200
 
                 if (current_batch_size + 1 <= max_prefill_batch_size and
                     current_seq_len + req_seq_len <= max_seq_len):
@@ -52,6 +52,9 @@ class OfflineScheduler(Scheduler):
 
                     if current_batch_size >= max_prefill_batch_size:
                         break
+
+                # allow only one prefill request for now
+                break
 
             remaining_slots = max_prefill_batch_size - len(lm_requests)
         else:
