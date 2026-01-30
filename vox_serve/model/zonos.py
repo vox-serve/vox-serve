@@ -926,6 +926,10 @@ class ZonosModel(BaseLM):
         # revert delay patterns
         codes = torch.stack([token_ids[:, k : interval - n_q + k, k] for k in range(n_q)], dim=1)
 
+        # Clamp tokens to valid DAC decoder range [0, 1023]
+        # DAC codebook_size is 1024, but model uses 1024=EOS, 1025=masked_token
+        codes = codes.clamp(0, 1023)
+
         wavs = self.model.autoencoder.decode(codes)
         # audio_tensor = torchaudio.functional.resample(wavs, orig_freq=44100, new_freq=24000)
         audio_tensor = self.resample_44k_to_24k(wavs)
