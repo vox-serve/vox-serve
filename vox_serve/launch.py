@@ -1,3 +1,5 @@
+"""FastAPI server entry point and request orchestration for VoxServe."""
+
 import asyncio
 import atexit
 import collections
@@ -28,6 +30,7 @@ logger = get_logger(__name__)
 
 
 class APIServer:
+    """Manage scheduler processes and route API requests to the model backends."""
     def __init__(
         self,
         model_name: str = "canopylabs/orpheus-3b-0.1-ft",
@@ -55,6 +58,34 @@ class APIServer:
         async_scheduling: bool = False,
         dp_size: int = 1,
     ):
+        """Initialize the API server and start scheduler process(es).
+
+        Args:
+            model_name: Model identifier or local path.
+            scheduler_type: Scheduler backend to use.
+            request_socket_path: IPC path for request socket (without rank suffix).
+            result_socket_path: IPC path for result socket.
+            output_dir: Directory to write generated audio and uploads.
+            timeout_seconds: Per-request timeout in seconds.
+            max_batch_size: Maximum batch size for scheduler inference.
+            top_p: Top-p sampling parameter.
+            top_k: Top-k sampling parameter.
+            min_p: Min-p sampling parameter.
+            temperature: Sampling temperature.
+            max_tokens: Maximum number of tokens to generate.
+            repetition_penalty: Repetition penalty value.
+            repetition_window: Repetition window size.
+            cfg_scale: Classifier-free guidance scale.
+            greedy: Enable greedy decoding.
+            enable_cuda_graph: Enable CUDA graph optimization.
+            enable_disaggregation: Enable disaggregated execution (multi-GPU).
+            enable_nvtx: Enable NVTX profiling.
+            enable_torch_compile: Enable torch.compile optimization.
+            max_num_pages: Maximum number of KV cache pages.
+            page_size: Size of each KV cache page.
+            async_scheduling: Enable async scheduling mode.
+            dp_size: Data parallel replica count.
+        """
         self.model_name = model_name
         self.request_socket_path = request_socket_path
         self.result_socket_path = result_socket_path
@@ -141,7 +172,7 @@ class APIServer:
         atexit.register(self.cleanup)
 
     def _start_schedulers(self):
-        """Start the scheduler process(es)"""
+        """Start the scheduler process(es)."""
         try:
             import subprocess
             import sys
@@ -315,7 +346,7 @@ class APIServer:
             raise RuntimeError(f"Could not start scheduler process: {e}") from e
 
     def _process_messages(self):
-        """Background thread to process incoming messages from scheduler"""
+        """Process incoming scheduler messages in a background thread."""
         while self.running:
             try:
                 while True:
@@ -377,6 +408,7 @@ class APIServer:
                 continue
 
     def _stop_scheduler(self):
+        """Stop scheduler process(es) if they are running."""
         if self.dp_size > 1:
             # Stop all scheduler processes in DP mode
             if self.scheduler_processes:
@@ -451,10 +483,14 @@ class APIServer:
                     self.logger.error(f"Sender loop error: {e}")
 
     def start_streaming_request(self, text: str = None, audio_path: str = None) -> str:
-        """
-        Create and enqueue a streaming request immediately and return its request_id.
+        """Create and enqueue a streaming request, returning its request ID.
 
-        Scheduling is moved out of the streaming generator to avoid deferred start under load.
+        Args:
+            text: Input text to synthesize.
+            audio_path: Optional path to input audio for STS-capable models.
+
+        Returns:
+            The request ID used for subsequent streaming.
         """
         request_id = str(uuid.uuid4())
         self.logger.info(f"Request {request_id} joined for streaming")
@@ -483,10 +519,16 @@ class APIServer:
         return request_id
 
     async def async_stream_chunks(self, request_id: str):
-        """
-        Async generator yielding audio chunks for an already enqueued streaming request.
+        """Yield audio chunks for an already enqueued streaming request.
 
-        Avoids threadpool saturation by using asyncio and decouples scheduling from streaming.
+        Args:
+            request_id: Request identifier returned by ``start_streaming_request``.
+
+        Yields:
+            Raw audio chunks (bytes) as they arrive.
+
+        Raises:
+            HTTPException: If the request times out or fails.
         """
         start_time = time.time()
         # Stream chunks until completion
@@ -600,7 +642,7 @@ class APIServer:
             raise HTTPException(status_code=500, detail=f"Generation failed: {str(e)}") from e
 
     def cleanup(self):
-        """Clean up ZMQ resources and stop scheduler"""
+        """Clean up ZMQ resources, background threads, and scheduler processes."""
         self.logger.info("Cleaning up API server...")
 
         # Stop background message processing
@@ -749,7 +791,13 @@ def signal_handler(signum, frame):
 
 
 def main():
-    """Main entry point for the CLI command"""
+    """Run the VoxServe API server from the CLI.
+
+    The CLI maps to ``python -m vox_serve.launch`` or the ``vox-serve`` entrypoint.
+
+    Arguments are parsed via ``argparse`` and control model selection, scheduling
+    behavior, sampling parameters, and performance settings.
+    """
     import argparse
     import multiprocessing as mp
 
