@@ -85,6 +85,7 @@ html_static_path = ["_static"]
 html_title = f"{project} v{version} Documentation"
 html_copy_source = True
 html_last_updated_fmt = ""
+html_logo = "_static/images/logo-light.png"
 
 intersphinx_mapping = {
     "python": ("https://docs.python.org/3.12", None),
