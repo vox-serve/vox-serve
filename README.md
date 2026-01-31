@@ -1,6 +1,8 @@
 # VoxServe: a serving system for SpeechLMs
 
-<!-- **⚠️ This project is under heavy construction — interfaces are not stable, and performance tuning is in progress.** -->
+<p align="center">
+  <img src="docs/_static/images/logo-dark.png" alt="VoxServe Logo" width="320" />
+</p>
 
 VoxServe is a serving system for Speech Language Models (SpeechLMs). VoxServe provides low-latency & high-throughput inference for language models trained for speech tokens, specifically text-to-speech (TTS) and speech-to-speech (STS) models.
 
