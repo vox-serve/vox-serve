@@ -1,0 +1,11 @@
+/* Hide the left nav scrollbar when it isn't needed (Sphinx book theme). */
+.bd-sidebar,
+.bd-sidebar .sidebar-content {
+  scrollbar-width: none;
+}
+
+.bd-sidebar::-webkit-scrollbar,
+.bd-sidebar .sidebar-content::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
