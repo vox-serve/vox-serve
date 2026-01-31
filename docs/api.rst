@@ -57,3 +57,23 @@ JSON payload:
 .. code-block:: json
 
    {"status": "healthy"}
+
+Python API
+==========
+
+Package overview
+----------------
+
+.. autosummary::
+   :toctree: _autosummary
+   :recursive:
+
+   vox_serve
+
+Key modules
+-----------
+
+.. automodule:: vox_serve.launch
+   :members:
+   :undoc-members:
+   :show-inheritance:

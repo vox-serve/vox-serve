@@ -34,6 +34,7 @@ extensions = [
 
 autosectionlabel_prefix_document = True
 autodoc_typehints = "description"
+autosummary_generate = True
 
 myst_enable_extensions = [
     "dollarmath",
@@ -81,7 +82,7 @@ exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
 
 html_theme = "sphinx_book_theme"
 html_static_path = ["_static"]
-html_title = project
+html_title = f"{project} v{version} Documentation"
 html_copy_source = True
 html_last_updated_fmt = ""
 
@@ -99,7 +100,7 @@ html_theme_options = {
     "repository_branch": "main",
     "show_navbar_depth": 3,
     "max_navbar_depth": 4,
-    "collapse_navbar": True,
+    "collapse_navbar": False,
     "use_edit_page_button": True,
     "use_source_button": True,
     "use_issues_button": True,

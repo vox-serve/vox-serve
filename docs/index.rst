@@ -17,6 +17,7 @@ text-to-speech (TTS) and speech-to-speech (STS) workloads.
 
    api
    cli
+   models
    architecture
 
 .. toctree::
