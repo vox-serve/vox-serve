@@ -9,3 +9,12 @@
   width: 0;
   height: 0;
 }
+
+/* Swap logo based on light/dark theme. */
+html[data-theme="dark"] .logo__image {
+  content: url("../images/logo-dark.png");
+}
+
+html[data-theme="light"] .logo__image {
+  content: url("../images/logo-light.png");
+}
