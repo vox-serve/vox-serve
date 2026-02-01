@@ -11,6 +11,8 @@ from typing import Callable, Optional, Union, List
 
 import numpy as np
 import torch
+import json
+from huggingface_hub import hf_hub_download
 from torch import nn
 from torch.nn import Parameter
 from torch.nn import functional as F
@@ -21,7 +23,7 @@ from typing import List, Optional, Union
 
 
 @dataclass
-class Qwen3TTSTokenizerDecoderConfig:
+class Qwen3TTSTokenizerV2DecoderConfig:
     attention_bias: bool = False
     attention_dropout: float = 0.0
     latent_dim: int = 1024
@@ -49,7 +51,7 @@ class Qwen3TTSTokenizerDecoderConfig:
 
 
 @dataclass
-class Qwen3TTSTokenizerEncoderConfig:
+class Qwen3TTSTokenizerV2EncoderConfig:
     _frame_rate: float = 12.5
     attention_bias: bool = False
     attention_dropout: float = 0.0
@@ -106,14 +108,35 @@ class Qwen3TTSTokenizerV2Config:
     decode_upsample_rate: int = 1920
     encode_downsample_rate: int = 1920
 
-    decoder_config: Qwen3TTSTokenizerDecoderConfig = field(
-        default_factory=Qwen3TTSTokenizerDecoderConfig
+    decoder_config: Qwen3TTSTokenizerV2DecoderConfig = field(
+        default_factory=Qwen3TTSTokenizerV2DecoderConfig
     )
-    encoder_config: Qwen3TTSTokenizerEncoderConfig = field(
-        default_factory=Qwen3TTSTokenizerEncoderConfig
+    encoder_config: Qwen3TTSTokenizerV2EncoderConfig = field(
+        default_factory=Qwen3TTSTokenizerV2EncoderConfig
     )
 
     transformers_version: str = "4.57.3"
+
+    @classmethod
+    def from_json(cls, json_path: str):
+        with open(json_path, "r") as f:
+            config_dict = json.load(f)
+        # Convert nested dicts to config dataclasses (JSON gives plain dicts)
+        if "decoder_config" in config_dict and isinstance(
+            config_dict["decoder_config"], dict
+        ):
+            config_dict = dict(config_dict)
+            config_dict["decoder_config"] = Qwen3TTSTokenizerV2DecoderConfig(
+                **config_dict["decoder_config"]
+            )
+        if "encoder_config" in config_dict and isinstance(
+            config_dict["encoder_config"], dict
+        ):
+            config_dict = dict(config_dict)
+            config_dict["encoder_config"] = Qwen3TTSTokenizerV2EncoderConfig(
+                **config_dict["encoder_config"]
+            )
+        return cls(**config_dict)
 
 
 
@@ -284,7 +307,6 @@ class Qwen3TTSTokenizerV2DecoderRotatoryEmbedding(nn.Module):
         self.original_inv_freq = self.inv_freq
 
     @torch.no_grad()
-    @dynamic_rope_update  # power user: used with advanced RoPE types (e.g. dynamic rope)
     def forward(self, x, position_ids):
         inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1).to(x.device)
         position_ids_expanded = position_ids[:, None, :].float()
@@ -333,7 +355,7 @@ class Qwen3TTSTokenizerV2DecoderAttention(nn.Module):
         hidden_states: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         attention_mask: Optional[torch.Tensor],
-        **kwargs: Unpack[FlashAttentionKwargs],
+        **kwargs,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
@@ -368,7 +390,7 @@ class Qwen3TTSTokenizerV2DecoderMlp(nn.Module):
         self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
         self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
-        self.act_fn = ACT2FN[config.hidden_act]
+        self.act_fn = nn.SiLU()
 
     def forward(self, x):
         down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
@@ -410,7 +432,7 @@ class Qwen3TTSTokenizerV2DecoderLayerScale(nn.Module):
         return self.scale * x
 
 
-class Qwen3TTSTokenizerV2DecoderTransformerLayer(GradientCheckpointingLayer):
+class Qwen3TTSTokenizerV2DecoderTransformerLayer(nn.Module):
     def __init__(self, config: Qwen3TTSTokenizerV2DecoderConfig, layer_idx):
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -477,7 +499,8 @@ class Qwen3TTSTokenizerV2DecoderTransformerModel(nn.Module):
     }
 
     def __init__(self, config: Qwen3TTSTokenizerV2DecoderConfig):
-        super().__init__(config)
+        super().__init__()
+        self.config = config
         self.layers = nn.ModuleList(
             [Qwen3TTSTokenizerV2DecoderTransformerLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
         )
@@ -490,9 +513,6 @@ class Qwen3TTSTokenizerV2DecoderTransformerModel(nn.Module):
         self.input_proj = nn.Linear(config.latent_dim, config.hidden_size)
         self.output_proj = nn.Linear(config.hidden_size, config.latent_dim)
 
-        # Initialize weights and apply final processing
-        self.post_init()
-
     def forward(
         self,
         input_ids=None,
@@ -500,7 +520,7 @@ class Qwen3TTSTokenizerV2DecoderTransformerModel(nn.Module):
         position_ids=None,
         inputs_embeds=None,
         **kwargs,
-    ) -> BaseModelOutputWithPast:
+    ) -> torch.Tensor:
         if input_ids is not None:
             raise ValueError("input_ids is not expected")
         if (input_ids is None) ^ (inputs_embeds is not None):
@@ -547,10 +567,7 @@ class Qwen3TTSTokenizerV2DecoderTransformerModel(nn.Module):
 
         hidden_states = self.norm(hidden_states)
         hidden_states = self.output_proj(hidden_states)
-        return BaseModelOutputWithPast(
-            last_hidden_state=hidden_states,
-            past_key_values=None,
-        )
+        return hidden_states
 
 
 class SnakeBeta(nn.Module):
@@ -615,7 +632,7 @@ class Qwen3TTSTokenizerV2DecoderDecoderResidualUnit(nn.Module):
 
 class Qwen3TTSTokenizerV2DecoderDecoderBlock(nn.Module):
     def __init__(self, config: Qwen3TTSTokenizerV2DecoderConfig, layer_idx):
-        super().__init__(config)
+        super().__init__()
         in_dim = config.decoder_dim // 2**layer_idx
         out_dim = config.decoder_dim // 2 ** (layer_idx + 1)
         upsample_rate = config.upsample_rates[layer_idx]
@@ -800,10 +817,11 @@ class SplitResidualVectorQuantizer(nn.Module):
 
 
 class Qwen3TTSTokenizerV2Decoder(nn.Module):
-    def __init__(self, config: Qwen3TTSTokenizerDecoderConfig):
-        super().__init__(config)
+    def __init__(self, config: Qwen3TTSTokenizerV2DecoderConfig):
+        super().__init__()
+        self.config = config
         self.total_upsample = np.prod(config.upsample_rates + config.upsampling_ratios)
-        self.pre_transformer = Qwen3TTSTokenizerV2DecoderTransformerModel._from_config(config)
+        self.pre_transformer = Qwen3TTSTokenizerV2DecoderTransformerModel(config)
         
         self.quantizer = SplitResidualVectorQuantizer(
             dimension=config.codebook_dim // 2,
@@ -842,8 +860,6 @@ class Qwen3TTSTokenizerV2Decoder(nn.Module):
         ]
         self.decoder = nn.ModuleList(decoder)
 
-        self.post_init()
-
     def forward(self, codes):
         if codes.shape[1] != self.config.num_quantizers:
             raise ValueError(f"Expected {self.config.num_quantizers} layer of codes, got {codes.shape[1]}")
@@ -875,20 +891,18 @@ class Qwen3TTSTokenizerV2Decoder(nn.Module):
 
 
 class Qwen3TTSTokenizerV2Encoder(nn.Module):
-    def __init__(self, config: Qwen3TTSTokenizerEncoderConfig):
-        super().__init__(config)
+    def __init__(self, config: Qwen3TTSTokenizerV2EncoderConfig):
+        super().__init__()
         self.config = config
 
         self.upsample = None
         self.decoder_transformer = None
         self.decoder = None
 
-        self.post_init()
-
 
 class Qwen3TTSTokenizerV2Model(nn.Module):
     def __init__(self, config: Qwen3TTSTokenizerV2Config):
-        super().__init__(config)
+        super().__init__()
         self.config = config
 
         self.encoder_valid_num_quantizers = config.encoder_valid_num_quantizers
@@ -899,11 +913,9 @@ class Qwen3TTSTokenizerV2Model(nn.Module):
         self.decode_upsample_rate = config.decode_upsample_rate
         self.encode_downsample_rate = config.encode_downsample_rate
 
-        self.encoder = Qwen3TTSTokenizerV2Encoder._from_config(self.config.encoder_config)
-        self.decoder = Qwen3TTSTokenizerV2Decoder._from_config(self.config.decoder_config)
+        self.encoder = Qwen3TTSTokenizerV2Encoder(self.config.encoder_config)
+        self.decoder = Qwen3TTSTokenizerV2Decoder(self.config.decoder_config)
 
-        self.post_init()
-    
     def get_model_type(self):
         return self.config.model_type
     
@@ -987,7 +999,11 @@ class Qwen3TTSDecoder(nn.Module):
         """
         super().__init__()
         self.device = device
-        config = Qwen3TTSTokenizerV2Config.from_pretrained(model_repo)  
+        config_path = hf_hub_download(
+            repo_id=model_repo,
+            filename="config.json",
+        )
+        config = Qwen3TTSTokenizerV2Config.from_json(config_path)  
         self.model = Qwen3TTSTokenizerV2Model(config)
         self.model.to(device)
         self.model.eval()
