@@ -176,7 +176,7 @@ class CudaGraphWorker(ModelWorker):
                 2,  # K/V
                 self.model.depth_n_codebooks,
                 self.model.depth_num_key_value_heads,  # kv heads
-                self.model.depth_hidden_size // self.model.depth_num_attention_heads,  # head dim
+                self.model.depth_head_dim,
                 dtype=torch.bfloat16,
                 device="cuda",
             )
@@ -603,7 +603,7 @@ class CudaGraphWorker(ModelWorker):
         depth_position_ids_buffer = torch.zeros(2 * self.max_batch_size, dtype=torch.int32, device=self.device)
 
         depth_logits_buffer = torch.zeros(
-            2 * self.max_batch_size, self.model.vocab_size, dtype=torch.bfloat16, device=self.device
+            2 * self.max_batch_size, self.model.depth_vocab_size, dtype=torch.bfloat16, device=self.device
         )
 
         # Add depth transformer buffers to the unified buffer dictionary
@@ -1210,6 +1210,7 @@ class CudaGraphWorker(ModelWorker):
             torch.cuda.synchronize(device=self.detokenizer_device)
             self.nvtx_range_pop()
 
+        print(f"{token_ids_stacked.shape=}")
         self.cuda_graph_buffers["detokenize_input"][:actual_batch_size].copy_(token_ids_stacked)
 
         # If a decoder cache is required, batch-merge request caches and copy into the CUDA buffer

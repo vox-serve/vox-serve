@@ -317,6 +317,18 @@ class BaseLMWithDepth(BaseLM):
         """Hidden size of the depth transformer."""
         pass
 
+    @property
+    @abstractmethod
+    def depth_head_dim(self) -> int:
+        """Head dimension in the depth transformer."""
+        pass
+
+    @property
+    @abstractmethod
+    def depth_vocab_size(self) -> int:
+        """Vocabulary size of the depth transformer output."""
+        pass
+
     @abstractmethod
     def forward(
         self,

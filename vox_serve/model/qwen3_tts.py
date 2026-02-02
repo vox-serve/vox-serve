@@ -18,7 +18,8 @@ from ..flashinfer_utils import FlashInferWrapper, apply_rope_pos_ids, rms_norm
 from ..requests import Request
 from ..sampling import Sampler, SamplingConfig
 from ..tokenizer.qwen3_codec import Qwen3TTSDecoder
-from .base import BaseLM, PreprocessOutput
+from ..utils import get_logger
+from .base import BaseLMWithDepth, PreprocessOutput
 
 
 from dataclasses import dataclass, field
@@ -555,6 +556,75 @@ class Qwen3TTSRMSNorm(nn.Module):
         return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
 
 
+def rotate_half(x):
+    """Rotates half the hidden dims of the input."""
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
+
+
+def apply_multimodal_rotary_pos_emb(q, k, cos, sin, mrope_section, mrope_interleaved=False, unsqueeze_dim=1):
+    """Applies Rotary Position Embedding with Multimodal Sections to the query and key tensors.
+
+    Multimodal 3D rotary position embedding is an extension to 1D rotary position embedding. The input embedding
+    sequence contains vision (images / videos) embedding and text embedding or just contains text embedding. For
+    vision embedding part, we apply rotary position embedding on temporal, height and width dimension separately.
+    Here we split the channel dimension to 3 chunks for the temporal, height and width rotary position embedding.
+    For text embedding part, we just apply 1D rotary position embedding. The three rotary position index (temporal,
+    height and width) of text embedding is always the same, so the text embedding rotary position embedding has no
+    difference with modern LLMs.
+
+    Args:
+        q (`torch.Tensor`): The query tensor.
+        k (`torch.Tensor`): The key tensor.
+        cos (`torch.Tensor`): The cosine part of the rotary embedding.
+        sin (`torch.Tensor`): The sine part of the rotary embedding.
+        mrope_section(`List(int)`):
+            Multimodal rope section is for channel dimension of temporal, height and width in rope calculation.
+        mrope_interleaved(`bool`):
+            Whether to use interleaved multimodal RoPE.
+        unsqueeze_dim (`int`, *optional*, defaults to 1):
+            The 'unsqueeze_dim' argument specifies the dimension along which to unsqueeze cos[position_ids] and
+            sin[position_ids] so that they can be properly broadcasted to the dimensions of q and k.
+
+    Returns:
+        `tuple(torch.Tensor)` comprising of the query and key tensors rotated using the Rotary Position Embedding.
+    """
+    if mrope_interleaved:
+
+        def apply_interleaved_rope(x, modality_num):
+            x_t = x[0].clone()
+            index_ranges = []
+            for i, n in enumerate(mrope_section[1:], 1):
+                beg_idx = i
+                end_idx = n * modality_num
+                index_ranges.append((beg_idx, end_idx))
+            for beg_idx, end_idx in index_ranges:
+                x_t[..., beg_idx:end_idx:modality_num] = x[beg_idx, ..., beg_idx:end_idx:modality_num]
+            return x_t
+
+        dim = cos.shape[-1]
+        modality_num = len(mrope_section)
+        cos = torch.cat([apply_interleaved_rope(cos[..., : dim // 2], modality_num)] * 2, dim=-1).unsqueeze(
+            unsqueeze_dim
+        )
+        sin = torch.cat([apply_interleaved_rope(sin[..., : dim // 2], modality_num)] * 2, dim=-1).unsqueeze(
+            unsqueeze_dim
+        )
+    else:
+        mrope_section = mrope_section * 2
+        cos = torch.cat([m[i % 3] for i, m in enumerate(cos.split(mrope_section, dim=-1))], dim=-1).unsqueeze(
+            unsqueeze_dim
+        )
+        sin = torch.cat([m[i % 3] for i, m in enumerate(sin.split(mrope_section, dim=-1))], dim=-1).unsqueeze(
+            unsqueeze_dim
+        )
+
+    q_embed = (q * cos) + (rotate_half(q) * sin)
+    k_embed = (k * cos) + (rotate_half(k) * sin)
+    return q_embed, k_embed
+
+
 class Qwen3TTSMLP(nn.Module):
     def __init__(self, config: Qwen3TTSTalkerConfig):
         super().__init__()
@@ -587,11 +657,53 @@ class Qwen3TTSAttention(nn.Module):
         self.k_proj = nn.Linear(config.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.attention_bias)
         self.v_proj = nn.Linear(config.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.attention_bias)
         self.o_proj = nn.Linear(config.num_attention_heads * self.head_dim, config.hidden_size, bias=config.attention_bias)
-        
+
         self.q_norm = Qwen3TTSRMSNorm(self.head_dim, eps=config.rms_norm_eps)
         self.k_norm = Qwen3TTSRMSNorm(self.head_dim, eps=config.rms_norm_eps)
-        
+
+        # Initialize inverse frequencies for multimodal RoPE
+        inv_freq = 1.0 / (self.rope_theta ** (torch.arange(0, self.head_dim, 2, dtype=torch.float32) / self.head_dim))
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+
         # self.sliding_window = config.sliding_window if config.layer_types[layer_idx] == "sliding_attention" else None
+
+    def _compute_rope_embeddings(self, x: torch.Tensor, position_ids: torch.Tensor):
+        """
+        Compute cos and sin embeddings for multimodal RoPE.
+
+        Args:
+            x: Input tensor for dtype and device reference
+            position_ids: Position IDs tensor of shape (batch_size,) or (batch_size, seq_len)
+
+        Returns:
+            Tuple of (cos, sin) embeddings with shape (3, batch_size, seq_len, head_dim)
+        """
+        # Expand position_ids to (3, batch_size, seq_len) for multimodal RoPE
+        # For TTS, all three dimensions (temporal, height, width) use the same position IDs
+        if position_ids.dim() == 1:
+            # Decode case: (batch_size,) -> (3, batch_size, 1)
+            position_ids = position_ids.unsqueeze(-1).unsqueeze(0).expand(3, -1, -1)
+        else:
+            # Prefill case: (batch_size, seq_len) -> (3, batch_size, seq_len)
+            position_ids = position_ids.unsqueeze(0).expand(3, -1, -1)
+
+        # Compute inverse frequency embeddings
+        # inv_freq shape: (head_dim // 2,)
+        # Expand to (3, batch_size, head_dim // 2, 1)
+        inv_freq_expanded = self.inv_freq[None, None, :, None].float().expand(3, position_ids.shape[1], -1, 1)
+        # position_ids_expanded shape: (3, batch_size, 1, seq_len)
+        position_ids_expanded = position_ids[:, :, None, :].float()
+
+        # Compute frequencies: (3, batch_size, head_dim // 2, seq_len)
+        device_type = x.device.type if isinstance(x.device.type, str) and x.device.type != "mps" else "cpu"
+        with torch.autocast(device_type=device_type, enabled=False):
+            freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(2, 3)
+            # Concatenate to get full head_dim: (3, batch_size, seq_len, head_dim)
+            emb = torch.cat((freqs, freqs), dim=-1)
+            cos = emb.cos()
+            sin = emb.sin()
+
+        return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
     def forward(
         self,
@@ -603,20 +715,58 @@ class Qwen3TTSAttention(nn.Module):
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
 
-        query_states = self.q_norm(self.q_proj(hidden_states).view(hidden_shape))
-        key_states = self.k_norm(self.k_proj(hidden_states).view(hidden_shape))
+        query_states = self.q_norm(self.q_proj(hidden_states).view(-1, self.head_dim)).view(hidden_shape)
+        key_states = self.k_norm(self.k_proj(hidden_states).view(-1, self.head_dim)).view(hidden_shape)
         value_states = self.v_proj(hidden_states).view(hidden_shape)
 
-        # TODO: mrope
-        query_states, key_states = apply_rope_pos_ids(
-            query_states=query_states,
-            key_states=key_states,
-            position_ids=position_ids,
-            # rotary_dim=self.head_dim // 2,
-            interleave=self.rope_scaling.interleaved if self.rope_scaling is not None else False,
-            rope_theta=self.rope_theta,
-        )
+        print(f"{self.config.rope_scaling=}")
+        if self.config.rope_scaling is None:
+            # depth transformer, no mrope 
+            query_states, key_states = apply_rope_pos_ids(
+                query_states=query_states,
+                key_states=key_states,
+                position_ids=position_ids,
+                # rotary_dim=self.head_dim // 2,
+                interleave=False,
+                rope_theta=self.rope_theta,
+            )
+        
+        else:
+            query_states = query_states.unsqueeze(2)
+            key_states = key_states.unsqueeze(2)
 
+            # Compute multimodal RoPE embeddings
+            cos, sin = self._compute_rope_embeddings(hidden_states, position_ids)
+
+            # Apply multimodal rotary position embedding
+            # Get mrope_section and validate it sums to head_dim // 2
+            if self.rope_scaling is not None and hasattr(self.rope_scaling, 'mrope_section'):
+                mrope_section = self.rope_scaling.mrope_section
+            else:
+                mrope_section = [24, 20, 20]
+
+            # Validate mrope_section: should sum to head_dim // 2
+            if sum(mrope_section) != self.head_dim // 2:
+                mrope_section = [24, 20, 20]  # Default for head_dim=128
+
+            mrope_interleaved = self.rope_scaling.interleaved if self.rope_scaling is not None and hasattr(self.rope_scaling, 'interleaved') else True
+
+            query_states, key_states = apply_multimodal_rotary_pos_emb(
+                query_states,
+                key_states,
+                cos,
+                sin,
+                mrope_section,
+                mrope_interleaved,
+                unsqueeze_dim=1
+            )
+
+            query_states = query_states.squeeze(2).contiguous()
+            key_states = key_states.squeeze(2).contiguous()
+
+        print(f"{kv_cache.shape=}")
+        print(f"{key_states.shape=}")
+        print(f"{value_states.shape=}")
         attn_wrapper.set_kv_cache(kv_cache, key_states, value_states)
         attn_output = attn_wrapper.run(query_states, kv_cache)
 
@@ -753,6 +903,10 @@ class Qwen3TTSTalkerCodePredictorModelForConditionalGeneration(nn.Module):
         self.lm_head = nn.ModuleList(
             [nn.Linear(config.hidden_size, config.vocab_size, bias=False) for _ in range(config.num_code_groups - 1)]
         )
+        self.register_buffer(
+            "lm_head_weight",
+            torch.stack([head.weight for head in self.lm_head], dim=0),
+        )
 
         if config.hidden_size != talker_config.hidden_size:
             self.small_to_mtp_projection = torch.nn.Linear(talker_config.hidden_size, config.hidden_size, bias=True)
@@ -888,7 +1042,7 @@ class Qwen3TTSForCausalLM(nn.Module):
 
         return logits, hidden_states
     
-    def depth_forward(
+    def forward_depth(
         self,
         inputs_embeds: torch.Tensor,
         position_ids: torch.LongTensor,
@@ -901,12 +1055,18 @@ class Qwen3TTSForCausalLM(nn.Module):
             attn_wrapper=attn_wrapper,
             kv_cache=kv_cache,
         )
-        logits = self.talker.code_predictor.lm_head[position_ids](hidden_states)
+        # Choose the codebook head based on the current depth position using tensor ops
+        # so CUDA graph capture doesn't require Python-side indexing.
+        num_heads = self.talker.code_predictor.lm_head_weight.shape[0]
+        head_idx = position_ids.max()
+        head_idx = head_idx.clamp(min=1, max=num_heads).sub(1).to(torch.long).view(1)
+        head_weight = self.talker.code_predictor.lm_head_weight.index_select(0, head_idx).squeeze(0)
+        logits = hidden_states @ head_weight.t()
 
         return logits
 
 
-class Qwen3TTSModel(BaseLM):
+class Qwen3TTSModel(BaseLMWithDepth):
     """
     Qwen3 TTS model implementation for VoxServe.
 
@@ -925,6 +1085,7 @@ class Qwen3TTSModel(BaseLM):
         if model_name == "qwen3-tts":
             model_name = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
         super().__init__(model_name, device, dtype, enable_torch_compile, audio_decoder_device)
+        self.logger = get_logger(__name__)
         self.model_name = model_name
 
         config_path = hf_hub_download(
@@ -978,7 +1139,7 @@ class Qwen3TTSModel(BaseLM):
             min_p=None,
             temperature=0.9,
             repetition_penalty=1.05,
-            repetition_window=None,
+            repetition_window=-1,  # global window so repetition_cache is always created when penalty is used
             cfg_scale=None,
         )
 
@@ -1033,6 +1194,24 @@ class Qwen3TTSModel(BaseLM):
         return self._depth_hidden_size
 
     @property
+    def depth_head_dim(self) -> int:
+        """Head dimension in the depth transformer."""
+        # In Qwen3-TTS's code predictor config, hidden_size=1024, head_dim=128, num_attention_heads=16, num_key_value_heads=8,
+        # which seems contradicted since hidden_size != num_attention_heads * head_dim.
+        # We return self._depth_hidden_size // self._depth_num_key_value_heads 
+        # to make the head dimension size used for KV cache allocation correct.
+        return getattr(
+            self.config.talker_config.code_predictor_config,
+            "head_dim",
+            self._depth_hidden_size // self._depth_num_key_value_heads,
+        )
+
+    @property
+    def depth_vocab_size(self) -> int:
+        """Vocabulary size of the depth transformer output."""
+        return self.config.talker_config.code_predictor_config.vocab_size
+
+    @property
     def detokenize_interval(self) -> int:
         """Interval at which to detokenize outputs."""
         return 10
@@ -1057,7 +1236,7 @@ class Qwen3TTSModel(BaseLM):
     @property
     def output_audio_length(self) -> int:
         """Output audio length (in samples) at each postprocess call."""
-        return 2048
+        return 18645
 
     @property
     def vocab_size(self) -> int:
@@ -1346,11 +1525,6 @@ class Qwen3TTSModel(BaseLM):
                 self.config.talker_config.codec_think_eos_id,
             ]
 
-        # Calculate sequence length
-        ref_codes_len = 0
-        if ref_codes is not None:
-            ref_codes_len = ref_codes.shape[0]
-
         seq_len = (
             (instruct_ids.shape[1] if instruct_ids is not None else 0) +  # instruct
             3 +                  # role tokens
@@ -1409,7 +1583,7 @@ class Qwen3TTSModel(BaseLM):
         input_masks[pos, 0] = True  # needs codec addition
         pos += 1
 
-        input_tokens[pos, 0] = self.config.talker_config.tts_pad_token_id
+        input_tokens[pos, 0] = self.config.tts_pad_token_id
         input_tokens[pos, 1] = self.config.talker_config.codec_bos_id
         input_masks[pos, 0] = True  # needs codec addition
         pos += 1
@@ -1555,7 +1729,6 @@ class Qwen3TTSModel(BaseLM):
         # so here we allocate output_ids for all codebooks but do sampling only for the first one
         output_ids = Sampler.run_sampling(logits.view(-1, self.vocab_size), config=sampling_params)
         output_ids = output_ids.view(logits.shape[0], logits.shape[1])
-        output_ids = output_ids.repeat(1, self.n_codebooks)  # [bs, 33]
 
         if repetition_cache is not None:
             Sampler.update_repetition_penalty_cache(
@@ -1620,7 +1793,8 @@ class Qwen3TTSModel(BaseLM):
             sampling_params = self.default_sampling_config
 
         output_ids = Sampler.run_sampling(logits, config=sampling_params)
-        ci_embed = self.model.talker.code_predictor.model.codec_embedding[i_iteration](output_ids)
+        print(f"{output_ids.shape=}")
+        ci_embed = self.model.talker.code_predictor.model.codec_embedding[i_iteration - 1](output_ids)
 
         for i, req in enumerate(requests):
             token_id = output_ids[i].item()
@@ -1646,9 +1820,7 @@ class Qwen3TTSModel(BaseLM):
         # there are 17 codebooks including text
         tokens_to_process = token_ids[:, :, :-1].transpose(1, 2)  # (batch_size, 16, interval)
 
-        # Clamp tokens to valid Mimi decoder range [0, 2047]
-        # Mimi cardinality is 2048, so valid tokens are in [0, 2047]
-        tokens_to_process = tokens_to_process.clamp(0, 2047)
+        tokens_to_process = tokens_to_process.clamp(0, self.depth_vocab_size - 1)
 
         # mimi decoder
         # TODO: caching for mimi

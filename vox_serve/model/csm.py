@@ -415,6 +415,20 @@ class CSMModel(BaseLMWithDepth):
         return self._depth_hidden_size
 
     @property
+    def depth_head_dim(self) -> int:
+        """Head dimension in the depth transformer."""
+        return getattr(
+            self.model.config.depth_decoder_config,
+            "head_dim",
+            self._depth_hidden_size // self._depth_num_attention_heads,
+        )
+
+    @property
+    def depth_vocab_size(self) -> int:
+        """Vocabulary size of the depth transformer output."""
+        return self.model.config.depth_decoder_config.vocab_size
+
+    @property
     def needs_watermarking(self) -> bool:
         """Indicates if the model requires watermarking."""
         return True

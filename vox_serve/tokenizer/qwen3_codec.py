@@ -17,6 +17,12 @@ from torch import nn
 from torch.nn import Parameter
 from torch.nn import functional as F
 
+try:
+    from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
+except ImportError:
+    # Fallback for older transformers versions
+    ROPE_INIT_FUNCTIONS = None
+    dynamic_rope_update = lambda fn: fn
 
 from dataclasses import dataclass, field
 from typing import List, Optional, Union 
@@ -300,13 +306,21 @@ class Qwen3TTSTokenizerV2DecoderRotatoryEmbedding(nn.Module):
         self.original_max_seq_len = config.max_position_embeddings
 
         self.config = config
-        self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
 
-        inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device)
+        # Use ROPE_INIT_FUNCTIONS from transformers if available, otherwise fallback
+        if ROPE_INIT_FUNCTIONS is not None:
+            self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
+            inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device)
+        else:
+            # Fallback implementation for older transformers
+            inv_freq = 1.0 / (config.rope_theta ** (torch.arange(0, config.head_dim, 2, dtype=torch.float32, device=device) / config.head_dim))
+            self.attention_scaling = 1.0
+
         self.register_buffer("inv_freq", inv_freq, persistent=False)
         self.original_inv_freq = self.inv_freq
 
     @torch.no_grad()
+    @dynamic_rope_update  # power user: used with advanced RoPE types (e.g. dynamic rope)
     def forward(self, x, position_ids):
         inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1).to(x.device)
         position_ids_expanded = position_ids[:, None, :].float()
@@ -354,7 +368,7 @@ class Qwen3TTSTokenizerV2DecoderAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
-        attention_mask: Optional[torch.Tensor],
+        # attention_mask: Optional[torch.Tensor],
         **kwargs,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         input_shape = hidden_states.shape[:-1]
@@ -367,14 +381,12 @@ class Qwen3TTSTokenizerV2DecoderAttention(nn.Module):
         cos, sin = position_embeddings
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
-        dropout_p = self.attention_dropout if self.training else 0.0
         attn_output = F.scaled_dot_product_attention(
             query_states,
             key_states,
             value_states,
-            attn_mask=attention_mask,
-            dropout_p=dropout_p,
-            is_causal=False,
+            # attn_mask=attention_mask,
+            is_causal=True,
         )
         attn_output = attn_output.transpose(1, 2).contiguous().reshape(*input_shape, -1)
         attn_output = self.o_proj(attn_output)
@@ -447,7 +459,7 @@ class Qwen3TTSTokenizerV2DecoderTransformerLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
+        # attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         **kwargs,
     ) -> tuple[torch.FloatTensor, Optional[tuple[torch.FloatTensor, torch.FloatTensor]]]:
@@ -477,7 +489,7 @@ class Qwen3TTSTokenizerV2DecoderTransformerLayer(nn.Module):
         # Self Attention
         hidden_states, _ = self.self_attn(
             hidden_states=hidden_states,
-            attention_mask=attention_mask,
+            # attention_mask=attention_mask,
             position_ids=position_ids,
             **kwargs,
         )
@@ -507,7 +519,7 @@ class Qwen3TTSTokenizerV2DecoderTransformerModel(nn.Module):
         self.norm = Qwen3TTSTokenizerV2DecoderRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.rotary_emb = Qwen3TTSTokenizerV2DecoderRotatoryEmbedding(config=config)
         self.gradient_checkpointing = False
-        self.has_sliding_layers = "sliding_attention" in self.config.layer_types
+        # self.has_sliding_layers = "sliding_attention" in self.config.layer_types
         self.window_size = config.sliding_window
 
         self.input_proj = nn.Linear(config.latent_dim, config.hidden_size)
@@ -543,13 +555,13 @@ class Qwen3TTSTokenizerV2DecoderTransformerModel(nn.Module):
                 "attention_mask": attention_mask,
                 "position_ids": position_ids,
             }
-            # Create the masks
-            causal_mask_mapping = {
-                "full_attention": create_causal_mask(**mask_kwargs),
-            }
-            # The sliding window alternating layers are not always activated depending on the config
-            if self.has_sliding_layers:
-                causal_mask_mapping["sliding_attention"] = create_sliding_window_causal_mask(**mask_kwargs)
+            # # Create the masks
+            # causal_mask_mapping = {
+            #     "full_attention": create_causal_mask(**mask_kwargs),
+            # }
+            # # The sliding window alternating layers are not always activated depending on the config
+            # if self.has_sliding_layers:
+            #     causal_mask_mapping["sliding_attention"] = create_sliding_window_causal_mask(**mask_kwargs)
 
         hidden_states = inputs_embeds
 
@@ -559,7 +571,7 @@ class Qwen3TTSTokenizerV2DecoderTransformerModel(nn.Module):
         for decoder_layer in self.layers[: self.config.num_hidden_layers]:
             hidden_states = decoder_layer(
                 hidden_states,
-                attention_mask=causal_mask_mapping[decoder_layer.attention_type],
+                # attention_mask=causal_mask_mapping[decoder_layer.attention_type],
                 position_ids=position_ids,
                 position_embeddings=position_embeddings,
                 **kwargs,
@@ -867,7 +879,7 @@ class Qwen3TTSTokenizerV2Decoder(nn.Module):
         hidden = self.quantizer.decode(codes)
         hidden = self.pre_conv(hidden).transpose(1, 2)
 
-        hidden = self.pre_transformer(inputs_embeds=hidden).last_hidden_state
+        hidden = self.pre_transformer(inputs_embeds=hidden)
         hidden = hidden.permute(0, 2, 1)
         for blocks in self.upsample:
             for block in blocks:
@@ -967,10 +979,7 @@ class Qwen3TTSTokenizerV2Model(nn.Module):
             audio_codes (`torch.LongTensor`  of shape `(batch_size, codes_length, num_quantizers)`, *optional*):
                 Discret code embeddings computed using `model.encode`.
         """
-        audio_values = self.decoder.chunked_decode(audio_codes.transpose(1, 2)).squeeze(1)
-
-        audio_lengths = (audio_codes[..., 0] > 0).sum(1) * self.decode_upsample_rate
-        audio_values = [a[:l] for a, l in zip(audio_values, audio_lengths)]
+        audio_values = self.decoder.chunked_decode(audio_codes)
 
         return audio_values
 

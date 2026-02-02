@@ -196,7 +196,7 @@ class ModelWorker:
                 2,  # K/V
                 self.model.depth_n_codebooks,
                 self.model.depth_num_key_value_heads,  # kv heads
-                self.model.depth_hidden_size // self.model.depth_num_attention_heads,  # head dim
+                self.model.depth_head_dim,
                 dtype=torch.bfloat16,
                 device="cuda",
             )
