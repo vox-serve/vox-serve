@@ -39,6 +39,7 @@ We currently support the following TTS and STS models:
 - `cosyvoice2`: [CosyVoice2-0.5B](https://huggingface.co/FunAudioLLM/CosyVoice2-0.5B)
 - `csm`: [CSM-1B](https://huggingface.co/sesame/csm-1b)
 - `orpheus`: [Orpheus-3B](https://huggingface.co/canopylabs/orpheus-3b-0.1-ft)
+- `qwen3-tts`: [Qwen3-TTS-1.7B](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice) (custom voice mode only, other modes under development)
 - `zonos`: [Zonos-v0.1](https://huggingface.co/Zyphra/Zonos-v0.1-transformer)
 - `glm`: [GLM-4-Voice-9B](https://huggingface.co/zai-org/glm-4-voice-9b)
 - `step`: [Step-Audio-2-Mini](https://huggingface.co/stepfun-ai/Step-Audio-2-mini)
