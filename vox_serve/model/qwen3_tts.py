@@ -1,18 +1,19 @@
-from typing import Any, List, Tuple
-import json
 import base64
 import io
+import json
 import urllib.request
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
-import numpy as np
 import librosa
-from librosa.filters import mel as librosa_mel_fn
+import numpy as np
 import soundfile as sf
 import torch
-from torch import nn
 import torch.nn.functional as F
 from huggingface_hub import hf_hub_download
+from librosa.filters import mel as librosa_mel_fn
+from torch import nn
 
 from ..flashinfer_utils import FlashInferWrapper, apply_rope_pos_ids, rms_norm
 from ..requests import Request
@@ -20,10 +21,6 @@ from ..sampling import Sampler, SamplingConfig
 from ..tokenizer.qwen3_codec import Qwen3TTSDecoder
 from ..utils import get_logger
 from .base import BaseLMWithDepth, PreprocessOutput
-
-
-from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Any
 
 
 def mel_spectrogram(
@@ -591,10 +588,18 @@ class Qwen3TTSAttention(nn.Module):
         self.rope_theta = config.rope_theta
         self.rope_scaling = config.rope_scaling
 
-        self.q_proj = nn.Linear(config.hidden_size, self.num_attention_heads * self.head_dim, bias=config.attention_bias)
-        self.k_proj = nn.Linear(config.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.attention_bias)
-        self.v_proj = nn.Linear(config.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.attention_bias)
-        self.o_proj = nn.Linear(config.num_attention_heads * self.head_dim, config.hidden_size, bias=config.attention_bias)
+        self.q_proj = nn.Linear(
+            config.hidden_size, self.num_attention_heads * self.head_dim, bias=config.attention_bias
+        )
+        self.k_proj = nn.Linear(
+            config.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.attention_bias
+        )
+        self.v_proj = nn.Linear(
+            config.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.attention_bias
+        )
+        self.o_proj = nn.Linear(
+            config.num_attention_heads * self.head_dim, config.hidden_size, bias=config.attention_bias
+        )
 
         self.q_norm = Qwen3TTSRMSNorm(self.head_dim, eps=config.rms_norm_eps)
         self.k_norm = Qwen3TTSRMSNorm(self.head_dim, eps=config.rms_norm_eps)
@@ -819,11 +824,11 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
         )
         self.codec_head = nn.Linear(
             config.hidden_size,
-            config.vocab_size, 
+            config.vocab_size,
             bias=False,
         )
         self.code_predictor = Qwen3TTSTalkerCodePredictorModelForConditionalGeneration(
-            config=config.code_predictor_config, 
+            config=config.code_predictor_config,
             talker_config=config
         )
 
@@ -859,7 +864,7 @@ class Qwen3TTSSpeakerEncoder(nn.Module):
             config.enc_kernel_sizes[-1],
             config.enc_dilations[-1],
         )
-    
+
         self.asp = AttentiveStatisticsPooling(
             config.enc_channels[-1],
             attention_channels=config.enc_attention_channels,
@@ -872,7 +877,7 @@ class Qwen3TTSSpeakerEncoder(nn.Module):
             padding="same",
             padding_mode="reflect",
         )
-    
+
     def forward(self, hidden_states):
         hidden_states = hidden_states.transpose(1, 2)
         hidden_states_list = []
@@ -915,7 +920,7 @@ class Qwen3TTSForCausalLM(nn.Module):
         logits = self.talker.codec_head(hidden_states)
 
         return logits, hidden_states
-    
+
     def forward_depth(
         self,
         inputs_embeds: torch.Tensor,
@@ -973,7 +978,6 @@ class Qwen3TTSModel(BaseLMWithDepth):
         self.model = Qwen3TTSForCausalLM(config)
 
         # Load pretrained weights using transformers utilities
-        from transformers.modeling_utils import load_state_dict
         from transformers.utils import cached_file
 
         # Get the model directory
@@ -1004,7 +1008,6 @@ class Qwen3TTSModel(BaseLMWithDepth):
             self.model.load_state_dict(state_dict, strict=False)
         else:
             # Handle sharded weights - let transformers handle it
-            from transformers import AutoModel
             # Handle sharded weights: download all shard files and load them
             # Download all shard files and load them
             import json
@@ -1037,7 +1040,7 @@ class Qwen3TTSModel(BaseLMWithDepth):
         for language_id in self.config.talker_config.codec_language_id.keys():
             if "dialect" not in language_id:
                 self.supported_languages.append(language_id)
-        
+
         self.speaker_encoder_sample_rate = self.config.speaker_encoder_config.sample_rate
         self.tokenizer_type = self.config.tokenizer_type
         self.tts_model_size = self.config.tts_model_size
@@ -1086,7 +1089,7 @@ class Qwen3TTSModel(BaseLMWithDepth):
     def n_codebooks(self) -> int:
         """Number of codebooks in the model."""
         return self.config.talker_config.num_code_groups + 1
-    
+
     @property
     def depth_n_codebooks(self) -> int:
         """Number of codebooks in the depth transformer."""
@@ -1111,7 +1114,7 @@ class Qwen3TTSModel(BaseLMWithDepth):
     def hidden_size(self) -> int:
         """Hidden size of the model."""
         return self._hidden_size
-    
+
     @property
     def depth_num_attention_heads(self) -> int:
         """Number of attention heads in the model."""
@@ -1131,15 +1134,17 @@ class Qwen3TTSModel(BaseLMWithDepth):
     def depth_hidden_size(self) -> int:
         """Hidden size of the model."""
         # NOTE: For the attention layer, unlike in other models, _depth_hidden_size is the dimension size
-        # **before** Q projection in the depth model. It is doubled after the Q projection, contrary to typical GQA models.
-        # Therefore, special care is needed when using this property for attention/rope metadata.
+        # **before** Q projection in the depth model. It is doubled after the Q projection,
+        # contrary to typical GQA models. Therefore, special care is needed when using this
+        # property for attention/rope metadata.
         return self._depth_hidden_size
 
     @property
     def depth_head_dim(self) -> int:
         """Head dimension in the depth transformer."""
-        # In Qwen3-TTS's code predictor config, hidden_size=1024, head_dim=128, num_attention_heads=16, num_key_value_heads=8,
-        # which appears contradictory since hidden_size != num_attention_heads * head_dim.
+        # In Qwen3-TTS's code predictor config, hidden_size=1024, head_dim=128,
+        # num_attention_heads=16, num_key_value_heads=8, which appears contradictory since
+        # hidden_size != num_attention_heads * head_dim.
         # We return self._depth_hidden_size // self._depth_num_key_value_heads
         # to ensure the head dimension size used for KV cache allocation is correct.
         return getattr(
@@ -1383,7 +1388,8 @@ class Qwen3TTSModel(BaseLMWithDepth):
             audio_path: Path to input audio file for voice cloning (str path, URL, or base64)
             **kwargs: Additional parameters:
                 - language: Target language (default: "auto")
-                - ref_text: Reference text for ICL mode (required when audio_path is provided and x_vector_only_mode=False)
+                - ref_text: Reference text for ICL mode (required when audio_path is provided
+                  and x_vector_only_mode=False)
                 - x_vector_only_mode: If True, only use speaker embedding without reference codes (default: False)
 
         Returns:
@@ -1416,14 +1422,20 @@ class Qwen3TTSModel(BaseLMWithDepth):
             instruct = None
         if instruct is not None and instruct == "":
             instruct = None
-        
-        prompt_ids = self.text_tokenizer.encode(f"<|im_start|>assistant\n{prompt}<|im_end|>\n<|im_start|>assistant\n", return_tensors="pt").to(self.device)
-        
+
+        prompt_tpl = "<|im_start|>assistant\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
+        prompt_ids = self.text_tokenizer.encode(
+            prompt_tpl.format(prompt=prompt), return_tensors="pt"
+        ).to(self.device)
+
         if instruct is not None:
-            instruct_ids = self.text_tokenizer.encode(f"<|im_start|>user\n{instruct}<|im_end|>\n", return_tensors="pt").to(self.device)
+            instruct_tpl = "<|im_start|>user\n{instruct}<|im_end|>\n"
+            instruct_ids = self.text_tokenizer.encode(
+                instruct_tpl.format(instruct=instruct), return_tensors="pt"
+            ).to(self.device)
         else:
             instruct_ids = None
-        
+
         spk_id = self.config.talker_config.spk_id[speaker]
 
         # Process reference audio if provided
@@ -1463,7 +1475,7 @@ class Qwen3TTSModel(BaseLMWithDepth):
         if (
             language.lower() in ["chinese", "auto"]
             and speaker is not None
-            and self.config.talker_config.spk_is_dialect.get(speaker, False) != False
+            and self.config.talker_config.spk_is_dialect.get(speaker, False)
         ):
             dialect = self.config.talker_config.spk_is_dialect[speaker]
             language_id = self.config.talker_config.codec_language_id[dialect]
@@ -1614,13 +1626,15 @@ class Qwen3TTSModel(BaseLMWithDepth):
 
         Args:
             input_ids: Input token IDs. Shape: (batch_size, n_codebooks)
-                Buffer structure: columns 0-(depth_n_codebooks-1) are audio tokens, column depth_n_codebooks is text token
+                Buffer structure: columns 0-(depth_n_codebooks-1) are audio tokens,
+                column depth_n_codebooks is text token
             position_ids: Position IDs for the tokens. Shape: (batch_size)
             attn_wrapper: FlashInfer attention wrapper
             kv_cache: KV cache tensor
             input_masks: Token type masks. Shape: (batch_size, n_codebooks)
                 [:, depth_n_codebooks] = False: text only (text_embedding + text_projection)
-                [:, depth_n_codebooks] = True: text + codec (text_projection(text_embedding(col_depth_n_codebooks)) + codec_embedding(col0))
+                [:, depth_n_codebooks] = True: text + codec
+                (text_projection(text_embedding(col_depth_n_codebooks)) + codec_embedding(col0))
             input_features: Embeddings for audio tokens codebook 1-(depth_n_codebooks-1) from depth transformer
             **kwargs: Additional model-specific parameters
 
@@ -1697,11 +1711,13 @@ class Qwen3TTSModel(BaseLMWithDepth):
 
         # The backbone only emits logits for codebook-0. Allocate a full codebook tensor so
         # depth sampling can fill the remaining codebooks in-place.
-        # Buffer shaped n_codebooks (depth_n_codebooks + 1): first depth_n_codebooks are audio tokens, last 1 is text token
+        # Buffer shaped n_codebooks (depth_n_codebooks + 1): first depth_n_codebooks are
+        # audio tokens, last 1 is text token.
         output_ids_cb0 = Sampler.run_sampling(logits.view(-1, self.vocab_size), config=sampling_params)
         output_ids_cb0 = output_ids_cb0.view(logits.shape[0], logits.shape[1])
 
-        # Buffer shaped n_codebooks (depth_n_codebooks + 1): indices 0-(depth_n_codebooks-1) are audio tokens, index depth_n_codebooks is text token
+        # Buffer shaped n_codebooks (depth_n_codebooks + 1): indices 0-(depth_n_codebooks-1)
+        # are audio tokens, index depth_n_codebooks is text token.
         output_ids = torch.zeros(
             logits.shape[0],
             self.n_codebooks,
@@ -1733,7 +1749,8 @@ class Qwen3TTSModel(BaseLMWithDepth):
 
             req.input_features = torch.zeros(1, self.hidden_size, device=self.device, dtype=self.dtype)
 
-            # lm_output_tokens uses output buffer format: depth_n_codebooks audio tokens at indices 0-(depth_n_codebooks-1), text token at index depth_n_codebooks
+            # lm_output_tokens uses output buffer format: depth_n_codebooks audio tokens at
+            # indices 0-(depth_n_codebooks-1), text token at index depth_n_codebooks.
             req.lm_output_tokens.append(output_ids[i : i + 1])
             if not self.is_stop_id(output_ids[i][0]):
                 # Don't add the EOS token to lm_output_audio_tokens
@@ -1764,7 +1781,7 @@ class Qwen3TTSModel(BaseLMWithDepth):
         )
 
         return depth_logits
-    
+
     def depth_sampling(
         self,
         logits: torch.Tensor,
@@ -1800,7 +1817,8 @@ class Qwen3TTSModel(BaseLMWithDepth):
             Tensor of audio data. Shape: (batch_size, n_channels, audio_length)
         """
         # token_ids: (batch_size, interval, depth_n_codebooks + 1)
-        # Buffer structure: first depth_n_codebooks (indices 0-(depth_n_codebooks-1)) are audio tokens, last (index depth_n_codebooks) is text token
+        # Buffer structure: first depth_n_codebooks (indices 0-(depth_n_codebooks-1)) are
+        # audio tokens, last (index depth_n_codebooks) is text token.
         # Extract only the audio codebooks (first depth_n_codebooks tokens) for decoding
         tokens_to_process = token_ids[:, :, :-1].transpose(1, 2)  # (batch_size, depth_n_codebooks, interval)
 
@@ -1812,4 +1830,4 @@ class Qwen3TTSModel(BaseLMWithDepth):
         # audio_tensor: (batch_size, 1, N)
 
         return audio_tensor
-    
+

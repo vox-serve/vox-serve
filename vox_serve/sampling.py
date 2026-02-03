@@ -171,9 +171,8 @@ class Sampler:
             else:
                 repetition_cache[:, -1, :, output_ids] = True
 
+        # global cache, just set the new token
+        elif output_ids.shape[1] == 1 and repetition_cache.shape[2] != 1:
+            repetition_cache[:, :, 0, output_ids[:, 0]] = True
         else:
-            # global cache, just set the new token
-            if output_ids.shape[1] == 1 and repetition_cache.shape[2] != 1:
-                repetition_cache[:, :, 0, output_ids[:, 0]] = True
-            else:
-                repetition_cache[:, :, :, output_ids] = True
+            repetition_cache[:, :, :, output_ids] = True

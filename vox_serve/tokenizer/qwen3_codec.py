@@ -5,27 +5,25 @@ This could be based on an existing codec (SoundStream, EnCodec, DAC, etc.)
 or a custom codec specific to Qwen3 TTS.
 """
 
+import json
 import math
 from dataclasses import dataclass
-from typing import Callable, Optional, Union, List
+from typing import List, Optional
 
 import numpy as np
 import torch
-import json
 from huggingface_hub import hf_hub_download
 from torch import nn
 from torch.nn import Parameter
 from torch.nn import functional as F
 
 try:
-    from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
+    from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 except ImportError:
     # Fallback for older transformers versions
     ROPE_INIT_FUNCTIONS = None
-    dynamic_rope_update = lambda fn: fn
 
-from dataclasses import dataclass, field
-from typing import List, Optional, Union 
+from dataclasses import field
 
 
 @dataclass
@@ -180,32 +178,6 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
     return q_embed, k_embed
 
 
-def eager_attention_forward(
-    module: nn.Module,
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    attention_mask: Optional[torch.Tensor],
-    scaling: float,
-    dropout: float = 0.0,
-    **kwargs,
-):
-    key_states = repeat_kv(key, module.num_key_value_groups)
-    value_states = repeat_kv(value, module.num_key_value_groups)
-
-    attn_weights = torch.matmul(query, key_states.transpose(2, 3)) * scaling
-    if attention_mask is not None:
-        causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
-        attn_weights = attn_weights + causal_mask
-
-    attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
-    attn_weights = nn.functional.dropout(attn_weights, p=dropout, training=module.training)
-    attn_output = torch.matmul(attn_weights, value_states)
-    attn_output = attn_output.transpose(1, 2).contiguous()
-
-    return attn_output, attn_weights
-
-
 class Qwen3TTSTokenizerV2CausalConvNet(nn.Module):
     def __init__(
         self,
@@ -313,14 +285,16 @@ class Qwen3TTSTokenizerV2DecoderRotatoryEmbedding(nn.Module):
             inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device)
         else:
             # Fallback implementation for older transformers
-            inv_freq = 1.0 / (config.rope_theta ** (torch.arange(0, config.head_dim, 2, dtype=torch.float32, device=device) / config.head_dim))
+            inv_freq = 1.0 / (
+                config.rope_theta
+                ** (torch.arange(0, config.head_dim, 2, dtype=torch.float32, device=device) / config.head_dim)
+            )
             self.attention_scaling = 1.0
 
         self.register_buffer("inv_freq", inv_freq, persistent=False)
         self.original_inv_freq = self.inv_freq
 
     @torch.no_grad()
-    @dynamic_rope_update  # power user: used with advanced RoPE types (e.g. dynamic rope)
     def forward(self, x, position_ids):
         inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1).to(x.device)
         position_ids_expanded = position_ids[:, None, :].float()
@@ -513,9 +487,10 @@ class Qwen3TTSTokenizerV2DecoderTransformerModel(nn.Module):
     def __init__(self, config: Qwen3TTSTokenizerV2DecoderConfig):
         super().__init__()
         self.config = config
-        self.layers = nn.ModuleList(
-            [Qwen3TTSTokenizerV2DecoderTransformerLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
-        )
+        self.layers = nn.ModuleList([
+            Qwen3TTSTokenizerV2DecoderTransformerLayer(config, layer_idx)
+            for layer_idx in range(config.num_hidden_layers)
+        ])
         self.norm = Qwen3TTSTokenizerV2DecoderRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.rotary_emb = Qwen3TTSTokenizerV2DecoderRotatoryEmbedding(config=config)
         self.gradient_checkpointing = False
@@ -540,7 +515,7 @@ class Qwen3TTSTokenizerV2DecoderTransformerModel(nn.Module):
 
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
-        
+
         inputs_embeds = self.input_proj(inputs_embeds)
 
         if position_ids is None:
@@ -592,8 +567,8 @@ class SnakeBeta(nn.Module):
         - alpha - trainable parameter that controls frequency
         - beta - trainable parameter that controls magnitude
     References:
-        - This activation function is a modified version based on this paper by Liu Ziyin, Tilman Hartwig, Masahito Ueda:
-        https://huggingface.co/papers/2006.08195
+        - This activation function is a modified version based on this paper by Liu Ziyin,
+          Tilman Hartwig, Masahito Ueda: https://huggingface.co/papers/2006.08195
     """
 
     def __init__(self, in_features, alpha=1.0):
@@ -834,7 +809,7 @@ class Qwen3TTSTokenizerV2Decoder(nn.Module):
         self.config = config
         self.total_upsample = np.prod(config.upsample_rates + config.upsampling_ratios)
         self.pre_transformer = Qwen3TTSTokenizerV2DecoderTransformerModel(config)
-        
+
         self.quantizer = SplitResidualVectorQuantizer(
             dimension=config.codebook_dim // 2,
             n_q=config.num_quantizers,
@@ -930,19 +905,19 @@ class Qwen3TTSTokenizerV2Model(nn.Module):
 
     def get_model_type(self):
         return self.config.model_type
-    
+
     def get_input_sample_rate(self):
         return self.input_sample_rate
-    
+
     def get_output_sample_rate(self):
         return self.output_sample_rate
-    
+
     def get_encode_downsample_rate(self):
         return self.encode_downsample_rate
-    
+
     def get_decode_upsample_rate(self):
         return self.decode_upsample_rate
-    
+
     def encode(
         self,
         input_values: torch.Tensor,
@@ -955,13 +930,16 @@ class Qwen3TTSTokenizerV2Model(nn.Module):
             input_values (`torch.Tensor` of shape `(batch_size, sequence_length)`):
                 Float values of the input audio waveform.
             padding_mask (`torch.Tensor` of shape `(batch_size, sequence_length)`):
-                Indicates which inputs are to be ignored due to padding, where elements are either 1 for *not masked* or 0
-                for *masked*.
+                Indicates which inputs are to be ignored due to padding, where elements are
+                either 1 for *not masked* or 0 for *masked*.
         """
         encoded_frames = self.encoder.encode(input_values=input_values.unsqueeze(1),
                                              return_dict=True)
         audio_codes = encoded_frames.audio_codes[:, :self.encoder_valid_num_quantizers]
-        audio_codes = [code[..., :-(-mask.sum() // self.encode_downsample_rate)].transpose(0, 1) for code, mask in zip(audio_codes, padding_mask)]
+        audio_codes = [
+            code[..., :-(-mask.sum() // self.encode_downsample_rate)].transpose(0, 1)
+            for code, mask in zip(audio_codes, padding_mask, strict=False)
+        ]
 
         return audio_codes
 
@@ -1032,7 +1010,7 @@ class Qwen3TTSDecoder(nn.Module):
                 weights_path = cached_file(model_repo, "pytorch_model.bin")
                 state_dict = torch.load(weights_path, map_location=device)
             except Exception as e:
-                raise RuntimeError(f"Could not load model weights from {model_repo}: {e}")
+                raise RuntimeError(f"Could not load model weights from {model_repo}: {e}") from e
 
         # Load state dict into model
         self.model.load_state_dict(state_dict, strict=False)
