@@ -136,6 +136,9 @@ class Sampler:
         """
         # OR operation over window_size dimension.
         appearance_mask = repetition_cache.any(dim=1)
+        # If logits only cover a single codebook (e.g., codebook-0), align mask shape.
+        if logits.shape[1] == 1 and appearance_mask.shape[1] != 1:
+            appearance_mask = appearance_mask[:, :1, :]
 
         logits = torch.where((logits > 0) & appearance_mask, logits / penalty, logits)
         logits = torch.where((logits <= 0) & appearance_mask, logits * penalty, logits)
@@ -163,9 +166,13 @@ class Sampler:
             # shift the cache to the left and add the new token
             repetition_cache[:, :-1] = repetition_cache[:, 1:]
             repetition_cache[:, -1].zero_()
-            repetition_cache[:, -1, :, output_ids] = True
+            if output_ids.shape[1] == 1 and repetition_cache.shape[2] != 1:
+                repetition_cache[:, -1, 0, output_ids[:, 0]] = True
+            else:
+                repetition_cache[:, -1, :, output_ids] = True
 
+        # global cache, just set the new token
+        elif output_ids.shape[1] == 1 and repetition_cache.shape[2] != 1:
+            repetition_cache[:, :, 0, output_ids[:, 0]] = True
         else:
-            # global cache, just set the new token
             repetition_cache[:, :, :, output_ids] = True
-

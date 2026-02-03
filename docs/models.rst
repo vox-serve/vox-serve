@@ -26,6 +26,9 @@ Text-to-speech (TTS)
    * - ``orpheus``
      - ``canopylabs/orpheus-3b-0.1-ft`` (`link <https://huggingface.co/canopylabs/orpheus-3b-0.1-ft>`_)
      - TTS model developed by Canopy Labs. Using 3B LLM with SNAC detokenizer.
+   * - ``qwen3-tts``
+     - ``Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice`` (`link <https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice>`_)
+     - TTS model developed by Alibaba Qwen team. Using 1.7B LLM with depth transformer and Mimi-like detokenizer. Currently supports custom voice mode only. Other modes under development.
    * - ``zonos``
      - ``Zyphra/Zonos-v0.1-transformer`` (`link <https://huggingface.co/Zyphra/Zonos-v0.1-transformer>`_)
      - TTS model developed by Zyphra. Using 1B LLM with DAC detokenizer.

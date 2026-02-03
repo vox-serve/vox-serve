@@ -181,11 +181,12 @@ class ModelWorker:
 
         self.has_depth_transformer = self.model.has_depth_transformer
         if self.has_depth_transformer:
+            depth_state_size = self.model.depth_num_attention_heads * self.model.depth_head_dim
             self.depth_attn_wrapper = FlashInferPrefillWrapper(
                 attn_buffer=self.flashinfer_buffer,
                 n_qo_head=self.model.depth_num_attention_heads,
                 n_kv_head=self.model.depth_num_key_value_heads,
-                n_state=self.model.depth_hidden_size,
+                n_state=depth_state_size,
                 page_size=self.page_size,
                 # max_batch_size=self.max_batch_size,
                 use_cuda_graph=False,
@@ -196,7 +197,7 @@ class ModelWorker:
                 2,  # K/V
                 self.model.depth_n_codebooks,
                 self.model.depth_num_key_value_heads,  # kv heads
-                self.model.depth_hidden_size // self.model.depth_num_attention_heads,  # head dim
+                self.model.depth_head_dim,
                 dtype=torch.bfloat16,
                 device="cuda",
             )
@@ -351,6 +352,11 @@ class ModelWorker:
         input_masks = lm_inputs["input_masks"]
         repetition_cache = lm_inputs["repetition_cache"]
 
+        # Ensure float inputs match model dtype (e.g. bfloat16 for FlashInfer); base worker passes tensors directly
+        model_dtype = getattr(self.model, "dtype", torch.bfloat16)
+        if input_features is not None and input_features.is_floating_point() and input_features.dtype != model_dtype:
+            input_features = input_features.to(model_dtype)
+
         qo_indptr_tensor = torch.tensor(qo_indptr, dtype=torch.int32)
         paged_kv_indptr_tensor = torch.tensor(paged_kv_indptr, dtype=torch.int32)
         paged_kv_indices_tensor = torch.tensor(paged_kv_indices, dtype=torch.int32)
@@ -427,6 +433,11 @@ class ModelWorker:
         input_features = lm_inputs["input_features"]
         input_masks = lm_inputs["input_masks"]
         repetition_cache = lm_inputs["repetition_cache"]
+
+        # Ensure float inputs match model dtype (e.g. bfloat16 for FlashInfer); base worker passes tensors directly
+        model_dtype = getattr(self.model, "dtype", torch.bfloat16)
+        if input_features is not None and input_features.is_floating_point() and input_features.dtype != model_dtype:
+            input_features = input_features.to(model_dtype)
 
         paged_kv_indptr_tensor = torch.tensor(paged_kv_indptr, dtype=torch.int32)
         paged_kv_indices_tensor = torch.tensor(paged_kv_indices, dtype=torch.int32)
@@ -595,7 +606,12 @@ class ModelWorker:
             last_chunk_len = len(req.lm_output_audio_tokens[decode_idx : decode_idx + self.detokenize_interval])
             if last_chunk_len < self.detokenize_interval:
                 # remove the padded audio
-                audio_int16 = audio_int16[: int(audio_int16.shape[1] * last_chunk_len / self.detokenize_interval)]
+                trim_len = int(
+                    audio_int16.shape[1]
+                    * (last_chunk_len - 0.5)
+                    / self.detokenize_interval
+                )
+                audio_int16 = audio_int16[:, :trim_len]
 
             audio_bytes = audio_int16.tobytes()
             req.output_audio.put(audio_bytes)

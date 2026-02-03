@@ -139,6 +139,7 @@ class CudaGraphWorker(ModelWorker):
 
             self.depth_prefill_wrappers = {}
             self.depth_decode_wrappers = {}
+            depth_state_size = self.model.depth_num_attention_heads * self.model.depth_head_dim
 
             for batch_size in self.cuda_graph_batch_sizes:
                 # We enable CUDA graph for prefill phase as well since the sequence length (2) is fixed.
@@ -146,7 +147,7 @@ class CudaGraphWorker(ModelWorker):
                     attn_buffer=self.flashinfer_buffer,
                     n_qo_head=self.model.depth_num_attention_heads,
                     n_kv_head=self.model.depth_num_key_value_heads,
-                    n_state=self.model.depth_hidden_size,
+                    n_state=depth_state_size,
                     page_size=self.model.depth_n_codebooks,
                     batch_size=batch_size,
                     max_seq_len=2 * batch_size,
@@ -161,7 +162,7 @@ class CudaGraphWorker(ModelWorker):
                     attn_buffer=self.flashinfer_buffer,
                     n_qo_head=self.model.depth_num_attention_heads,
                     n_kv_head=self.model.depth_num_key_value_heads,
-                    n_state=self.model.depth_hidden_size,
+                    n_state=depth_state_size,
                     page_size=self.model.depth_n_codebooks,
                     batch_size=batch_size,
                     paged_kv_indptr_buffer=self.depth_paged_kv_indptr_buffer[: batch_size + 1],
@@ -176,7 +177,7 @@ class CudaGraphWorker(ModelWorker):
                 2,  # K/V
                 self.model.depth_n_codebooks,
                 self.model.depth_num_key_value_heads,  # kv heads
-                self.model.depth_hidden_size // self.model.depth_num_attention_heads,  # head dim
+                self.model.depth_head_dim,
                 dtype=torch.bfloat16,
                 device="cuda",
             )
@@ -603,7 +604,7 @@ class CudaGraphWorker(ModelWorker):
         depth_position_ids_buffer = torch.zeros(2 * self.max_batch_size, dtype=torch.int32, device=self.device)
 
         depth_logits_buffer = torch.zeros(
-            2 * self.max_batch_size, self.model.vocab_size, dtype=torch.bfloat16, device=self.device
+            2 * self.max_batch_size, self.model.depth_vocab_size, dtype=torch.bfloat16, device=self.device
         )
 
         # Add depth transformer buffers to the unified buffer dictionary
@@ -1258,7 +1259,12 @@ class CudaGraphWorker(ModelWorker):
             )
             if last_chunk_len < self.detokenize_interval:
                 # remove the padded audio
-                audio_int16 = audio_int16[: int(audio_int16.shape[1] * last_chunk_len / self.detokenize_interval)]
+                trim_len = int(
+                    audio_int16.shape[1]
+                    * (last_chunk_len - 0.5)
+                    / self.detokenize_interval
+                )
+                audio_int16 = audio_int16[:, :trim_len]
 
             audio_bytes = audio_int16.tobytes()
             req.output_audio.put(audio_bytes)
