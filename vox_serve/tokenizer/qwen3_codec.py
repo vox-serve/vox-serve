@@ -1001,19 +1001,41 @@ class Qwen3TTSDecoder(nn.Module):
         Initialize Qwen3 audio codec.
 
         Args:
-            sample_rate: Audio sample rate in Hz
-            n_codebooks: Number of codebooks in the codec
-            codebook_size: Size of each codebook (vocabulary size per codebook)
-            **kwargs: Additional codec-specific parameters
+            model_repo: HuggingFace model repository ID
+            device: Device to load the model on
         """
         super().__init__()
         self.device = device
+
+        # Load config
         config_path = hf_hub_download(
             repo_id=model_repo,
             filename="config.json",
         )
-        config = Qwen3TTSTokenizerV2Config.from_json(config_path)  
+        config = Qwen3TTSTokenizerV2Config.from_json(config_path)
+
+        # Create model from config
         self.model = Qwen3TTSTokenizerV2Model(config)
+
+        # Load pretrained weights using transformers utilities
+        from transformers.utils import cached_file
+
+        # Try to load weights (codec model is usually not sharded)
+        try:
+            # Try safetensors first
+            weights_path = cached_file(model_repo, "model.safetensors")
+            from safetensors.torch import load_file
+            state_dict = load_file(weights_path, device=str(device))
+        except Exception:
+            try:
+                # Fallback to pytorch_model.bin
+                weights_path = cached_file(model_repo, "pytorch_model.bin")
+                state_dict = torch.load(weights_path, map_location=device)
+            except Exception as e:
+                raise RuntimeError(f"Could not load model weights from {model_repo}: {e}")
+
+        # Load state dict into model
+        self.model.load_state_dict(state_dict, strict=False)
         self.model.to(device)
         self.model.eval()
 
@@ -1022,9 +1044,15 @@ class Qwen3TTSDecoder(nn.Module):
         Decode discrete tokens to audio waveform.
 
         Args:
-            codes: Tensor of shape (batch_size, codes_length, num_quantizers)
+            codes: Tensor of shape (batch_size, num_quantizers, codes_length)
+                  e.g., (1, 16, 100) for 100 frames with 16 codebooks
 
         Returns:
-            Audio tensor. Shape: (batch_size, audio_length)
+            Audio tensor. Shape: (batch_size, n_channels, audio_length)
         """
-        return self.model.decode(codes)
+        # Call decoder.chunked_decode directly - codes are already in correct shape
+        # Expected input: (batch_size, num_quantizers, codes_length)
+        audio_values = self.model.decoder.chunked_decode(codes)
+
+        # audio_values shape: (batch_size, 1, audio_length) with channel dimension
+        return audio_values

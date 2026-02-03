@@ -563,68 +563,6 @@ def rotate_half(x):
     return torch.cat((-x2, x1), dim=-1)
 
 
-def apply_multimodal_rotary_pos_emb(q, k, cos, sin, mrope_section, mrope_interleaved=False, unsqueeze_dim=1):
-    """Applies Rotary Position Embedding with Multimodal Sections to the query and key tensors.
-
-    Multimodal 3D rotary position embedding is an extension to 1D rotary position embedding. The input embedding
-    sequence contains vision (images / videos) embedding and text embedding or just contains text embedding. For
-    vision embedding part, we apply rotary position embedding on temporal, height and width dimension separately.
-    Here we split the channel dimension to 3 chunks for the temporal, height and width rotary position embedding.
-    For text embedding part, we just apply 1D rotary position embedding. The three rotary position index (temporal,
-    height and width) of text embedding is always the same, so the text embedding rotary position embedding has no
-    difference with modern LLMs.
-
-    Args:
-        q (`torch.Tensor`): The query tensor.
-        k (`torch.Tensor`): The key tensor.
-        cos (`torch.Tensor`): The cosine part of the rotary embedding.
-        sin (`torch.Tensor`): The sine part of the rotary embedding.
-        mrope_section(`List(int)`):
-            Multimodal rope section is for channel dimension of temporal, height and width in rope calculation.
-        mrope_interleaved(`bool`):
-            Whether to use interleaved multimodal RoPE.
-        unsqueeze_dim (`int`, *optional*, defaults to 1):
-            The 'unsqueeze_dim' argument specifies the dimension along which to unsqueeze cos[position_ids] and
-            sin[position_ids] so that they can be properly broadcasted to the dimensions of q and k.
-
-    Returns:
-        `tuple(torch.Tensor)` comprising of the query and key tensors rotated using the Rotary Position Embedding.
-    """
-    if mrope_interleaved:
-
-        def apply_interleaved_rope(x, modality_num):
-            x_t = x[0].clone()
-            index_ranges = []
-            for i, n in enumerate(mrope_section[1:], 1):
-                beg_idx = i
-                end_idx = n * modality_num
-                index_ranges.append((beg_idx, end_idx))
-            for beg_idx, end_idx in index_ranges:
-                x_t[..., beg_idx:end_idx:modality_num] = x[beg_idx, ..., beg_idx:end_idx:modality_num]
-            return x_t
-
-        dim = cos.shape[-1]
-        modality_num = len(mrope_section)
-        cos = torch.cat([apply_interleaved_rope(cos[..., : dim // 2], modality_num)] * 2, dim=-1).unsqueeze(
-            unsqueeze_dim
-        )
-        sin = torch.cat([apply_interleaved_rope(sin[..., : dim // 2], modality_num)] * 2, dim=-1).unsqueeze(
-            unsqueeze_dim
-        )
-    else:
-        mrope_section = mrope_section * 2
-        cos = torch.cat([m[i % 3] for i, m in enumerate(cos.split(mrope_section, dim=-1))], dim=-1).unsqueeze(
-            unsqueeze_dim
-        )
-        sin = torch.cat([m[i % 3] for i, m in enumerate(sin.split(mrope_section, dim=-1))], dim=-1).unsqueeze(
-            unsqueeze_dim
-        )
-
-    q_embed = (q * cos) + (rotate_half(q) * sin)
-    k_embed = (k * cos) + (rotate_half(k) * sin)
-    return q_embed, k_embed
-
-
 class Qwen3TTSMLP(nn.Module):
     def __init__(self, config: Qwen3TTSTalkerConfig):
         super().__init__()
@@ -665,32 +603,6 @@ class Qwen3TTSAttention(nn.Module):
         inv_freq = 1.0 / (self.rope_theta ** (torch.arange(0, self.head_dim, 2, dtype=torch.float32) / self.head_dim))
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
-        # self.sliding_window = config.sliding_window if config.layer_types[layer_idx] == "sliding_attention" else None
-
-    def _compute_rope_embeddings_flat(self, x: torch.Tensor, position_ids: torch.Tensor):
-        """
-        Compute cos and sin embeddings for multimodal RoPE in NHD layout.
-
-        Args:
-            x: Input tensor for dtype and device reference
-            position_ids: Position IDs tensor of shape (tokens,)
-
-        Returns:
-            Tuple of (cos, sin) embeddings with shape (3, tokens, head_dim)
-        """
-        position_ids = position_ids.to(dtype=torch.float32)
-        inv_freq = self.inv_freq.to(dtype=torch.float32)
-
-        device_type = x.device.type if isinstance(x.device.type, str) and x.device.type != "mps" else "cpu"
-        with torch.autocast(device_type=device_type, enabled=False):
-            freqs = torch.outer(position_ids, inv_freq)
-            emb = torch.cat((freqs, freqs), dim=-1)
-            cos = emb.cos()
-            sin = emb.sin()
-
-        cos = cos.unsqueeze(0).expand(3, -1, -1)
-        sin = sin.unsqueeze(0).expand(3, -1, -1)
-        return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
     def forward(
         self,
@@ -700,52 +612,33 @@ class Qwen3TTSAttention(nn.Module):
         kv_cache: torch.Tensor,
     ):
         input_shape = hidden_states.shape[:-1]
-        hidden_states_flat = hidden_states.reshape(-1, hidden_states.shape[-1])
-        position_ids_flat = position_ids.reshape(-1) if position_ids.dim() > 1 else position_ids
 
-        query_states = self.q_norm(self.q_proj(hidden_states_flat).view(-1, self.head_dim)).view(
+        query_states = self.q_norm(self.q_proj(hidden_states).view(-1, self.head_dim)).view(
             -1, self.num_attention_heads, self.head_dim
         )
-        key_states = self.k_norm(self.k_proj(hidden_states_flat).view(-1, self.head_dim)).view(
+        key_states = self.k_norm(self.k_proj(hidden_states).view(-1, self.head_dim)).view(
             -1, self.num_key_value_heads, self.head_dim
         )
-        value_states = self.v_proj(hidden_states_flat).view(-1, self.num_key_value_heads, self.head_dim)
+        value_states = self.v_proj(hidden_states).view(-1, self.num_key_value_heads, self.head_dim)
 
         if self.config.rope_scaling is None:
-            # depth transformer, no mrope
+            # Depth transformer; no mRoPE.
             query_states, key_states = apply_rope_pos_ids(
                 query_states=query_states,
                 key_states=key_states,
-                position_ids=position_ids_flat,
+                position_ids=position_ids,
                 # rotary_dim=self.head_dim // 2,
                 interleave=False,
                 rope_theta=self.rope_theta,
             )
         else:
-            # Compute multimodal RoPE embeddings
-            cos, sin = self._compute_rope_embeddings_flat(hidden_states_flat, position_ids_flat)
-
-            # Apply multimodal rotary position embedding
-            # Get mrope_section and validate it sums to head_dim // 2
-            if self.rope_scaling is not None and hasattr(self.rope_scaling, 'mrope_section'):
-                mrope_section = self.rope_scaling.mrope_section
-            else:
-                mrope_section = [24, 20, 20]
-
-            # Validate mrope_section: should sum to head_dim // 2
-            if sum(mrope_section) != self.head_dim // 2:
-                mrope_section = [24, 20, 20]  # Default for head_dim=128
-
-            mrope_interleaved = self.rope_scaling.interleaved if self.rope_scaling is not None and hasattr(self.rope_scaling, 'interleaved') else True
-
-            query_states, key_states = apply_multimodal_rotary_pos_emb(
-                query_states,
-                key_states,
-                cos,
-                sin,
-                mrope_section,
-                mrope_interleaved,
-                unsqueeze_dim=1
+            # While the talker model uses mRoPE, it is essentially the same as standard RoPE.
+            query_states, key_states = apply_rope_pos_ids(
+                query_states=query_states,
+                key_states=key_states,
+                position_ids=position_ids,
+                interleave=False,  # This is different from mRoPE's interleaving option.
+                rope_theta=self.rope_theta,
             )
 
         attn_wrapper.set_kv_cache(kv_cache, key_states, value_states)
@@ -1232,18 +1125,18 @@ class Qwen3TTSModel(BaseLMWithDepth):
     @property
     def depth_hidden_size(self) -> int:
         """Hidden size of the model."""
-        # NOTE: for attention layer, unlike other models, _depth_hidden_size is the dimension size
-        # BEFORE Q projection for depth model. It gets doubled after Q projection, contrary to typical GQA.
-        # So we need a special care when using this property for attention/rope metadata
+        # NOTE: For the attention layer, unlike in other models, _depth_hidden_size is the dimension size
+        # **before** Q projection in the depth model. It is doubled after the Q projection, contrary to typical GQA models.
+        # Therefore, special care is needed when using this property for attention/rope metadata.
         return self._depth_hidden_size
 
     @property
     def depth_head_dim(self) -> int:
         """Head dimension in the depth transformer."""
         # In Qwen3-TTS's code predictor config, hidden_size=1024, head_dim=128, num_attention_heads=16, num_key_value_heads=8,
-        # which seems contradicted since hidden_size != num_attention_heads * head_dim.
-        # We return self._depth_hidden_size // self._depth_num_key_value_heads 
-        # to make the head dimension size used for KV cache allocation correct.
+        # which appears contradictory since hidden_size != num_attention_heads * head_dim.
+        # We return self._depth_hidden_size // self._depth_num_key_value_heads
+        # to ensure the head dimension size used for KV cache allocation is correct.
         return getattr(
             self.config.talker_config.code_predictor_config,
             "head_dim",
@@ -1270,7 +1163,7 @@ class Qwen3TTSModel(BaseLMWithDepth):
         """Maximum number of tokens the model generates in a single request."""
         if self.default_sampling_config.max_tokens is not None:
             return self.default_sampling_config.max_tokens
-        return 16
+        return 2048
 
     @property
     def n_channels(self) -> int:
@@ -1320,7 +1213,7 @@ class Qwen3TTSModel(BaseLMWithDepth):
 
     def is_stop_id(self, token_ids: List[int]) -> bool:
         """Check if the given token ID is a stop token."""
-        return token_ids[0] == self.stop_token_id
+        return token_ids.item() == self.stop_token_id
 
     def _load_tokenizer(self, tokenizer_path):
         """Load tokenizer from local path or HuggingFace hub."""
@@ -1792,10 +1685,10 @@ class Qwen3TTSModel(BaseLMWithDepth):
         if self.suppress_tokens:
             logits[..., self.suppress_tokens] = torch.finfo(logits.dtype).min
 
-        # if repetition_cache is not None:
-        #     logits = Sampler.apply_repetition_penalty(
-        #         logits, repetition_cache, sampling_params.repetition_penalty
-        #     )
+        if repetition_cache is not None:
+            logits = Sampler.apply_repetition_penalty(
+                logits, repetition_cache, sampling_params.repetition_penalty
+            )
 
         # The backbone only emits logits for codebook-0. Allocate a full codebook tensor so
         # depth sampling can fill the remaining codebooks in-place.
@@ -1813,13 +1706,13 @@ class Qwen3TTSModel(BaseLMWithDepth):
         output_ids[:, 0] = output_ids_cb0[:, 0]  # First audio token at index 0
         output_ids[:, -1] = self.config.tts_pad_token_id  # Text token at last index
 
-        # if repetition_cache is not None:
-        #     # Only update cache for codebook-0 since other codebooks are produced by the depth model.
-        #     Sampler.update_repetition_penalty_cache(
-        #         repetition_cache,
-        #         output_ids[:, :1],
-        #         sampling_params.repetition_window,
-        #     )
+        if repetition_cache is not None:
+            # Only update cache for codebook-0 since other codebooks are produced by the depth model.
+            Sampler.update_repetition_penalty_cache(
+                repetition_cache,
+                output_ids[:, :1],
+                sampling_params.repetition_window,
+            )
 
         c0_embed = self.model.talker.model.codec_embedding(output_ids[:, 0])
         hidden_for_depth = torch.cat([hidden_states[:, None, :], c0_embed[:, None, :]], dim=1) # (bs, 2, hidden_size)
@@ -1837,7 +1730,7 @@ class Qwen3TTSModel(BaseLMWithDepth):
 
             # lm_output_tokens uses output buffer format: depth_n_codebooks audio tokens at indices 0-(depth_n_codebooks-1), text token at index depth_n_codebooks
             req.lm_output_tokens.append(output_ids[i : i + 1])
-            if not self.is_stop_id([output_ids[i].tolist()]):
+            if not self.is_stop_id(output_ids[i][0]):
                 # Don't add the EOS token to lm_output_audio_tokens
                 # lm_output_audio_tokens contains the same (depth_n_codebooks + 1)-token structure
                 req.lm_output_audio_tokens.append(output_ids[i : i + 1])
