@@ -139,6 +139,7 @@ class CudaGraphWorker(ModelWorker):
 
             self.depth_prefill_wrappers = {}
             self.depth_decode_wrappers = {}
+            depth_state_size = self.model.depth_num_attention_heads * self.model.depth_head_dim
 
             for batch_size in self.cuda_graph_batch_sizes:
                 # We enable CUDA graph for prefill phase as well since the sequence length (2) is fixed.
@@ -146,7 +147,7 @@ class CudaGraphWorker(ModelWorker):
                     attn_buffer=self.flashinfer_buffer,
                     n_qo_head=self.model.depth_num_attention_heads,
                     n_kv_head=self.model.depth_num_key_value_heads,
-                    n_state=self.model.depth_hidden_size,
+                    n_state=depth_state_size,
                     page_size=self.model.depth_n_codebooks,
                     batch_size=batch_size,
                     max_seq_len=2 * batch_size,
@@ -161,7 +162,7 @@ class CudaGraphWorker(ModelWorker):
                     attn_buffer=self.flashinfer_buffer,
                     n_qo_head=self.model.depth_num_attention_heads,
                     n_kv_head=self.model.depth_num_key_value_heads,
-                    n_state=self.model.depth_hidden_size,
+                    n_state=depth_state_size,
                     page_size=self.model.depth_n_codebooks,
                     batch_size=batch_size,
                     paged_kv_indptr_buffer=self.depth_paged_kv_indptr_buffer[: batch_size + 1],
@@ -1210,7 +1211,6 @@ class CudaGraphWorker(ModelWorker):
             torch.cuda.synchronize(device=self.detokenizer_device)
             self.nvtx_range_pop()
 
-        print(f"{token_ids_stacked.shape=}")
         self.cuda_graph_buffers["detokenize_input"][:actual_batch_size].copy_(token_ids_stacked)
 
         # If a decoder cache is required, batch-merge request caches and copy into the CUDA buffer

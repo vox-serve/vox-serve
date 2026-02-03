@@ -181,11 +181,12 @@ class ModelWorker:
 
         self.has_depth_transformer = self.model.has_depth_transformer
         if self.has_depth_transformer:
+            depth_state_size = self.model.depth_num_attention_heads * self.model.depth_head_dim
             self.depth_attn_wrapper = FlashInferPrefillWrapper(
                 attn_buffer=self.flashinfer_buffer,
                 n_qo_head=self.model.depth_num_attention_heads,
                 n_kv_head=self.model.depth_num_key_value_heads,
-                n_state=self.model.depth_hidden_size,
+                n_state=depth_state_size,
                 page_size=self.page_size,
                 # max_batch_size=self.max_batch_size,
                 use_cuda_graph=False,
@@ -351,6 +352,11 @@ class ModelWorker:
         input_masks = lm_inputs["input_masks"]
         repetition_cache = lm_inputs["repetition_cache"]
 
+        # Ensure float inputs match model dtype (e.g. bfloat16 for FlashInfer); base worker passes tensors directly
+        model_dtype = getattr(self.model, "dtype", torch.bfloat16)
+        if input_features is not None and input_features.is_floating_point() and input_features.dtype != model_dtype:
+            input_features = input_features.to(model_dtype)
+
         qo_indptr_tensor = torch.tensor(qo_indptr, dtype=torch.int32)
         paged_kv_indptr_tensor = torch.tensor(paged_kv_indptr, dtype=torch.int32)
         paged_kv_indices_tensor = torch.tensor(paged_kv_indices, dtype=torch.int32)
@@ -427,6 +433,11 @@ class ModelWorker:
         input_features = lm_inputs["input_features"]
         input_masks = lm_inputs["input_masks"]
         repetition_cache = lm_inputs["repetition_cache"]
+
+        # Ensure float inputs match model dtype (e.g. bfloat16 for FlashInfer); base worker passes tensors directly
+        model_dtype = getattr(self.model, "dtype", torch.bfloat16)
+        if input_features is not None and input_features.is_floating_point() and input_features.dtype != model_dtype:
+            input_features = input_features.to(model_dtype)
 
         paged_kv_indptr_tensor = torch.tensor(paged_kv_indptr, dtype=torch.int32)
         paged_kv_indices_tensor = torch.tensor(paged_kv_indices, dtype=torch.int32)
