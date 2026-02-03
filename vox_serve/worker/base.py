@@ -606,7 +606,12 @@ class ModelWorker:
             last_chunk_len = len(req.lm_output_audio_tokens[decode_idx : decode_idx + self.detokenize_interval])
             if last_chunk_len < self.detokenize_interval:
                 # remove the padded audio
-                audio_int16 = audio_int16[: int(audio_int16.shape[1] * last_chunk_len / self.detokenize_interval)]
+                trim_len = int(
+                    audio_int16.shape[1]
+                    * (last_chunk_len - 0.5)
+                    / self.detokenize_interval
+                )
+                audio_int16 = audio_int16[:, :trim_len]
 
             audio_bytes = audio_int16.tobytes()
             req.output_audio.put(audio_bytes)
