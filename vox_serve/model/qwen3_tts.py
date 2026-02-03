@@ -929,15 +929,13 @@ class Qwen3TTSForCausalLM(nn.Module):
             attn_wrapper=attn_wrapper,
             kv_cache=kv_cache,
         )
-        head_idx = position_ids.max().int().item()
-        logits = self.talker.code_predictor.lm_head[head_idx - 1](hidden_states)
-        # # Choose the codebook head based on the current depth position using tensor ops
-        # # so CUDA graph capture doesn't require Python-side indexing.
-        # num_heads = self.talker.code_predictor.lm_head_weight.shape[0]
-        # head_idx = position_ids.max()
-        # head_idx = head_idx.clamp(min=1, max=num_heads).sub(1).to(torch.long).view(1)
-        # head_weight = self.talker.code_predictor.lm_head_weight.index_select(0, head_idx).squeeze(0)
-        # logits = hidden_states @ head_weight.t()
+        # Choose the codebook head based on the current depth position using tensor ops
+        # so CUDA graph capture doesn't require Python-side indexing.
+        num_heads = self.talker.code_predictor.lm_head_weight.shape[0]
+        head_idx = position_ids.max()
+        head_idx = head_idx.clamp(min=1, max=num_heads).sub(1).to(torch.long).view(1)
+        head_weight = self.talker.code_predictor.lm_head_weight.index_select(0, head_idx).squeeze(0)
+        logits = hidden_states @ head_weight.t()
 
         return logits
 
@@ -1026,6 +1024,13 @@ class Qwen3TTSModel(BaseLMWithDepth):
             self.model.load_state_dict(state_dict, strict=False)
 
         self.model.to(dtype).to(device)
+
+        # Sync the lm_head_weight buffer with the loaded weights for CUDA graph compatibility
+        # The buffer is created at __init__ with random weights, so we need to update it
+        # after loading the trained weights
+        self.model.talker.code_predictor.lm_head_weight.copy_(
+            torch.stack([head.weight for head in self.model.talker.code_predictor.lm_head], dim=0)
+        )
 
         self.supported_speakers = self.config.talker_config.spk_id.keys()
         self.supported_languages = ["auto"]
