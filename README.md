@@ -4,7 +4,16 @@
   <img src="docs/_static/images/logo-dark.png" alt="VoxServe Logo" width="320" />
 </p>
 
+<p align="center">
+  <a href="https://arxiv.org/abs/2602.00269"><img src="https://img.shields.io/badge/arXiv-2602.00269-b31b1b.svg" alt="arXiv"></a>
+  <a href="https://vox-serve.github.io/vox-serve/"><img src="https://img.shields.io/badge/docs-online-blue" alt="Documentation"></a>
+</p>
+
 VoxServe is a serving system for Speech Language Models (SpeechLMs). VoxServe provides low-latency & high-throughput inference for language models trained for speech tokens, specifically text-to-speech (TTS) and speech-to-speech (STS) models.
+
+### News
+
+- **[2025-02]** We released our paper: [VoxServe: A Streaming-Centric Serving System for Speech Language Models](https://arxiv.org/abs/2602.00269)
 
 ### Usage
 
