@@ -284,8 +284,12 @@ class Qwen3TTSConfig:
             config_dict = json.load(f)
 
         # Create nested configs
+        # For base model, set mel_dim=128 if not specified (base model uses 128 mel channels)
+        speaker_encoder_config_dict = config_dict.get('speaker_encoder_config', {})
+        if config_dict.get('tts_model_type') == 'base' and 'mel_dim' not in speaker_encoder_config_dict:
+            speaker_encoder_config_dict['mel_dim'] = 128
         speaker_encoder_config = Qwen3TTSSpeakerEncoderConfig(
-            **config_dict.get('speaker_encoder_config', {})
+            **speaker_encoder_config_dict
         )
 
         # Create talker config with nested code_predictor_config
@@ -963,6 +967,10 @@ class Qwen3TTSModel(BaseLMWithDepth):
     ):
         if model_name == "qwen3-tts":
             model_name = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
+        elif model_name == "qwen3-tts-base":
+            model_name = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
+        elif model_name == "qwen3-tts-voice-design":
+            model_name = "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign"
         super().__init__(model_name, device, dtype, enable_torch_compile, audio_decoder_device)
         self.logger = get_logger(__name__)
         self.model_name = model_name
@@ -1231,28 +1239,6 @@ class Qwen3TTSModel(BaseLMWithDepth):
 
         return AutoTokenizer.from_pretrained(tokenizer_path)
 
-    def _is_probably_base64(self, s: str) -> bool:
-        """Check if string is likely base64 encoded audio."""
-        if s.startswith("data:audio"):
-            return True
-        if ("/" not in s and "\\" not in s) and len(s) > 256:
-            return True
-        return False
-
-    def _is_url(self, s: str) -> bool:
-        """Check if string is a valid URL."""
-        try:
-            u = urlparse(s)
-            return u.scheme in ("http", "https") and bool(u.netloc)
-        except Exception:
-            return False
-
-    def _decode_base64_to_wav_bytes(self, b64: str) -> bytes:
-        """Decode base64 string to wav bytes."""
-        if "," in b64 and b64.strip().startswith("data:"):
-            b64 = b64.split(",", 1)[1]
-        return base64.b64decode(b64)
-
     def _load_audio_to_np(self, x: str) -> Tuple[np.ndarray, int]:
         """
         Load audio from path, URL, or base64 string.
@@ -1263,17 +1249,7 @@ class Qwen3TTSModel(BaseLMWithDepth):
         Returns:
             Tuple of (waveform, sample_rate)
         """
-        if self._is_url(x):
-            with urllib.request.urlopen(x) as resp:
-                audio_bytes = resp.read()
-            with io.BytesIO(audio_bytes) as f:
-                audio, sr = sf.read(f, dtype="float32", always_2d=False)
-        elif self._is_probably_base64(x):
-            wav_bytes = self._decode_base64_to_wav_bytes(x)
-            with io.BytesIO(wav_bytes) as f:
-                audio, sr = sf.read(f, dtype="float32", always_2d=False)
-        else:
-            audio, sr = librosa.load(x, sr=None, mono=True)
+        audio, sr = librosa.load(x, sr=None, mono=True)
 
         if audio.ndim > 1:
             audio = np.mean(audio, axis=-1)
@@ -1296,15 +1272,18 @@ class Qwen3TTSModel(BaseLMWithDepth):
         # Convert numpy array to torch tensor
         audio_tensor = torch.from_numpy(audio).unsqueeze(0).to(self.device)
 
+        # Get mel_dim from speaker encoder config
+        mel_dim = self.config.speaker_encoder_config.mel_dim
+
         # Extract mel spectrogram
         # Parameters from reference implementation:
-        # n_fft=1024, num_mels=128, sampling_rate=24000,
+        # n_fft=1024, num_mels=128 (for base) or 80 (for custom_voice), sampling_rate=24000,
         # hop_size=256, win_size=1024, fmin=0, fmax=12000
         with torch.no_grad():
             mels = mel_spectrogram(
                 audio_tensor,
                 n_fft=1024,
-                num_mels=128,
+                num_mels=mel_dim,
                 sampling_rate=24000,
                 hop_size=256,
                 win_size=1024,
@@ -1371,23 +1350,27 @@ class Qwen3TTSModel(BaseLMWithDepth):
         """
         Preprocess text and optional audio input for voice cloning.
 
-        For text-only mode:
+        For custom voice mode (no audio_path):
         1. Role tokens (3): text_projection(text_embedding(input_id[:, :3]))
         2. Codec prefix mixed with tts_pad/tts_bos
-        3. First text token: text_projection(text_embedding()) + codec_embedding(codec_bos)
+        3. Speaker ID token
+        4. Text tokens with codec_pad
+        5. Final token (tts_pad + codec_bos)
 
         For voice cloning with audio (ICL mode):
         1. Role tokens (3): text_projection(text_embedding(input_id[:, :3]))
         2. Codec prefix mixed with tts_pad/tts_bos
-        3. Reference audio codes (if provided)
-        4. First text token: text_projection(text_embedding()) + codec_embedding(codec_bos)
-        5. Speaker embedding returned in input_features
+        3. Speaker embedding (from reference audio)
+        4. ICL prompt: ref_text + text + ref_codes
+        5. Speaker embedding stored in input_features
 
         Args:
             prompt: Input text prompt
             audio_path: Path to input audio file for voice cloning (str path, URL, or base64)
             **kwargs: Additional parameters:
                 - language: Target language (default: "auto")
+                - speaker: Speaker name for custom voice mode
+                - instruct: Optional instruction text
                 - ref_text: Reference text for ICL mode (required when audio_path is provided
                   and x_vector_only_mode=False)
                 - x_vector_only_mode: If True, only use speaker embedding without reference codes (default: False)
@@ -1396,14 +1379,38 @@ class Qwen3TTSModel(BaseLMWithDepth):
             PreprocessOutput with:
                 - input_tokens: [seq_len, n_codebooks]
                 - input_masks: [seq_len, n_codebooks]
-                - input_features: Speaker embedding if audio_path provided, else None
+                - input_features: Pre-computed embeddings including speaker embedding
                 - repetition_cache: For repetition penalty
         """
         language = kwargs.get("language", "english")
         speaker = kwargs.get("speaker", "ryan")
         instruct = kwargs.get("instruct", None)
-        # ref_text = kwargs.get("ref_text", None)
-        # x_vector_only_mode = kwargs.get("x_vector_only_mode", False)
+        ref_text = kwargs.get("ref_text", None)
+        x_vector_only_mode = kwargs.get("x_vector_only_mode", False)
+
+        # Determine the mode based on model type and parameters
+        # - voice_design: uses instruct to describe voice, no speaker ID
+        # - custom_voice: uses predefined speaker ID
+        # - base (voice clone): uses reference audio for speaker embedding
+        is_voice_clone_mode = self.tts_model_type == "base"
+        is_voice_design_mode = self.tts_model_type == "voice_design"
+        is_custom_voice_mode = self.tts_model_type == "custom_voice"
+
+        if not is_voice_clone_mode and not is_voice_design_mode and not is_custom_voice_mode:
+            raise ValueError(
+                f"Invalid model type: {self.tts_model_type}. "
+                f"Please use 'qwen3-tts-base' or 'Qwen/Qwen3-TTS-12Hz-1.7B-Base' model for voice cloning, "
+                f"'qwen3-tts-voice-design' or 'Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign' model for voice design, "
+                f"'qwen3-tts-custom-voice' or 'Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice' model for custom voice. "
+            )
+
+        # Validate mode compatibility
+        if audio_path is not None and is_voice_clone_mode:
+            self.logger.warning(
+                f"Voice cloning (audio_path) is only officially supported for base model type. "
+                f"Current model type: {self.tts_model_type}. "
+                f"Please use 'qwen3-tts-base' or 'Qwen/Qwen3-TTS-12Hz-1.7B-Base' model."
+            )
 
         if language is None:
             language = "auto"
@@ -1413,11 +1420,7 @@ class Qwen3TTSModel(BaseLMWithDepth):
             self.logger.warning(f"Language {language} not found in supported languages, using auto")
             language = "auto"
 
-        speaker = speaker.lower()
-        if speaker not in self.config.talker_config.spk_id:
-            self.logger.warning(f"Speaker {speaker} not found in supported speakers, using None")
-            speaker = None
-
+        # Handle instruct based on model type
         if self.tts_model_size in "0b6":
             instruct = None
         if instruct is not None and instruct == "":
@@ -1436,49 +1439,77 @@ class Qwen3TTSModel(BaseLMWithDepth):
         else:
             instruct_ids = None
 
-        spk_id = self.config.talker_config.spk_id[speaker]
+        # Process reference audio if provided (voice cloning mode)
+        ref_codes = None
+        spk_embedding = None
+        ref_text_ids = None
 
-        # Process reference audio if provided
-        # ref_codes = None
-        # spk_embedding = None
-        # voice clone mode
-        # if audio_path is not None:
-        #     # Load and normalize audio
-        #     audio, sr = self._load_audio_to_np(audio_path)
+        if is_voice_clone_mode:
+            # Voice cloning mode
+            if audio_path is None or ref_text is None:
+                self.logger.warning(
+                    f"You need to provide both audio_path and ref_text for voice cloning mode. "
+                    f"Using default audio and text. "
+                )
+                # Download default audio using the util function if audio_path is None
+                from vox_serve.utils import download_audio_from_url
 
-        #     # Extract reference codes for ICL mode (unless x_vector_only_mode)
-        #     if not x_vector_only_mode:
-        #         if ref_text is None or ref_text == "":
-        #             raise ValueError("ref_text is required when audio_path is provided and x_vector_only_mode=False")
-        #         ref_codes = self._encode_audio_to_codes(audio, sr)
+                audio_path = download_audio_from_url(
+                    "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen3-TTS-Repo/clone_2.wav"
+                )
 
-        #     # Extract speaker embedding (resample to 24kHz if needed)
-        #     if sr != self.speaker_encoder_sample_rate:
-        #         audio_resampled = librosa.resample(
-        #             y=audio.astype(np.float32),
-        #             orig_sr=int(sr),
-        #             target_sr=self.speaker_encoder_sample_rate
-        #         )
-        #     else:
-        #         audio_resampled = audio
+                ref_text =  "Okay. Yeah. I resent you. I love you. I respect you. But you know what? You blew it! And thanks to you."
 
-        #     spk_embedding = self._extract_speaker_embedding(
-        #         audio=audio_resampled,
-        #         sr=self.speaker_encoder_sample_rate
-        #     )
+            audio, sr = self._load_audio_to_np(audio_path)
+
+            # Extract speaker embedding (resample to 24kHz if needed)
+            if sr != self.speaker_encoder_sample_rate:
+                audio_resampled = librosa.resample(
+                    y=audio.astype(np.float32),
+                    orig_sr=int(sr),
+                    target_sr=self.speaker_encoder_sample_rate
+                )
+            else:
+                audio_resampled = audio
+
+            spk_embedding = self._extract_speaker_embedding(
+                audio=audio_resampled,
+                sr=self.speaker_encoder_sample_rate
+            )
+
+            # Extract reference codes for ICL mode (unless x_vector_only_mode)
+            if not x_vector_only_mode:
+                ref_codes = self._encode_audio_to_codes(audio, sr)
+
+                # Tokenize reference text
+                ref_text_tpl = "<|im_start|>assistant\n{text}<|im_end|>\n"
+                ref_text_ids = self.text_tokenizer.encode(
+                    ref_text_tpl.format(text=ref_text), return_tensors="pt"
+                ).to(self.device)
+        elif is_voice_design_mode:
+            # Voice design mode - no speaker ID needed, voice is controlled by instruct
+            speaker = None
+        else:
+            # Custom voice mode - validate speaker
+            speaker = speaker.lower() if speaker else None
+            if speaker is None or speaker not in self.config.talker_config.spk_id:
+                self.logger.warning(f"Speaker {speaker} not found in supported speakers, using first available")
+                speaker = list(self.config.talker_config.spk_id.keys())[0]
 
         # Language setup
         language_id = None
         if language.lower() != "auto":
             if language.lower() in self.config.talker_config.codec_language_id:
                 language_id = self.config.talker_config.codec_language_id[language.lower()]
-        if (
-            language.lower() in ["chinese", "auto"]
-            and speaker is not None
-            and self.config.talker_config.spk_is_dialect.get(speaker, False)
-        ):
-            dialect = self.config.talker_config.spk_is_dialect[speaker]
-            language_id = self.config.talker_config.codec_language_id[dialect]
+
+        # Handle dialect for Chinese speakers (only for custom voice mode)
+        if not is_voice_design_mode and not is_voice_clone_mode and speaker is not None:
+            if (
+                language.lower() in ["chinese", "auto"]
+                and self.config.talker_config.spk_is_dialect.get(speaker, False)
+            ):
+                dialect = self.config.talker_config.spk_is_dialect[speaker]
+                language_id = self.config.talker_config.codec_language_id[dialect]
 
         # Codec prefix tokens
         if language_id is None:
@@ -1495,93 +1526,187 @@ class Qwen3TTSModel(BaseLMWithDepth):
                 self.config.talker_config.codec_think_eos_id,
             ]
 
-        seq_len = (
-            (instruct_ids.shape[1] if instruct_ids is not None else 0) +  # instruct
-            3 +                  # role tokens
-            len(codec_prefix) +  # ALL codec prefix tokens with tts_pad
-            1 +                  # speaker token
-            1 +                  # tts_bos + codec_pad
-            (prompt_ids.shape[1] - 8) +  # text tokens (from index 3 to -5)
-            1 +                  # EOS
-            1                    # final token (tts_pad + codec_bos)
-        )
+        # Calculate sequence length based on mode
+        if is_voice_clone_mode and not x_vector_only_mode and ref_codes is not None:
+            # ICL mode: includes ref_text + text + ref_codes
+            # Sequence: instruct + role(3) + codec_prefix + speaker_embed + tts_bos +
+            #           ref_text + text + tts_eos + codec_bos + ref_codes + tts_pad
+            ref_text_len = ref_text_ids.shape[1] - 5 if ref_text_ids is not None else 0  # Remove template tokens
+            text_len = prompt_ids.shape[1] - 8  # Remove template tokens (first 3 and last 5)
+            ref_codes_len = ref_codes.shape[0]
+
+            seq_len = (
+                (instruct_ids.shape[1] if instruct_ids is not None else 0) +
+                3 +                  # role tokens
+                len(codec_prefix) +  # codec prefix
+                1 +                  # speaker embedding position (pad + codec_pad)
+                1 +                  # tts_bos + codec_pad
+                ref_text_len +       # ref_text tokens (with codec_pad)
+                text_len +           # text tokens (with codec_pad)
+                1 +                  # tts_eos + codec_pad
+                1 +                  # tts_pad + codec_bos
+                ref_codes_len        # ref_codes positions (tts_pad + summed codec)
+            )
+        elif is_voice_design_mode:
+            # Voice design mode: no speaker token, voice is generated from instruct
+            seq_len = (
+                (instruct_ids.shape[1] if instruct_ids is not None else 0) +
+                3 +                  # role tokens
+                len(codec_prefix) +  # codec prefix
+                # NO speaker token for voice design mode
+                1 +                  # tts_bos + codec_pad
+                (prompt_ids.shape[1] - 8) +  # text tokens
+                1 +                  # tts_eos
+                1                    # tts_pad + codec_bos
+            )
+        else:
+            # Custom voice mode or x_vector_only mode
+            seq_len = (
+                (instruct_ids.shape[1] if instruct_ids is not None else 0) +
+                3 +                  # role tokens
+                len(codec_prefix) +  # codec prefix
+                1 +                  # speaker token (or speaker embedding position)
+                1 +                  # tts_bos + codec_pad
+                (prompt_ids.shape[1] - 8) +  # text tokens
+                1 +                  # tts_eos
+                1                    # tts_pad + codec_bos
+            )
 
         # Initialize tensors [seq_len, n_codebooks]
-        # Buffer structure: columns 0-(depth_n_codebooks-1) are audio tokens, column depth_n_codebooks is text token
         input_tokens = torch.zeros(seq_len, self.n_codebooks, dtype=torch.long, device=self.device)
         input_masks = torch.zeros(seq_len, self.n_codebooks, dtype=torch.bool, device=self.device)
+        input_features = torch.zeros(seq_len, self.hidden_size, device=self.device, dtype=self.dtype)
 
         pos = 0
 
+        # 1. Instruct tokens (if any)
         if instruct_ids is not None:
             for i in range(instruct_ids.shape[1]):
-                input_tokens[pos, -1] = instruct_ids[0, i]  # Text token at last column
+                input_tokens[pos, -1] = instruct_ids[0, i]
                 input_masks[pos, -1] = False
                 pos += 1
 
-        # 1. Role tokens (3): text only
+        # 2. Role tokens (3): text only
         for i in range(3):
-            input_tokens[pos, -1] = prompt_ids[0, i]  # Text token at last column
+            input_tokens[pos, -1] = prompt_ids[0, i]
             input_masks[pos, -1] = False
             pos += 1
 
-        # 2. ALL codec prefix tokens with tts_pad: text + codec
+        # 3. Codec prefix tokens with tts_pad
         for codec_tok in codec_prefix:
-            input_tokens[pos, -1] = self.config.tts_pad_token_id  # Text token at last column
-            input_tokens[pos, 0] = codec_tok  # Audio token at column 0
-            input_masks[pos, -1] = True  # needs codec addition
-            pos += 1
-
-        input_tokens[pos, -1] = self.config.tts_pad_token_id  # Text token at last column
-        input_tokens[pos, 0] = spk_id  # Audio token at column 0
-        input_masks[pos, -1] = True  # needs codec addition
-        pos += 1
-
-        # tts_bos + codec_pad
-        input_tokens[pos, -1] = self.config.tts_bos_token_id  # Text token at last column
-        input_tokens[pos, 0] = self.config.talker_config.codec_pad_id  # Audio token at column 0
-        input_masks[pos, -1] = True  # needs codec addition
-        pos += 1
-
-        for i in range(3, prompt_ids.shape[1] - 5):
-            input_tokens[pos, -1] = prompt_ids[0, i]  # Text token at last column
-            input_tokens[pos, 0] = self.config.talker_config.codec_pad_id  # Audio token at column 0
+            input_tokens[pos, -1] = self.config.tts_pad_token_id
+            input_tokens[pos, 0] = codec_tok
             input_masks[pos, -1] = True
             pos += 1
 
-        input_tokens[pos, -1] = self.config.tts_eos_token_id  # Text token at last column
-        input_tokens[pos, 0] = self.config.talker_config.codec_pad_id  # Audio token at column 0
-        input_masks[pos, -1] = True  # needs codec addition
+        # 4. Speaker position (skip for voice design mode)
+        if is_voice_clone_mode:
+            # Voice cloning: use speaker embedding
+            # In the reference implementation, the speaker embedding position has:
+            #   text_side = tts_pad_embed
+            #   codec_side = speaker_embed (NOT codec_pad_embed)
+            # Since our forward method always computes codec_embeds from input_ids[:, 0],
+            # we need to subtract codec_pad_embed from speaker_embed in input_features
+            # so that: codec_pad_embed + (speaker_embed - codec_pad_embed) = speaker_embed
+            input_tokens[pos, -1] = self.config.tts_pad_token_id
+            input_tokens[pos, 0] = self.config.talker_config.codec_pad_id
+            input_masks[pos, -1] = True
+            # Compute codec_pad_embedding to subtract from speaker embedding
+            with torch.no_grad():
+                codec_pad_embed = self.model.talker.model.codec_embedding(
+                    torch.tensor([self.config.talker_config.codec_pad_id], device=self.device)
+                )[0]  # (hidden_size,)
+            input_features[pos] = spk_embedding - codec_pad_embed.to(self.dtype)
+            pos += 1
+        elif is_voice_design_mode:
+            # Voice design mode: no speaker token
+            # The voice characteristics are controlled by the instruct text
+            pass
+        else:
+            # Custom voice: use speaker ID
+            spk_id = self.config.talker_config.spk_id[speaker]
+            input_tokens[pos, -1] = self.config.tts_pad_token_id
+            input_tokens[pos, 0] = spk_id
+            input_masks[pos, -1] = True
+            pos += 1
+
+        # 5. tts_bos + codec_pad
+        input_tokens[pos, -1] = self.config.tts_bos_token_id
+        input_tokens[pos, 0] = self.config.talker_config.codec_pad_id
+        input_masks[pos, -1] = True
         pos += 1
 
-        input_tokens[pos, -1] = self.config.tts_pad_token_id  # Text token at last column
-        input_tokens[pos, 0] = self.config.talker_config.codec_bos_id  # Audio token at column 0
-        input_masks[pos, -1] = True  # needs codec addition
-        pos += 1
+        if audio_path is not None and not x_vector_only_mode and ref_codes is not None:
+            # ICL mode: ref_text + text + ref_codes
 
-        # # 4. Reference audio codes (ICL mode only)
-        # if ref_codes is not None:
-        #     # Add reference codes with reference text tokens
-        #     for i in range(ref_codes_len):
-        #         # Reference codes come with corresponding text tokens from ref_text_id
-        #         if ref_text_id is not None and i < ref_text_id.shape[1]:
-        #             input_tokens[pos, 0] = ref_text_id[0, i]
-        #         else:
-        #             input_tokens[pos, 0] = self.config.tts_pad_token_id
+            # 6a. Reference text tokens (with codec_pad)
+            for i in range(3, ref_text_ids.shape[1] - 2):  # Skip first 3 and last 2 template tokens
+                input_tokens[pos, -1] = ref_text_ids[0, i]
+                input_tokens[pos, 0] = self.config.talker_config.codec_pad_id
+                input_masks[pos, -1] = True
+                pos += 1
 
-        #         # Add all codec codes for this position
-        #         if ref_codes.dim() == 1:
-        #             # Single codebook case
-        #             input_tokens[pos, 1] = ref_codes[i]
-        #         else:
-        #             # Multi-codebook case (T, Q)
-        #             for cb in range(min(ref_codes.shape[1], self.n_codebooks - 1)):
-        #                 input_tokens[pos, cb + 1] = ref_codes[i, cb]
+            # 6b. Synthesis text tokens (with codec_pad)
+            for i in range(3, prompt_ids.shape[1] - 5):  # Skip first 3 and last 5 template tokens
+                input_tokens[pos, -1] = prompt_ids[0, i]
+                input_tokens[pos, 0] = self.config.talker_config.codec_pad_id
+                input_masks[pos, -1] = True
+                pos += 1
 
-        #         input_masks[pos, 0] = True  # needs codec addition
-        #         pos += 1
+            # 6c. tts_eos + codec_pad
+            input_tokens[pos, -1] = self.config.tts_eos_token_id
+            input_tokens[pos, 0] = self.config.talker_config.codec_pad_id
+            input_masks[pos, -1] = True
+            pos += 1
 
-        input_features = torch.zeros(input_tokens.shape[0], self.hidden_size, device=self.device, dtype=torch.bfloat16)
+            # 6d. tts_pad + codec_bos
+            input_tokens[pos, -1] = self.config.tts_pad_token_id
+            input_tokens[pos, 0] = self.config.talker_config.codec_bos_id
+            input_masks[pos, -1] = True
+            pos += 1
+
+            # 6e. Reference audio codes (tts_pad + summed codec embeddings)
+            # Pre-compute the summed codec embeddings (cb1 + cb2 + ... + cb(n-1)) for CUDA graph compatibility
+            # Store in input_features so forward() can just add without conditional branching
+            ref_codes_start_pos = pos
+            for t in range(ref_codes.shape[0]):
+                input_tokens[pos, -1] = self.config.tts_pad_token_id
+                # Store codebook 0 value for this frame (used for codec_embedding in forward)
+                input_tokens[pos, 0] = ref_codes[t, 0].item()
+                input_masks[pos, -1] = True
+                pos += 1
+
+            # Pre-compute summed codec embeddings for ICL positions (codebooks 1 to depth_n_codebooks-1)
+            # This enables CUDA graph compatibility by avoiding conditional branching in forward()
+            with torch.no_grad():
+                ref_codes_tensor = ref_codes.to(self.device)  # (T, depth_n_codebooks)
+                for cb in range(1, self.depth_n_codebooks):
+                    cb_tokens = ref_codes_tensor[:, cb]  # (T,)
+                    cb_embeds = self.model.talker.code_predictor.model.codec_embedding[cb - 1](
+                        cb_tokens
+                    )  # (T, hidden_size)
+                    input_features[ref_codes_start_pos:ref_codes_start_pos + ref_codes.shape[0]] += cb_embeds.to(self.dtype)
+        else:
+            # Custom voice mode or x_vector_only mode
+
+            # 6. Text tokens (with codec_pad)
+            for i in range(3, prompt_ids.shape[1] - 5):
+                input_tokens[pos, -1] = prompt_ids[0, i]
+                input_tokens[pos, 0] = self.config.talker_config.codec_pad_id
+                input_masks[pos, -1] = True
+                pos += 1
+
+            # 7. tts_eos + codec_pad
+            input_tokens[pos, -1] = self.config.tts_eos_token_id
+            input_tokens[pos, 0] = self.config.talker_config.codec_pad_id
+            input_masks[pos, -1] = True
+            pos += 1
+
+            # 8. tts_pad + codec_bos
+            input_tokens[pos, -1] = self.config.tts_pad_token_id
+            input_tokens[pos, 0] = self.config.talker_config.codec_bos_id
+            input_masks[pos, -1] = True
+            pos += 1
 
         # Create repetition cache
         repetition_cache = None
@@ -1596,13 +1721,6 @@ class Qwen3TTSModel(BaseLMWithDepth):
                 dtype=torch.bool,
                 device=self.device,
             )
-
-        text_embeds = self.model.talker.text_projection(
-            self.model.talker.model.text_embedding(input_tokens[:, -1])
-        )  # [batch_size, hidden_size]
-        codec_embeds = self.model.talker.model.codec_embedding(input_tokens[:, 0])  # [batch_size, hidden_size]
-        needs_codec = input_masks[:, -1].unsqueeze(-1)  # [batch_size, 1]
-        inputs_embeds = torch.where(needs_codec, text_embeds + codec_embeds, text_embeds)
 
         return PreprocessOutput(
             input_tokens=input_tokens,
@@ -1632,33 +1750,32 @@ class Qwen3TTSModel(BaseLMWithDepth):
             attn_wrapper: FlashInfer attention wrapper
             kv_cache: KV cache tensor
             input_masks: Token type masks. Shape: (batch_size, n_codebooks)
-                [:, depth_n_codebooks] = False: text only (text_embedding + text_projection)
-                [:, depth_n_codebooks] = True: text + codec
-                (text_projection(text_embedding(col_depth_n_codebooks)) + codec_embedding(col0))
-            input_features: Embeddings for audio tokens codebook 1-(depth_n_codebooks-1) from depth transformer
+                [:, -1] = False: text only (text_embedding + text_projection)
+                [:, -1] = True: text + codec
+            input_features: Pre-computed embeddings (speaker embeddings and ICL codec sums)
             **kwargs: Additional model-specific parameters
 
         Returns:
             Tuple of (logits, hidden_states)
         """
         # Prefill phase: construct embeddings based on input_ids and masks
-        # Text embeddings from column depth_n_codebooks (role tokens, tts_pad, tts_bos, text tokens)
+        # Text embeddings from last column (role tokens, tts_pad, tts_bos, text tokens)
         text_embeds = self.model.talker.text_projection(
             self.model.talker.model.text_embedding(input_ids[:, -1])
         )  # [batch_size, hidden_size]
 
-        # Codec embeddings from column 0 (audio token codebook 0)
-        codec_embeds = self.model.talker.model.codec_embedding(input_ids[:, 0])  # [batch_size, hidden_size]
+        # Codec embeddings from column 0
+        # For ICL positions, input_features already contains the sum of cb1 + cb2 + ... + cb(n-1)
+        # which is computed in preprocess() for CUDA graph compatibility
+        codec_embeds = self.model.talker.model.codec_embedding(input_ids[:, 0])
 
         # Combine based on mask (CUDA graph compatible)
-        # mask[:, depth_n_codebooks] = False: text only
-        # mask[:, depth_n_codebooks] = True: text + codec
+        # mask[:, -1] = False: text only
+        # mask[:, -1] = True: text + codec
         needs_codec = input_masks[:, -1].unsqueeze(-1)  # [batch_size, 1]
-        # input_ids[:, depth_n_codebooks] -> text tokens, talker.model.text_embedding
-        # input_ids[:, 0] -> audio tokens codebook 0, talker.model.codec_embedding
-        # input_features -> audio tokens codebook 1-(depth_n_codebooks-1), talker.code_predictor.model.codec_embedding
         inputs_embeds = torch.where(needs_codec, text_embeds + codec_embeds, text_embeds)
 
+        # Add input_features (contains speaker embeddings for voice cloning positions)
         inputs_embeds = inputs_embeds + input_features
 
         logits, backbone_last_hidden = self.model(

@@ -30,8 +30,14 @@ MODEL_REGISTRY: Dict[str, Type[BaseLM]] = {
     "cosyvoice2": CosyVoice2Model,
     "FunAudioLLM/CosyVoice2-0.5B": CosyVoice2Model,
     "qwen3-tts": Qwen3TTSModel,
-    # TODO: Add actual HuggingFace model path when available
-    # "Qwen/Qwen3-TTS": Qwen3TTSModel,
+    "qwen3-tts-base": Qwen3TTSModel,
+    "qwen3-tts-voice-design": Qwen3TTSModel,
+    "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice": Qwen3TTSModel,
+    "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice": Qwen3TTSModel,
+    "Qwen/Qwen3-TTS-12Hz-1.7B-Base": Qwen3TTSModel,
+    "Qwen/Qwen3-TTS-12Hz-0.6B-Base": Qwen3TTSModel,
+    "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign": Qwen3TTSModel,
+    "Qwen/Qwen3-TTS-12Hz-0.6B-VoiceDesign": Qwen3TTSModel,
 }
 
 

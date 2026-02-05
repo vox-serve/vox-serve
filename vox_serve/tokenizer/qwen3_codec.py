@@ -25,6 +25,8 @@ except ImportError:
 
 from dataclasses import field
 
+from transformers import MimiConfig, MimiModel
+
 
 @dataclass
 class Qwen3TTSTokenizerV2DecoderConfig:
@@ -877,9 +879,11 @@ class Qwen3TTSTokenizerV2Decoder(nn.Module):
         return torch.cat(wavs, dim=-1)
 
 
-class Qwen3TTSTokenizerV2Encoder(nn.Module):
-    def __init__(self, config: Qwen3TTSTokenizerV2EncoderConfig):
-        super().__init__()
+class Qwen3TTSTokenizerV2Encoder(MimiModel):
+    """Encoder based on MimiModel with decoder parts disabled."""
+
+    def __init__(self, config: MimiConfig):
+        super().__init__(config)
         self.config = config
 
         self.upsample = None
@@ -900,7 +904,38 @@ class Qwen3TTSTokenizerV2Model(nn.Module):
         self.decode_upsample_rate = config.decode_upsample_rate
         self.encode_downsample_rate = config.encode_downsample_rate
 
-        self.encoder = Qwen3TTSTokenizerV2Encoder(self.config.encoder_config)
+        # Create MimiConfig from encoder_config for MimiModel-based encoder
+        encoder_cfg = config.encoder_config
+        mimi_config = MimiConfig(
+            audio_channels=encoder_cfg.audio_channels,
+            codebook_dim=encoder_cfg.codebook_dim,
+            codebook_size=encoder_cfg.codebook_size,
+            compress=encoder_cfg.compress,
+            dilation_growth_rate=encoder_cfg.dilation_growth_rate,
+            head_dim=encoder_cfg.head_dim,
+            hidden_size=encoder_cfg.hidden_size,
+            intermediate_size=encoder_cfg.intermediate_size,
+            kernel_size=encoder_cfg.kernel_size,
+            last_kernel_size=encoder_cfg.last_kernel_size,
+            num_filters=encoder_cfg.num_filters,
+            num_hidden_layers=encoder_cfg.num_hidden_layers,
+            num_attention_heads=encoder_cfg.num_attention_heads,
+            num_key_value_heads=encoder_cfg.num_key_value_heads,
+            num_quantizers=encoder_cfg.num_quantizers,
+            num_residual_layers=encoder_cfg.num_residual_layers,
+            pad_mode=encoder_cfg.pad_mode,
+            residual_kernel_size=encoder_cfg.residual_kernel_size,
+            rope_theta=encoder_cfg.rope_theta,
+            sampling_rate=encoder_cfg.sampling_rate,
+            sliding_window=encoder_cfg.sliding_window,
+            trim_right_ratio=encoder_cfg.trim_right_ratio,
+            upsample_groups=encoder_cfg.upsample_groups,
+            upsampling_ratios=encoder_cfg.upsampling_ratios,
+            use_cache=encoder_cfg.use_cache,
+            use_conv_shortcut=encoder_cfg.use_conv_shortcut,
+            vector_quantization_hidden_dimension=encoder_cfg.vector_quantization_hidden_dimension,
+        )
+        self.encoder = Qwen3TTSTokenizerV2Encoder(mimi_config)
         self.decoder = Qwen3TTSTokenizerV2Decoder(self.config.decoder_config)
 
     def get_model_type(self):
@@ -1034,3 +1069,24 @@ class Qwen3TTSDecoder(nn.Module):
 
         # audio_values shape: (batch_size, 1, audio_length) with channel dimension
         return audio_values
+
+    def encode(
+        self,
+        input_values: torch.Tensor,
+        padding_mask: Optional[torch.Tensor] = None,
+    ) -> List[torch.Tensor]:
+        """
+        Encode audio waveform to discrete codes.
+
+        Args:
+            input_values: Tensor of shape (batch_size, sequence_length)
+                         Float values of the input audio waveform at 24kHz.
+            padding_mask: Tensor of shape (batch_size, sequence_length)
+                         Indicates which inputs are to be ignored due to padding,
+                         where elements are either 1 for *not masked* or 0 for *masked*.
+
+        Returns:
+            List of audio codes tensors, each of shape (T, num_quantizers) where T
+            is the sequence length after downsampling (varies per sample based on padding).
+        """
+        return self.model.encode(input_values, padding_mask)
