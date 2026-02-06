@@ -411,6 +411,7 @@ class Scheduler:
                 audio_path=request_dict.get("audio_path") if self.model_worker.supports_audio_input else None,
                 is_streaming=request_dict.get("is_streaming", False),
                 is_pressing=request_dict.get("is_streaming", False), # at first, streaming requests are pressing
+                model_kwargs=request_dict.get("model_kwargs", {}),
             )
 
             self.logger.debug("new_request=%s", new_request)

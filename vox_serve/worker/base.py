@@ -240,7 +240,11 @@ class ModelWorker:
         for req in lm_requests:
             if not req.done_lm_prefill:
                 # prefill request
-                preprocess_output = self.model.preprocess(prompt=req.prompt, audio_path=req.audio_path)
+                preprocess_output = self.model.preprocess(
+                    prompt=req.prompt,
+                    audio_path=req.audio_path,
+                    **req.model_kwargs,
+                )
                 req.input_tokens = preprocess_output.input_tokens
                 # Set input length based on prepared input tokens
                 if req.input_tokens is not None:
