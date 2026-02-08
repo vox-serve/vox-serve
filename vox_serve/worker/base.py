@@ -173,7 +173,7 @@ class ModelWorker:
             2,  # K/V
             self.page_size,
             self.model.num_key_value_heads,  # kv heads
-            self.model.hidden_size // self.model.num_attention_heads,  # head dim
+            self.model.head_dim,
             dtype=torch.bfloat16,
             device="cuda",
         )
@@ -242,10 +242,21 @@ class ModelWorker:
         for req in lm_requests:
             if not req.done_lm_prefill:
                 # prefill request
+                # Validate input streaming support
+                if req.is_input_streaming and not self.model.supports_input_streaming:
+                    raise ValueError(
+                        f"Input streaming is not supported by model {self.model.model_name}. "
+                        f"Only Qwen3-TTS models support input streaming mode."
+                    )
+
+                # Pass is_input_streaming via model_kwargs
+                model_kwargs = req.model_kwargs.copy()
+                if req.is_input_streaming:
+                    model_kwargs["is_input_streaming"] = True
                 preprocess_output = self.model.preprocess(
                     prompt=req.prompt,
                     audio_path=req.audio_path,
-                    **req.model_kwargs,
+                    **model_kwargs,
                 )
                 req.input_tokens = preprocess_output.input_tokens
                 # Set input length based on prepared input tokens
@@ -290,6 +301,10 @@ class ModelWorker:
 
             else:
                 # decode request
+                # For input streaming requests, inject the next text token
+                if req.is_input_streaming:
+                    self._inject_streaming_text_token(req)
+
                 input_ids_list.append(req.input_tokens)  # (1, codebook)
                 input_features_list.append(req.input_features)
                 input_masks_list.append(req.input_masks)
@@ -343,6 +358,40 @@ class ModelWorker:
             "repetition_cache": repetition_cache,
             "is_prefill": is_prefill,
         }
+
+    def _inject_streaming_text_token(self, req: Request) -> None:
+        """
+        For input streaming requests, get the next text token from the pending queue
+        and inject it into req.input_tokens[:, -1] (the text column).
+
+        This is called during decode phase for each input streaming request.
+        Token injection behavior (aligned with Qwen3-TTS reference implementation):
+        - If queue has tokens: inject next token from queue
+        - If queue is empty and text_complete=True and EOS not yet injected: inject EOS token ONCE
+        - After EOS is injected (or if waiting for text): use pad token
+
+        This matches the reference trailing_text_hidden behavior where EOS is added
+        once after all text tokens, then pad is used for remaining steps.
+        """
+        try:
+            next_text_token = req.pending_text_tokens.get_nowait()
+            req.text_token_cursor += 1
+            # Inject into input_tokens - column -1 is text token
+            # input_tokens shape: (1, n_codebooks)
+            req.input_tokens[0, -1] = next_text_token
+        except Exception:
+            # No text available in queue
+            if req.text_complete and not req.eos_injected:
+                # Text input is complete and queue is drained - inject EOS token ONCE
+                # This signals to the model that all text has been received
+                if hasattr(self.model, 'config') and hasattr(self.model.config, 'tts_eos_token_id'):
+                    req.input_tokens[0, -1] = self.model.config.tts_eos_token_id
+                    req.eos_injected = True
+                elif hasattr(self.model, 'config') and hasattr(self.model.config, 'tts_pad_token_id'):
+                    req.input_tokens[0, -1] = self.model.config.tts_pad_token_id
+            # Either waiting for more text, or EOS already injected - use pad token
+            elif hasattr(self.model, 'config') and hasattr(self.model.config, 'tts_pad_token_id'):
+                req.input_tokens[0, -1] = self.model.config.tts_pad_token_id
 
     def run_lm_prefill(self, requests: List[Request], lm_inputs: LMInputs) -> Optional[Coroutine]:
         if len(requests) == 0:

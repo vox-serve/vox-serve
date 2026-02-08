@@ -80,6 +80,11 @@ class BaseLM(ABC):
         pass
 
     @property
+    def head_dim(self) -> int:
+        """Head dimension of the model."""
+        return self.hidden_size // self.num_attention_heads
+
+    @property
     def has_depth_transformer(self) -> bool:
         """Indicates if the model has a depth transformer."""
         return False
@@ -117,6 +122,11 @@ class BaseLM(ABC):
             and self.default_sampling_config.repetition_penalty is not None
             and self.default_sampling_config.repetition_penalty != 1.0
         )
+
+    @property
+    def supports_input_streaming(self) -> bool:
+        """Indicates if the model supports input streaming mode."""
+        return False
 
     def audio_decoder_initial_cache(self, batch_size: int) -> Optional[DecoderCache]:
         """

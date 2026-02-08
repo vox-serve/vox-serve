@@ -2,6 +2,7 @@ from typing import Dict, Type
 
 from .base import Scheduler
 from .disaggregation import DisaggregationScheduler
+from .input_streaming import InputStreamingScheduler
 from .offline import OfflineScheduler
 from .online import OnlineScheduler
 
@@ -11,6 +12,7 @@ SCHEDULER_REGISTRY: Dict[str, Type[Scheduler]] = {
     "online": OnlineScheduler,
     "offline": OfflineScheduler,
     "disaggregation": DisaggregationScheduler,
+    "input_streaming": InputStreamingScheduler,
 }
 
 

@@ -22,9 +22,18 @@
         <main class="main-content">
             <!-- Left Column: TTS + Audio Player (merged) -->
             <section class="left-column">
-                <div class="card tts-card">
-                    <h2>Text-to-Speech</h2>
+                <!-- Tab Navigation -->
+                <div class="tab-nav">
+                    <button class="tab-btn active" data-tab="tts">Text-to-Speech</button>
+                    <button class="tab-btn" data-tab="llm-chat">LLM Chat</button>
+                </div>
 
+                <!-- TTS Tab -->
+                <div class="card tts-card tab-content active" id="tts-tab">
+                    <div class="scheduler-warning hidden" id="tts-scheduler-warning">
+                        This mode requires a non-input_streaming scheduler (base, online, or offline).
+                        Please restart the server with a different scheduler type.
+                    </div>
                     <div class="form-group">
                         <label for="text-input">Text to Synthesize</label>
                         <textarea id="text-input" rows="6" placeholder="Enter text here...">Have you ever seen the cherry blossoms bloom at the University of Washington?</textarea>
@@ -97,6 +106,86 @@
                         </div>
                         <button id="generate-btn" class="btn btn-primary btn-large" disabled>Generate Audio</button>
                         <button id="stop-audio-btn" class="btn btn-secondary" disabled>Stop</button>
+                    </div>
+                </div>
+
+                <!-- LLM Chat Tab -->
+                <div class="card tts-card tab-content" id="llm-chat-tab">
+                    <!-- LLM Configuration -->
+                    <div class="llm-config">
+                        <div class="form-row">
+                            <div class="form-group" style="flex: 2;">
+                                <label for="llm-url">LLM API URL</label>
+                                <input type="text" id="llm-url" placeholder="e.g., http://localhost:1234/v1" value="http://localhost:1234/v1">
+                            </div>
+                            <div class="form-group" style="flex: 1;">
+                                <label for="llm-model">Model</label>
+                                <input type="text" id="llm-model" placeholder="e.g., llama3" value="">
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label for="llm-api-key">API Key (optional)</label>
+                            <input type="text" id="llm-api-key" placeholder="Enter API key if required">
+                        </div>
+                    </div>
+
+                    <!-- Model-specific parameters for LLM Chat -->
+                    <div id="llm-model-params" class="model-params hidden">
+                        <div class="form-row">
+                            <div class="form-group" id="llm-language-group">
+                                <label for="llm-language-input">Language</label>
+                                <select id="llm-language-input">
+                                    <option value="">auto</option>
+                                    <option value="english" selected>English</option>
+                                    <option value="chinese">Chinese</option>
+                                    <option value="japanese">Japanese</option>
+                                    <option value="korean">Korean</option>
+                                    <option value="french">French</option>
+                                    <option value="german">German</option>
+                                    <option value="spanish">Spanish</option>
+                                    <option value="italian">Italian</option>
+                                    <option value="portuguese">Portuguese</option>
+                                    <option value="russian">Russian</option>
+                                </select>
+                            </div>
+                            <div class="form-group" id="llm-speaker-group">
+                                <label for="llm-speaker-input">Speaker</label>
+                                <select id="llm-speaker-input">
+                                    <option value="ryan" selected>ryan</option>
+                                    <option value="aiden">aiden</option>
+                                    <option value="serena">serena</option>
+                                    <option value="vivian">vivian</option>
+                                    <option value="ono_anna">ono_anna</option>
+                                    <option value="sohee">sohee</option>
+                                    <option value="uncle_fu">uncle_fu</option>
+                                    <option value="eric">eric (四川话)</option>
+                                    <option value="dylan">dylan (北京话)</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Chat History -->
+                    <div class="chat-header">
+                        <span class="chat-title">Chat</span>
+                        <button id="clear-chat-btn" class="btn btn-small btn-secondary">Clear</button>
+                    </div>
+                    <div class="chat-container" id="chat-container">
+                        <div class="chat-placeholder">Chat messages will appear here. Type a message below to start.</div>
+                    </div>
+
+                    <!-- Chat Input -->
+                    <div class="chat-input-row">
+                        <input type="text" id="chat-input" placeholder="Type your message...">
+                        <button id="chat-send-btn" class="btn btn-primary">Send</button>
+                        <button id="chat-stop-btn" class="btn btn-secondary" disabled>Stop</button>
+                    </div>
+
+                    <!-- Playback Info for LLM Chat -->
+                    <div class="generate-row" style="margin-top: 0.75rem;">
+                        <div class="playback-info">
+                            <span id="llm-playback-status">⏸️ Idle</span>
+                        </div>
                     </div>
                 </div>
             </section>
@@ -234,9 +323,11 @@
                                     <label for="scheduler-type">Scheduler Type</label>
                                     <select id="scheduler-type">
                                         <option value="base" selected>base</option>
+                                        <option value="input_streaming">input_streaming</option>
                                         <option value="online">online</option>
                                         <option value="offline">offline</option>
                                     </select>
+                                    <small class="form-hint" id="scheduler-hint"></small>
                                 </div>
                                 <div class="form-group">
                                     <label for="dp-size">DP Size</label>

@@ -21,6 +21,12 @@ text-to-speech (TTS) and speech-to-speech (STS) workloads.
 
 .. toctree::
    :maxdepth: 2
+   :caption: Usage Guides
+
+   usage/index
+
+.. toctree::
+   :maxdepth: 2
    :caption: Reference
 
    api

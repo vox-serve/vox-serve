@@ -532,6 +532,93 @@ class APIServer:
 
         return request_id
 
+    def start_input_streaming_request(
+        self,
+        audio_path: str = None,
+        model_kwargs: Dict = None,
+    ) -> str:
+        """Create and enqueue an input streaming request (text will be sent incrementally).
+
+        Args:
+            audio_path: Optional path to input audio for voice cloning.
+            model_kwargs: Optional model-specific parameters (e.g., language, speaker).
+
+        Returns:
+            The request ID used for subsequent text chunks.
+        """
+        request_id = str(uuid.uuid4())
+        self.logger.info(f"Request {request_id} joined for input streaming")
+
+        # Register this request for concurrent processing
+        completion_event = threading.Event()
+        with self.request_lock:
+            self.pending_requests[request_id] = {
+                "chunks": [],
+                "event": completion_event,
+                "streaming": True,
+                "consumed_chunks": 0,
+                "input_streaming": True,  # Mark as input streaming
+            }
+
+        # Send TEXT_STREAM_START message to scheduler
+        # Format: request_id|TEXT_STREAM_START|{json_config}
+        config = {
+            "audio_path": audio_path,
+            "is_streaming": True,
+            "model_kwargs": model_kwargs or {},
+        }
+        message = f"{request_id}|TEXT_STREAM_START|{json.dumps(config)}".encode("utf-8")
+        self._enqueue_request(message)
+
+        return request_id
+
+    def send_text_chunk(self, request_id: str, text: str) -> bool:
+        """Send a text chunk for an input streaming request.
+
+        Args:
+            request_id: Request identifier returned by ``start_input_streaming_request``.
+            text: Text chunk to add to the generation.
+
+        Returns:
+            True if the text was sent successfully.
+
+        Raises:
+            HTTPException: If the request is not found or already completed.
+        """
+        with self.request_lock:
+            request_data = self.pending_requests.get(request_id)
+            if not request_data:
+                raise HTTPException(status_code=404, detail=f"Request {request_id} not found")
+            if request_data["event"].is_set():
+                raise HTTPException(status_code=400, detail=f"Request {request_id} already completed")
+
+        # Send TEXT_UPDATE message to scheduler
+        # Format: request_id|TEXT_UPDATE|text_chunk
+        message = f"{request_id}|TEXT_UPDATE|{text}".encode("utf-8")
+        self._enqueue_request(message)
+        self.logger.debug(f"Sent text chunk for request {request_id}: {len(text)} chars")
+        return True
+
+    def end_input_streaming(self, request_id: str) -> None:
+        """Signal end of text input for an input streaming request.
+
+        Args:
+            request_id: Request identifier returned by ``start_input_streaming_request``.
+
+        Raises:
+            HTTPException: If the request is not found.
+        """
+        with self.request_lock:
+            request_data = self.pending_requests.get(request_id)
+            if not request_data:
+                raise HTTPException(status_code=404, detail=f"Request {request_id} not found")
+
+        # Send TEXT_COMPLETE message to scheduler
+        # Format: request_id|TEXT_COMPLETE|
+        message = f"{request_id}|TEXT_COMPLETE|".encode("utf-8")
+        self._enqueue_request(message)
+        self.logger.info(f"Text input complete for request {request_id}")
+
     async def async_stream_chunks(self, request_id: str):
         """Yield audio chunks for an already enqueued streaming request.
 
@@ -816,6 +903,177 @@ async def generate(
             cleanup_thread.start()
 
 
+# ============================================================================
+# Input Streaming Endpoints
+# ============================================================================
+
+
+@app.post("/generate/stream/start")
+async def start_input_streaming(
+    audio: Optional[UploadFile] = File(None),
+    # Model-specific parameters
+    language: Optional[str] = Form(None),
+    speaker: Optional[str] = Form(None),
+    ref_text: Optional[str] = Form(None),
+    instruct: Optional[str] = Form(None),
+    x_vector_only_mode: Optional[bool] = Form(None),
+):
+    """
+    Start an input streaming request. Text will be sent incrementally via subsequent calls.
+
+    Args:
+        audio: Optional input audio file for voice cloning
+        language: Language code for synthesis (model-specific)
+        speaker: Speaker ID for multi-speaker models
+        ref_text: Reference text for voice cloning
+        instruct: Instruction text for voice design/control
+        x_vector_only_mode: If True, use only speaker embedding without ICL
+
+    Returns:
+        JSON with request_id to use for subsequent text chunks
+    """
+    if api_server is None:
+        raise HTTPException(status_code=503, detail="Server not ready")
+
+    audio_path = None
+    if audio:
+        # Save uploaded audio file
+        audio_filename = f"{uuid.uuid4()}_{audio.filename}"
+        audio_path = str(api_server.upload_dir / audio_filename)
+        content = await audio.read()
+        await run_in_threadpool(Path(audio_path).write_bytes, content)
+
+    # Build model-specific kwargs
+    model_kwargs = {}
+    if language is not None:
+        model_kwargs["language"] = language
+    if speaker is not None:
+        model_kwargs["speaker"] = speaker
+    if ref_text is not None:
+        model_kwargs["ref_text"] = ref_text
+    if instruct is not None:
+        model_kwargs["instruct"] = instruct
+    if x_vector_only_mode is not None:
+        model_kwargs["x_vector_only_mode"] = x_vector_only_mode
+
+    try:
+        request_id = api_server.start_input_streaming_request(audio_path, model_kwargs)
+        return {"request_id": request_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.post("/generate/stream/{request_id}/text")
+async def send_text_chunk(
+    request_id: str,
+    text: str = Form(...),
+):
+    """
+    Send a text chunk for an ongoing input streaming request.
+
+    Args:
+        request_id: Request identifier from start_input_streaming
+        text: Text chunk to add to the generation
+
+    Returns:
+        JSON with status and request_id
+    """
+    if api_server is None:
+        raise HTTPException(status_code=503, detail="Server not ready")
+
+    try:
+        api_server.send_text_chunk(request_id, text)
+        return {"status": "accepted", "request_id": request_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.get("/generate/stream/{request_id}/audio")
+async def stream_audio(request_id: str):
+    """
+    Start streaming audio output for an input streaming request.
+
+    Call this immediately after /start to receive audio chunks as they are generated,
+    while continuing to send text via /text endpoint.
+
+    Args:
+        request_id: Request identifier from start_input_streaming
+
+    Returns:
+        Streaming audio response (WAV format)
+    """
+    if api_server is None:
+        raise HTTPException(status_code=503, detail="Server not ready")
+
+    # Validate request exists
+    with api_server.request_lock:
+        request_data = api_server.pending_requests.get(request_id)
+        if not request_data:
+            raise HTTPException(status_code=404, detail=f"Request {request_id} not found")
+        if not request_data.get("input_streaming"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Request {request_id} is not an input streaming request",
+            )
+
+    async def audio_stream():
+        # WAV header for 24kHz mono 16-bit audio
+        wav_header = io.BytesIO()
+        with wave.open(wav_header, "wb") as wf:
+            wf.setnchannels(1)  # Mono
+            wf.setsampwidth(2)  # 16-bit
+            wf.setframerate(24000)  # 24kHz
+            wf.writeframes(b"")  # Empty data for header
+
+        wav_header.seek(0)
+        header_bytes = wav_header.read()
+        yield header_bytes
+
+        # Stream audio chunks asynchronously
+        async for chunk in api_server.async_stream_chunks(request_id):
+            yield chunk
+
+    return StreamingResponse(
+        audio_stream(),
+        media_type="audio/wav",
+        headers={
+            "Content-Disposition": f"attachment; filename=stream_{request_id[:8]}.wav",
+            "Cache-Control": "no-cache",
+        },
+    )
+
+
+@app.post("/generate/stream/{request_id}/end")
+async def end_input_streaming(request_id: str):
+    """
+    Signal end of text input for an input streaming request.
+
+    This signals that no more text will be sent. If you're using the /audio endpoint
+    to stream audio, that stream will complete after this is called.
+
+    Args:
+        request_id: Request identifier from start_input_streaming
+
+    Returns:
+        JSON confirmation
+    """
+    if api_server is None:
+        raise HTTPException(status_code=503, detail="Server not ready")
+
+    try:
+        # Signal text completion
+        api_server.end_input_streaming(request_id)
+        return {"status": "completed", "request_id": request_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
@@ -864,8 +1122,8 @@ def main():
         "--scheduler-type",
         type=str,
         default="base",
-        choices=["base", "online", "offline"],
-        help="Type of scheduler to use (default: base)",
+        choices=["base", "online", "offline", "input_streaming"],
+        help="Type of scheduler to use (default: base). Use 'input_streaming' for incremental text input.",
     )
     parser.add_argument("--async-scheduling", action="store_true", help="Enable async scheduling mode (default: False)")
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind the server to (default: 0.0.0.0)")

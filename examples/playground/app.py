@@ -9,7 +9,7 @@ from typing import List, Optional
 
 import aiohttp
 import uvicorn
-from fastapi import FastAPI, File, Form, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -175,27 +175,6 @@ async def list_models():
             name="Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
             supports_language=True,
             supports_instruct=True,
-        ),
-        # CustomVoice 0.6B: speaker + language (no instruct for 0.6B)
-        ModelInfo(
-            id="Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
-            name="Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
-            supports_language=True,
-            supports_speaker=True,
-        ),
-        # Base 0.6B: voice cloning with optional audio + ref_text (no instruct)
-        ModelInfo(
-            id="Qwen/Qwen3-TTS-12Hz-0.6B-Base",
-            name="Qwen/Qwen3-TTS-12Hz-0.6B-Base",
-            supports_audio_input=True,
-            supports_language=True,
-            supports_ref_text=True,
-        ),
-        # VoiceDesign 0.6B: language only (no instruct for 0.6B)
-        ModelInfo(
-            id="Qwen/Qwen3-TTS-12Hz-0.6B-VoiceDesign",
-            name="Qwen/Qwen3-TTS-12Hz-0.6B-VoiceDesign",
-            supports_language=True,
         ),
         # Standard models
         ModelInfo(
@@ -397,6 +376,140 @@ async def generate_audio(
             "Cache-Control": "no-cache",
         },
     )
+
+
+# ============================================================================
+# Input Streaming Endpoints (for LLM Chat mode)
+# ============================================================================
+
+
+class InputStreamStartRequest(BaseModel):
+    """Request body for starting an input stream."""
+
+    speaker: Optional[str] = None
+    language: Optional[str] = None
+
+
+class InputStreamStartResponse(BaseModel):
+    """Response from starting an input stream."""
+
+    request_id: str
+
+
+@app.post("/api/input-stream/start", response_model=InputStreamStartResponse)
+async def input_stream_start(
+    speaker: Optional[str] = Form(None),
+    language: Optional[str] = Form(None),
+):
+    """Start an input streaming request to the VoxServe server."""
+    status = server_manager.get_status()
+    if not status.running:
+        raise HTTPException(status_code=400, detail="Server is not running")
+
+    voxserve_url = f"http://localhost:{status.port}/generate/stream/start"
+
+    # Build form data only if we have parameters (matching input_streaming.py)
+    form_data = None
+    if speaker or language:
+        form_data = aiohttp.FormData()
+        if speaker:
+            form_data.add_field("speaker", speaker)
+        if language:
+            form_data.add_field("language", language)
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(voxserve_url, data=form_data) as response:
+            if response.status != 200:
+                error_text = await response.text()
+                raise HTTPException(
+                    status_code=response.status,
+                    detail=f"VoxServe error: {error_text}",
+                )
+            result = await response.json()
+            return InputStreamStartResponse(request_id=result["request_id"])
+
+
+@app.post("/api/input-stream/{request_id}/text")
+async def input_stream_text(
+    request_id: str,
+    text: str = Form(...),
+):
+    """Send a text chunk to the input stream."""
+    status = server_manager.get_status()
+    if not status.running:
+        raise HTTPException(status_code=400, detail="Server is not running")
+
+    voxserve_url = f"http://localhost:{status.port}/generate/stream/{request_id}/text"
+
+    form_data = aiohttp.FormData()
+    form_data.add_field("text", text)
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(voxserve_url, data=form_data) as response:
+            if response.status != 200:
+                error_text = await response.text()
+                raise HTTPException(
+                    status_code=response.status,
+                    detail=f"VoxServe error: {error_text}",
+                )
+            return {"success": True}
+
+
+@app.get("/api/input-stream/{request_id}/audio")
+async def input_stream_audio(request_id: str):
+    """Stream audio chunks as they are generated (concurrent with text input)."""
+    status = server_manager.get_status()
+    if not status.running:
+        raise HTTPException(status_code=400, detail="Server is not running")
+
+    voxserve_url = f"http://localhost:{status.port}/generate/stream/{request_id}/audio"
+
+    async def stream_response():
+        """Stream audio chunks from VoxServe with TTFA prefix."""
+        timeout = aiohttp.ClientTimeout(total=600)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            request_start = time.perf_counter()
+            async with session.get(voxserve_url) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    raise Exception(f"VoxServe error: {response.status} - {error_text}")
+
+                first_chunk = True
+                async for chunk in response.content.iter_any():
+                    if first_chunk:
+                        # Send TTFA prefix before the first chunk
+                        ttfa_ms = int((time.perf_counter() - request_start) * 1000)
+                        yield struct.pack("<I", ttfa_ms)
+                        first_chunk = False
+                    yield chunk
+
+    return StreamingResponse(
+        stream_response(),
+        media_type="audio/wav",
+        headers={
+            "Cache-Control": "no-cache",
+        },
+    )
+
+
+@app.post("/api/input-stream/{request_id}/end")
+async def input_stream_end(request_id: str):
+    """Signal end of text input."""
+    status = server_manager.get_status()
+    if not status.running:
+        raise HTTPException(status_code=400, detail="Server is not running")
+
+    voxserve_url = f"http://localhost:{status.port}/generate/stream/{request_id}/end"
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(voxserve_url) as response:
+            if response.status != 200:
+                error_text = await response.text()
+                raise HTTPException(
+                    status_code=response.status,
+                    detail=f"VoxServe error: {error_text}",
+                )
+            return {"success": True}
 
 
 def main():

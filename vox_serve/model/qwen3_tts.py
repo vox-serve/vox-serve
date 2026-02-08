@@ -1126,6 +1126,11 @@ class Qwen3TTSModel(BaseLMWithDepth):
         return self._hidden_size
 
     @property
+    def head_dim(self) -> int:
+        """Head dimension of the model."""
+        return self.config.talker_config.head_dim
+
+    @property
     def depth_num_attention_heads(self) -> int:
         """Number of attention heads in the model."""
         return self._depth_num_attention_heads
@@ -1229,6 +1234,11 @@ class Qwen3TTSModel(BaseLMWithDepth):
     @property
     def has_depth_transformer(self) -> bool:
         """Indicates if the model has a depth transformer."""
+        return True
+
+    @property
+    def supports_input_streaming(self) -> bool:
+        """Indicates if the model supports input streaming mode."""
         return True
 
     def audio_decoder_initial_cache(self, batch_size: int) -> Optional[Qwen3TTSDecoderCache]:
@@ -1406,6 +1416,7 @@ class Qwen3TTSModel(BaseLMWithDepth):
         instruct = kwargs.get("instruct", None)
         ref_text = kwargs.get("ref_text", None)
         x_vector_only_mode = kwargs.get("x_vector_only_mode", False)
+        is_input_streaming = kwargs.get("is_input_streaming", False)
 
         # Determine the mode based on model type and parameters
         # - voice_design: uses instruct to describe voice, no speaker ID
@@ -1431,6 +1442,15 @@ class Qwen3TTSModel(BaseLMWithDepth):
                 f"Please use 'qwen3-tts-base' or 'Qwen/Qwen3-TTS-12Hz-1.7B-Base' model."
             )
 
+        # Validate input streaming compatibility
+        if is_input_streaming:
+            # ICL mode (voice cloning with ref_codes) is not supported with input streaming
+            if is_voice_clone_mode and audio_path is not None and not x_vector_only_mode:
+                raise ValueError(
+                    "Input streaming is not supported with ICL mode (voice cloning with reference audio). "
+                    "Please use x_vector_only_mode=True or disable input streaming."
+                )
+
         if language is None:
             language = "auto"
 
@@ -1445,7 +1465,12 @@ class Qwen3TTSModel(BaseLMWithDepth):
         if instruct is not None and instruct == "":
             instruct = None
 
-        prompt_tpl = "<|im_start|>assistant\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
+        # For input streaming mode, don't include <|im_end|> - text tokens will be injected during decode
+        # This prevents the model from seeing an early end-of-text signal and generating EOS prematurely
+        if is_input_streaming:
+            prompt_tpl = "<|im_start|>assistant\n{prompt}"
+        else:
+            prompt_tpl = "<|im_start|>assistant\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
         prompt_ids = self.text_tokenizer.encode(
             prompt_tpl.format(prompt=prompt), return_tensors="pt"
         ).to(self.device)
@@ -1554,7 +1579,9 @@ class Qwen3TTSModel(BaseLMWithDepth):
             # Sequence: instruct + role(3) + codec_prefix + speaker_embed + tts_bos +
             #           ref_text + text + tts_eos + codec_bos + ref_codes + tts_pad
             ref_text_len = ref_text_ids.shape[1] - 5 if ref_text_ids is not None else 0  # Remove template tokens
-            text_len = prompt_ids.shape[1] - 8  # Remove template tokens (first 3 and last 5)
+            # For input streaming, text_len is prompt_ids.shape[1] - 3 (only skip role tokens, no trailing template)
+            text_len_offset = 3 if is_input_streaming else 8
+            text_len = prompt_ids.shape[1] - text_len_offset
             ref_codes_len = ref_codes.shape[0]
 
             seq_len = (
@@ -1565,33 +1592,37 @@ class Qwen3TTSModel(BaseLMWithDepth):
                 1 +                  # tts_bos + codec_pad
                 ref_text_len +       # ref_text tokens (with codec_pad)
                 text_len +           # text tokens (with codec_pad)
-                1 +                  # tts_eos + codec_pad
+                (0 if is_input_streaming else 1) +  # tts_eos + codec_pad (skip for input streaming)
                 1 +                  # tts_pad + codec_bos
                 ref_codes_len        # ref_codes positions (tts_pad + summed codec)
             )
         elif is_voice_design_mode:
             # Voice design mode: no speaker token, voice is generated from instruct
+            # For input streaming, text_len is prompt_ids.shape[1] - 3 (only skip role tokens, no trailing template)
+            text_len_offset = 3 if is_input_streaming else 8
             seq_len = (
                 (instruct_ids.shape[1] if instruct_ids is not None else 0) +
                 3 +                  # role tokens
                 len(codec_prefix) +  # codec prefix
                 # NO speaker token for voice design mode
                 1 +                  # tts_bos + codec_pad
-                (prompt_ids.shape[1] - 8) +  # text tokens
-                1 +                  # tts_eos
-                1                    # tts_pad + codec_bos
+                (prompt_ids.shape[1] - text_len_offset) +  # text tokens (for streaming: last text + codec_bos combined)
+                (0 if is_input_streaming else 1) +  # tts_eos (skip for input streaming)
+                (0 if is_input_streaming else 1)   # tts_pad + codec_bos (skip if input stream; codec_bos in last text)
             )
         else:
             # Custom voice mode or x_vector_only mode
+            # For input streaming, text_len is prompt_ids.shape[1] - 3 (only skip role tokens, no trailing template)
+            text_len_offset = 3 if is_input_streaming else 8
             seq_len = (
                 (instruct_ids.shape[1] if instruct_ids is not None else 0) +
                 3 +                  # role tokens
                 len(codec_prefix) +  # codec prefix
                 1 +                  # speaker token (or speaker embedding position)
                 1 +                  # tts_bos + codec_pad
-                (prompt_ids.shape[1] - 8) +  # text tokens
-                1 +                  # tts_eos
-                1                    # tts_pad + codec_bos
+                (prompt_ids.shape[1] - text_len_offset) +  # text tokens (for streaming: last text + codec_bos combined)
+                (0 if is_input_streaming else 1) +  # tts_eos (skip for input streaming)
+                (0 if is_input_streaming else 1)   # tts_pad + codec_bos (skip if input stream; codec_bos in last text)
             )
 
         # Initialize tensors [seq_len, n_codebooks]
@@ -1669,17 +1700,21 @@ class Qwen3TTSModel(BaseLMWithDepth):
                 pos += 1
 
             # 6b. Synthesis text tokens (with codec_pad)
-            for i in range(3, prompt_ids.shape[1] - 5):  # Skip first 3 and last 5 template tokens
+            # For input streaming: extract all text tokens (only skip first 3 role tokens)
+            # For non-streaming: skip first 3 and last 5 template tokens
+            text_end_idx = prompt_ids.shape[1] if is_input_streaming else (prompt_ids.shape[1] - 5)
+            for i in range(3, text_end_idx):
                 input_tokens[pos, -1] = prompt_ids[0, i]
                 input_tokens[pos, 0] = self.config.talker_config.codec_pad_id
                 input_masks[pos, -1] = True
                 pos += 1
 
-            # 6c. tts_eos + codec_pad
-            input_tokens[pos, -1] = self.config.tts_eos_token_id
-            input_tokens[pos, 0] = self.config.talker_config.codec_pad_id
-            input_masks[pos, -1] = True
-            pos += 1
+            # 6c. tts_eos + codec_pad (skip for input streaming - EOS will be added when text is complete)
+            if not is_input_streaming:
+                input_tokens[pos, -1] = self.config.tts_eos_token_id
+                input_tokens[pos, 0] = self.config.talker_config.codec_pad_id
+                input_masks[pos, -1] = True
+                pos += 1
 
             # 6d. tts_pad + codec_bos
             input_tokens[pos, -1] = self.config.tts_pad_token_id
@@ -1712,24 +1747,35 @@ class Qwen3TTSModel(BaseLMWithDepth):
         else:
             # Custom voice mode or x_vector_only mode
 
-            # 6. Text tokens (with codec_pad)
-            for i in range(3, prompt_ids.shape[1] - 5):
+            # 6. Text tokens
+            # For input streaming: extract all text tokens (only skip first 3 role tokens)
+            #   - Last text token uses codec_bos (combined position, aligned with reference)
+            # For non-streaming: skip first 3 and last 5 template tokens, all use codec_pad
+            text_end_idx = prompt_ids.shape[1] if is_input_streaming else (prompt_ids.shape[1] - 5)
+            text_token_count = text_end_idx - 3
+            for idx, i in enumerate(range(3, text_end_idx)):
                 input_tokens[pos, -1] = prompt_ids[0, i]
+                # For input streaming: last text token uses codec_bos (matches reference streaming structure)
+                if is_input_streaming and idx == text_token_count - 1:
+                    input_tokens[pos, 0] = self.config.talker_config.codec_bos_id
+                else:
+                    input_tokens[pos, 0] = self.config.talker_config.codec_pad_id
+                input_masks[pos, -1] = True
+                pos += 1
+
+            # 7. tts_eos + codec_pad (skip for input streaming - EOS will be added when text is complete)
+            if not is_input_streaming:
+                input_tokens[pos, -1] = self.config.tts_eos_token_id
                 input_tokens[pos, 0] = self.config.talker_config.codec_pad_id
                 input_masks[pos, -1] = True
                 pos += 1
 
-            # 7. tts_eos + codec_pad
-            input_tokens[pos, -1] = self.config.tts_eos_token_id
-            input_tokens[pos, 0] = self.config.talker_config.codec_pad_id
-            input_masks[pos, -1] = True
-            pos += 1
-
-            # 8. tts_pad + codec_bos
-            input_tokens[pos, -1] = self.config.tts_pad_token_id
-            input_tokens[pos, 0] = self.config.talker_config.codec_bos_id
-            input_masks[pos, -1] = True
-            pos += 1
+            # 8. tts_pad + codec_bos (skip for input streaming - codec_bos is combined with last text token)
+            if not is_input_streaming:
+                input_tokens[pos, -1] = self.config.tts_pad_token_id
+                input_tokens[pos, 0] = self.config.talker_config.codec_bos_id
+                input_masks[pos, -1] = True
+                pos += 1
 
         # Create repetition cache
         repetition_cache = None
@@ -1887,7 +1933,10 @@ class Qwen3TTSModel(BaseLMWithDepth):
             # column 0 = audio token (codebook 0), column depth_n_codebooks = text token
             req.input_tokens = torch.zeros(1, self.n_codebooks, dtype=torch.long, device=self.device)
             req.input_tokens[0, 0] = output_ids_cb0[i, 0].item()  # Audio token at column 0
-            req.input_tokens[0, -1] = self.config.tts_pad_token_id  # Text token at last column
+            # For input streaming requests, text token will be injected by worker
+            # For non-streaming, use pad token as default
+            if not getattr(req, 'is_input_streaming', False):
+                req.input_tokens[0, -1] = self.config.tts_pad_token_id  # Text token at last column
 
             req.input_masks = torch.ones(self.n_codebooks, dtype=torch.bool, device=self.device)[None, :]
 

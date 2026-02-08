@@ -1750,6 +1750,8 @@ class Qwen3TTSTokenizerV2Model(nn.Module):
                 Indicates which inputs are to be ignored due to padding, where elements are
                 either 1 for *not masked* or 0 for *masked*.
         """
+        # Convert input to encoder dtype (e.g., bfloat16) to match model weights
+        input_values = input_values.to(dtype=self.encoder.dtype)
         encoded_frames = self.encoder.encode(input_values=input_values.unsqueeze(1),
                                              return_dict=True)
         audio_codes = encoded_frames.audio_codes[:, :self.encoder_valid_num_quantizers]

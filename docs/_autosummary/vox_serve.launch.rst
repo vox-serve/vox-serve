@@ -1,4 +1,4 @@
-vox\_serve.launch
+﻿vox\_serve.launch
 =================
 
 .. automodule:: vox_serve.launch
@@ -8,11 +8,15 @@ vox\_serve.launch
 
    .. autosummary::
    
+      end_input_streaming
       generate
       health_check
       main
+      send_text_chunk
       shutdown_event
       signal_handler
+      start_input_streaming
+      stream_audio
    
    .. rubric:: Classes
 
