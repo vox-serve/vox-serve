@@ -8,7 +8,7 @@ or a custom codec specific to Qwen3 TTS.
 import json
 import math
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -26,6 +26,62 @@ except ImportError:
 from dataclasses import field
 
 from transformers import MimiConfig, MimiModel
+
+from .base import DecoderCache
+
+
+@dataclass
+class Qwen3TTSDecoderCache(DecoderCache):
+    """Cache for Qwen3 TTS decoder streaming inference.
+
+    This cache stores:
+    1. Attention KV cache for transformer layers (strict sliding window of 72 tokens)
+    2. Causal conv activation caches for all convolution layers
+    3. Pre-allocated work buffers for CUDA graph compatibility
+    """
+
+    # Attention KV cache for transformer layers
+    # Shape: [batch, num_layers, num_heads, cache_len, 2 * head_dim]
+    # Keys and values are concatenated in the last dimension
+    attention_cache: Optional[torch.Tensor] = None
+
+    # Position offset for RoPE (tracks cumulative processed tokens)
+    # Stored as a 1-element tensor for in-place update compatibility
+    position_offset: Optional[torch.Tensor] = None
+
+    # pre_conv cache: [batch, channels, kernel_size-1]
+    pre_conv_cache: Optional[torch.Tensor] = None
+
+    # ConvNeXt caches for upsample blocks (list of 2)
+    # Each: [batch, channels, kernel_size-1]
+    upsample_conv_caches: Optional[List[torch.Tensor]] = None
+
+    # Decoder conv caches - flat list structure
+    # Index 0: initial conv cache
+    # Index 1-12: 4 blocks × 3 residual units (only conv1 of each residual unit)
+    # Index 13: final conv cache
+    decoder_conv_caches: Optional[List[torch.Tensor]] = None
+
+    # Work buffers for CUDA graph compatibility (avoid torch.cat allocations)
+    # Each buffer: [batch, channels, padding + input_length]
+    pre_conv_work_buffer: Optional[torch.Tensor] = None
+    upsample_work_buffers: Optional[List[torch.Tensor]] = None
+    decoder_work_buffers: Optional[List[torch.Tensor]] = None
+
+    # Output buffers for CUDA graph compatibility (avoid conv output allocations)
+    # Each buffer: [batch, out_channels, output_length]
+    pre_conv_output_buffer: Optional[torch.Tensor] = None
+    upsample_output_buffers: Optional[List[torch.Tensor]] = None
+    decoder_output_buffers: Optional[List[torch.Tensor]] = None
+
+    # TransConvNet caches for streaming - stores last input sample at each stage
+    # Each: [batch, in_channels, 1]
+    # 4 caches for decoder TransConvNet stages (rates 8, 5, 4, 3)
+    transconv_caches: Optional[List[torch.Tensor]] = None
+
+    # TransConvNet work buffers - pre-allocated for context + input
+    # Each: [batch, in_channels, 1 + input_length]
+    transconv_work_buffers: Optional[List[torch.Tensor]] = None
 
 
 @dataclass
@@ -215,20 +271,130 @@ class Qwen3TTSTokenizerV2CausalConvNet(nn.Module):
         hidden_state = F.pad(hidden_state, (self.padding, extra_padding), mode="constant", value=0)
         return self.conv(hidden_state).contiguous()
 
+    def forward_chunk(
+        self,
+        hidden_state: torch.Tensor,
+        conv_cache: Optional[torch.Tensor] = None,
+        work_buffer: Optional[torch.Tensor] = None,
+        output_buffer: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Forward with caching for streaming inference.
+
+        Uses in-place operations and pre-allocated buffers for CUDA graph compatibility.
+
+        Args:
+            hidden_state: [batch, channels, new_length]
+            conv_cache: [batch, channels, padding] - pre-allocated buffer
+            work_buffer: [batch, channels, padding + max_input_length] - pre-allocated work buffer
+                        If None, will create one (not CUDA graph compatible)
+            output_buffer: [batch, out_channels, max_output_length] - pre-allocated output buffer
+                          If None, will allocate new tensor (not CUDA graph compatible)
+
+        Returns:
+            output: [batch, out_channels, new_length] (same temporal length as input)
+            conv_cache: Same buffer, updated in-place
+        """
+        batch_size = hidden_state.shape[0]
+        in_channels = hidden_state.shape[1]
+        new_length = hidden_state.shape[2]
+
+        # Initialize cache with zeros if not provided
+        if conv_cache is None:
+            conv_cache = hidden_state.new_zeros(batch_size, in_channels, self.padding)
+
+        if self.padding > 0:
+            total_length = self.padding + new_length
+
+            if work_buffer is not None:
+                # Use pre-allocated work buffer (CUDA graph compatible)
+                # Copy cache and input into work buffer
+                work_buffer[:batch_size, :, :self.padding].copy_(conv_cache)
+                work_buffer[:batch_size, :, self.padding:total_length].copy_(hidden_state)
+                hidden_with_cache = work_buffer[:batch_size, :, :total_length]
+            else:
+                # Fallback to torch.cat (not CUDA graph compatible)
+                hidden_with_cache = torch.cat([conv_cache, hidden_state], dim=2)
+
+            # Update cache IN-PLACE with the last `padding` elements
+            if new_length >= self.padding:
+                conv_cache.copy_(hidden_state[:, :, -self.padding:])
+            else:
+                keep_len = self.padding - new_length
+                conv_cache[:, :, :keep_len].copy_(conv_cache[:, :, -keep_len:].clone())
+                conv_cache[:, :, keep_len:].copy_(hidden_state)
+        else:
+            hidden_with_cache = hidden_state
+
+        # Apply convolution
+        conv_output = self.conv(hidden_with_cache)
+
+        # Copy to output buffer if provided (CUDA graph compatible)
+        if output_buffer is not None:
+            output_len = conv_output.shape[2]
+            output_buffer[:batch_size, :, :output_len].copy_(conv_output)
+            output = output_buffer[:batch_size, :, :output_len]
+        else:
+            output = conv_output
+
+        # Return the same cache buffer (updated in-place)
+        return output, conv_cache
+
 
 class Qwen3TTSTokenizerV2CausalTransConvNet(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, stride=1):
         super().__init__()
         self.conv = nn.ConvTranspose1d(in_channels, out_channels, kernel_size, stride=stride)
+        self.stride = stride
 
         pad = kernel_size - stride
         self.left_pad = math.ceil(pad)
         self.right_pad = pad = self.left_pad
 
     def forward(self, hidden_state):
+        """Batch forward - trims both left and right padding."""
         hidden_state = self.conv(hidden_state)
         hidden_state = hidden_state[..., self.left_pad : hidden_state.shape[-1] - self.right_pad]
         return hidden_state.contiguous()
+
+    def forward_chunk(
+        self,
+        hidden_state: torch.Tensor,
+        cache: torch.Tensor,
+        work_buffer: torch.Tensor,
+    ) -> torch.Tensor:
+        """Streaming forward with input caching for proper boundary blending.
+
+        This method caches the last input sample and prepends it to the next chunk.
+        This allows proper blending at the left edge of each chunk. The right edge
+        is trimmed as usual (no future context available in streaming).
+
+        Args:
+            hidden_state: [batch, in_channels, length] - new input samples
+            cache: [batch, in_channels, 1] - last input sample from previous chunk
+                   (zeros for first chunk, updated in-place)
+            work_buffer: [batch, in_channels, 1 + length] - pre-allocated buffer
+
+        Returns:
+            output: [batch, out_channels, length * stride] - exactly stride samples per input
+        """
+        length = hidden_state.shape[-1]
+
+        # Populate work buffer: [cache, new_input]
+        work_buffer[:, :, 0:1].copy_(cache)
+        work_buffer[:, :, 1:1 + length].copy_(hidden_state)
+
+        # ConvTranspose1d on combined input (length + 1 samples)
+        # Output shape: [batch, out_channels, length * stride + kernel]
+        raw_output = self.conv(work_buffer[:, :, :1 + length])
+
+        # Update cache in-place with last input sample (for next chunk)
+        cache.copy_(hidden_state[:, :, -1:])
+
+        # Trim: left stride (context-only contribution), right (kernel - stride)
+        # Output shape: [batch, out_channels, length * stride]
+        output = raw_output[:, :, self.stride : self.stride + length * self.stride]
+
+        return output.contiguous()
 
 
 class Qwen3TTSTokenizerV2ConvNeXtBlock(nn.Module):
@@ -264,6 +430,42 @@ class Qwen3TTSTokenizerV2ConvNeXtBlock(nn.Module):
         hidden_states = input + hidden_states
 
         return hidden_states
+
+    def forward_chunk(
+        self,
+        hidden_states: torch.Tensor,
+        conv_cache: Optional[torch.Tensor] = None,
+        work_buffer: Optional[torch.Tensor] = None,
+        output_buffer: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Forward with caching for streaming inference.
+
+        Args:
+            hidden_states: [batch, channels, length]
+            conv_cache: [batch, channels, padding] for dwconv or None
+            work_buffer: [batch, channels, padding + length] for CUDA graph compatibility
+            output_buffer: [batch, channels, length] for dwconv output (CUDA graph compatible)
+
+        Returns:
+            output: [batch, channels, length]
+            conv_cache: Same buffer, updated in-place
+        """
+        residual = hidden_states
+
+        hidden_states, _ = self.dwconv.forward_chunk(hidden_states, conv_cache, work_buffer, output_buffer)
+        hidden_states = hidden_states.permute(0, 2, 1)
+        hidden_states = self.norm(hidden_states)
+        hidden_states = self.pwconv1(hidden_states)
+        hidden_states = self.act(hidden_states)
+        hidden_states = self.pwconv2(hidden_states)
+
+        hidden_states = self.gamma * hidden_states
+
+        hidden_states = hidden_states.permute(0, 2, 1)
+
+        hidden_states = residual + hidden_states
+
+        return hidden_states, conv_cache
 
 
 class Qwen3TTSTokenizerV2DecoderRotatoryEmbedding(nn.Module):
@@ -367,6 +569,120 @@ class Qwen3TTSTokenizerV2DecoderAttention(nn.Module):
         attn_output = attn_output.transpose(1, 2).contiguous().reshape(*input_shape, -1)
         attn_output = self.o_proj(attn_output)
         return attn_output, None
+
+    def forward_chunk(
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: Tuple[torch.Tensor, torch.Tensor],
+        kv_cache: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Forward with KV caching for streaming inference.
+
+        Uses in-place operations for CUDA graph compatibility and memory efficiency.
+
+        Args:
+            hidden_states: [batch, seq_len, hidden_size]
+            position_embeddings: (cos, sin) from rotary embedding
+            kv_cache: [batch, num_heads, sliding_window, 2*head_dim] - pre-allocated buffer
+
+        Returns:
+            attn_output: [batch, seq_len, hidden_size]
+            kv_cache: Same buffer, updated in-place
+        """
+        batch_size, seq_len, _ = hidden_states.shape
+        num_heads = self.config.num_attention_heads
+        num_kv_heads = self.config.num_key_value_heads
+
+        # Project Q, K, V
+        query_states = self.q_norm(self.q_proj(hidden_states))
+        query_states = query_states.view(batch_size, seq_len, num_heads, self.head_dim).transpose(1, 2)
+
+        key_states = self.k_norm(self.k_proj(hidden_states))
+        key_states = key_states.view(batch_size, seq_len, num_kv_heads, self.head_dim).transpose(1, 2)
+
+        value_states = self.v_proj(hidden_states)
+        value_states = value_states.view(batch_size, seq_len, num_kv_heads, self.head_dim).transpose(1, 2)
+
+        # Apply RoPE to new Q, K
+        cos, sin = position_embeddings
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+
+        if kv_cache is not None:
+            # kv_cache: [batch, num_kv_heads, sliding_window, 2*head_dim]
+            # Update cache IN-PLACE for CUDA graph compatibility
+            # Shift left by seq_len and copy new values to the end
+            if seq_len < self.sliding_window:
+                # Shift existing cache left
+                kv_cache[:, :, :-seq_len, :].copy_(kv_cache[:, :, seq_len:, :])
+                # Copy new keys and values to the end
+                kv_cache[:, :, -seq_len:, :self.head_dim].copy_(key_states)
+                kv_cache[:, :, -seq_len:, self.head_dim:].copy_(value_states)
+            else:
+                # seq_len >= sliding_window: just use the last sliding_window tokens
+                kv_cache[:, :, :, :self.head_dim].copy_(key_states[:, :, -self.sliding_window:, :])
+                kv_cache[:, :, :, self.head_dim:].copy_(value_states[:, :, -self.sliding_window:, :])
+
+            # Read back full K/V from cache for attention
+            full_key_states = kv_cache[:, :, :, :self.head_dim]
+            full_value_states = kv_cache[:, :, :, self.head_dim:]
+        else:
+            # No cache - just use current K/V
+            full_key_states = key_states
+            full_value_states = value_states
+
+        # Expand KV for GQA if needed
+        if self.num_key_value_groups > 1:
+            full_key_states = full_key_states.repeat_interleave(self.num_key_value_groups, dim=1)
+            full_value_states = full_value_states.repeat_interleave(self.num_key_value_groups, dim=1)
+
+        # Compute attention with causal mask
+        kv_len = full_key_states.shape[2]
+        attn_output = F.scaled_dot_product_attention(
+            query_states,
+            full_key_states,
+            full_value_states,
+            is_causal=(kv_cache is None),  # Only use built-in causal for first chunk
+            attn_mask=None if kv_cache is None else self._create_chunk_causal_mask(
+                seq_len, kv_len, hidden_states.device, hidden_states.dtype
+            ),
+        )
+
+        attn_output = attn_output.transpose(1, 2).contiguous()
+        attn_output = attn_output.view(batch_size, seq_len, -1)
+        attn_output = self.o_proj(attn_output)
+
+        # Return the same cache buffer (updated in-place)
+        return attn_output, kv_cache
+
+    def _create_chunk_causal_mask(
+        self,
+        query_len: int,
+        kv_len: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """Create causal attention mask for chunked inference.
+
+        Each query position i can attend to KV positions 0 to (kv_len - query_len + i).
+        """
+        # Query positions: 0 to query_len-1
+        # KV positions: 0 to kv_len-1
+        # Query position i corresponds to absolute position (kv_len - query_len + i)
+        # It can attend to KV positions 0 to (kv_len - query_len + i)
+        q_positions = torch.arange(query_len, device=device)
+        kv_positions = torch.arange(kv_len, device=device)
+
+        # Absolute position of each query
+        abs_q_positions = kv_len - query_len + q_positions
+
+        # Create mask: query i can attend to kv j if j <= abs_q_positions[i]
+        mask = kv_positions.unsqueeze(0) <= abs_q_positions.unsqueeze(1)
+
+        # Convert to float mask for scaled_dot_product_attention
+        attn_mask = torch.zeros(query_len, kv_len, dtype=dtype, device=device)
+        attn_mask.masked_fill_(~mask, float("-inf"))
+
+        return attn_mask
 
 
 class Qwen3TTSTokenizerV2DecoderMlp(nn.Module):
@@ -479,6 +795,43 @@ class Qwen3TTSTokenizerV2DecoderTransformerLayer(nn.Module):
 
         return hidden_states
 
+    def forward_chunk(
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: Tuple[torch.Tensor, torch.Tensor],
+        kv_cache: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Forward with KV caching for streaming inference.
+
+        Args:
+            hidden_states: [batch, seq_len, hidden_size]
+            position_embeddings: (cos, sin) from rotary embedding
+            kv_cache: [batch, num_heads, cache_len, 2*head_dim] or None
+
+        Returns:
+            output: [batch, seq_len, hidden_size]
+            new_kv_cache: [batch, num_heads, new_cache_len, 2*head_dim]
+        """
+        residual = hidden_states
+
+        hidden_states = self.input_layernorm(hidden_states)
+
+        # Self Attention with KV caching
+        hidden_states, new_kv_cache = self.self_attn.forward_chunk(
+            hidden_states=hidden_states,
+            position_embeddings=position_embeddings,
+            kv_cache=kv_cache,
+        )
+        hidden_states = residual + self.self_attn_layer_scale(hidden_states)
+
+        # Fully Connected (no caching needed)
+        residual = hidden_states
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states = self.mlp(hidden_states)
+        hidden_states = residual + self.mlp_layer_scale(hidden_states)
+
+        return hidden_states, new_kv_cache
+
 
 class Qwen3TTSTokenizerV2DecoderTransformerModel(nn.Module):
     _can_record_outputs = {
@@ -558,6 +911,66 @@ class Qwen3TTSTokenizerV2DecoderTransformerModel(nn.Module):
         hidden_states = self.output_proj(hidden_states)
         return hidden_states
 
+    def forward_chunk(
+        self,
+        inputs_embeds: torch.Tensor,
+        position_offset: Union[int, torch.Tensor] = 0,
+        attention_cache: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Forward with KV caching for streaming inference.
+
+        Args:
+            inputs_embeds: [batch, seq_len, latent_dim]
+            position_offset: Starting position index for RoPE (int or 1-element tensor)
+            attention_cache: [batch, num_layers, num_heads, cache_len, 2*head_dim] or None
+
+        Returns:
+            output: [batch, seq_len, latent_dim]
+            new_attention_cache: [batch, num_layers, num_heads, new_cache_len, 2*head_dim]
+            new_position_offset: Updated position offset as 1-element tensor
+        """
+        batch_size, seq_len, _ = inputs_embeds.shape
+        num_layers = self.config.num_hidden_layers
+
+        inputs_embeds = self.input_proj(inputs_embeds)
+
+        # Ensure position_offset is a tensor for CUDA graph compatibility
+        if not torch.is_tensor(position_offset):
+            position_offset = torch.tensor([position_offset], dtype=torch.long, device=inputs_embeds.device)
+
+        # Create position IDs with offset using tensor operations (CUDA graph compatible)
+        # Create base range [0, 1, 2, ..., seq_len-1] and add offset
+        base_positions = torch.arange(seq_len, device=inputs_embeds.device, dtype=torch.long)
+        position_ids = (base_positions + position_offset).unsqueeze(0).expand(batch_size, -1)
+
+        hidden_states = inputs_embeds
+
+        # Create position embeddings
+        position_embeddings = self.rotary_emb(hidden_states, position_ids)
+
+        # Process through layers with per-layer KV cache
+        # The per-layer caches are views into attention_cache and are updated in-place
+        for i, decoder_layer in enumerate(self.layers[:num_layers]):
+            # Extract per-layer cache (this is a view, updates happen in-place)
+            layer_kv_cache = None
+            if attention_cache is not None:
+                layer_kv_cache = attention_cache[:, i]
+
+            hidden_states, _ = decoder_layer.forward_chunk(
+                hidden_states=hidden_states,
+                position_embeddings=position_embeddings,
+                kv_cache=layer_kv_cache,
+            )
+
+        hidden_states = self.norm(hidden_states)
+        hidden_states = self.output_proj(hidden_states)
+
+        # Update position offset using tensor operations (CUDA graph compatible)
+        new_position_offset = position_offset + seq_len
+
+        # Return original attention_cache (updated in-place)
+        return hidden_states, attention_cache, new_position_offset
+
 
 class SnakeBeta(nn.Module):
     """
@@ -618,6 +1031,37 @@ class Qwen3TTSTokenizerV2DecoderDecoderResidualUnit(nn.Module):
         hidden_state = self.conv2(hidden_state)
         return hidden_state + residual
 
+    def forward_chunk(
+        self,
+        hidden_state: torch.Tensor,
+        conv_cache: Optional[torch.Tensor] = None,
+        work_buffer: Optional[torch.Tensor] = None,
+        output_buffer: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Forward with caching for streaming inference.
+
+        Only conv1 needs caching (kernel_size=7 with dilation).
+        conv2 has kernel_size=1, so no cache needed.
+
+        Args:
+            hidden_state: [batch, channels, length]
+            conv_cache: [batch, channels, padding] for conv1 or None
+            work_buffer: [batch, channels, padding + length] for CUDA graph compatibility
+            output_buffer: [batch, channels, length] for conv1 output (CUDA graph compatible)
+
+        Returns:
+            output: [batch, channels, length]
+            conv_cache: Same buffer, updated in-place
+        """
+        residual = hidden_state
+
+        hidden_state = self.act1(hidden_state)
+        hidden_state, _ = self.conv1.forward_chunk(hidden_state, conv_cache, work_buffer, output_buffer)
+        hidden_state = self.act2(hidden_state)
+        hidden_state = self.conv2(hidden_state)  # kernel_size=1, no cache needed
+
+        return hidden_state + residual, conv_cache
+
 
 class Qwen3TTSTokenizerV2DecoderDecoderBlock(nn.Module):
     def __init__(self, config: Qwen3TTSTokenizerV2DecoderConfig, layer_idx):
@@ -640,6 +1084,56 @@ class Qwen3TTSTokenizerV2DecoderDecoderBlock(nn.Module):
         for block in self.block:
             hidden = block(hidden)
         return hidden
+
+    def forward_chunk(
+        self,
+        hidden: torch.Tensor,
+        conv_caches: Optional[List[torch.Tensor]] = None,
+        work_buffers: Optional[List[torch.Tensor]] = None,
+        output_buffers: Optional[List[torch.Tensor]] = None,
+        transconv_cache: Optional[torch.Tensor] = None,
+        transconv_work_buffer: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, List[torch.Tensor]]:
+        """Forward with caching for streaming inference.
+
+        Args:
+            hidden: [batch, channels, length]
+            conv_caches: List of 3 conv caches for the 3 ResidualUnits or None
+            work_buffers: List of 3 work buffers for CUDA graph compatibility
+            output_buffers: List of 3 output buffers for CUDA graph compatibility
+            transconv_cache: [batch, in_channels, 1] - TransConvNet input cache
+            transconv_work_buffer: [batch, in_channels, 1 + length] - TransConvNet work buffer
+
+        Returns:
+            output: [batch, out_channels, upsampled_length]
+            conv_caches: Same list of caches, updated in-place
+        """
+        if conv_caches is None:
+            conv_caches = [None, None, None]
+        if work_buffers is None:
+            work_buffers = [None, None, None]
+        if output_buffers is None:
+            output_buffers = [None, None, None]
+
+        cache_idx = 0
+
+        for block in self.block:
+            if isinstance(block, Qwen3TTSTokenizerV2DecoderDecoderResidualUnit):
+                hidden, _ = block.forward_chunk(
+                    hidden,
+                    conv_caches[cache_idx],
+                    work_buffers[cache_idx],
+                    output_buffers[cache_idx],
+                )
+                cache_idx += 1
+            elif isinstance(block, Qwen3TTSTokenizerV2CausalTransConvNet):
+                # CausalTransConvNet with input caching for proper boundary blending
+                hidden = block.forward_chunk(hidden, transconv_cache, transconv_work_buffer)
+            else:
+                # SnakeBeta - no caching
+                hidden = block(hidden)
+
+        return hidden, conv_caches
 
 
 class EuclideanCodebook(nn.Module):
@@ -878,6 +1372,278 @@ class Qwen3TTSTokenizerV2Decoder(nn.Module):
             start_index = end_index
         return torch.cat(wavs, dim=-1)
 
+    @torch.no_grad()
+    def init_cache(
+        self,
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        detokenize_interval: int = 10,
+    ) -> "Qwen3TTSDecoderCache":
+        """Initialize empty cache for streaming inference.
+
+        Args:
+            batch_size: Number of items in batch
+            device: Device to create tensors on
+            dtype: Data type for tensors
+            detokenize_interval: Number of tokens processed per chunk (for work buffer sizing)
+
+        Returns:
+            Qwen3TTSDecoderCache with all fields initialized to zeros
+        """
+        # Track sequence length at each stage for buffer allocation
+        seq_len = detokenize_interval
+
+        # Pre-conv cache, work buffer, and output buffer
+        pre_conv_cache = torch.zeros(
+            batch_size, self.config.codebook_dim, self.pre_conv.padding,
+            device=device, dtype=dtype
+        )
+        pre_conv_work_buffer = torch.zeros(
+            batch_size, self.config.codebook_dim, self.pre_conv.padding + seq_len,
+            device=device, dtype=dtype
+        )
+        pre_conv_output_buffer = torch.zeros(
+            batch_size, self.pre_conv.conv.out_channels, seq_len,
+            device=device, dtype=dtype
+        )
+
+        # Upsample ConvNeXt caches, work buffers, and output buffers
+        upsample_conv_caches = []
+        upsample_work_buffers = []
+        upsample_output_buffers = []
+        for blocks in self.upsample:
+            for block in blocks:
+                if isinstance(block, Qwen3TTSTokenizerV2CausalTransConvNet):
+                    # TransConvNet upsamples the sequence
+                    stride = block.conv.stride[0] if isinstance(block.conv.stride, tuple) else block.conv.stride
+                    seq_len = seq_len * stride
+                elif isinstance(block, Qwen3TTSTokenizerV2ConvNeXtBlock):
+                    upsample_conv_caches.append(
+                        torch.zeros(
+                            batch_size, self.config.latent_dim, block.dwconv.padding,
+                            device=device, dtype=dtype
+                        )
+                    )
+                    upsample_work_buffers.append(
+                        torch.zeros(
+                            batch_size, self.config.latent_dim, block.dwconv.padding + seq_len,
+                            device=device, dtype=dtype
+                        )
+                    )
+                    # ConvNeXt output has same shape as input (residual connection)
+                    upsample_output_buffers.append(
+                        torch.zeros(
+                            batch_size, self.config.latent_dim, seq_len,
+                            device=device, dtype=dtype
+                        )
+                    )
+
+        # Decoder conv caches, work buffers, and output buffers
+        decoder_conv_caches = []
+        decoder_work_buffers = []
+        decoder_output_buffers = []
+
+        # TransConvNet caches and work buffers (4 stages for rates 8, 5, 4, 3)
+        # Each cache stores the last input sample: [batch, in_channels, 1]
+        # Each work buffer holds context + input: [batch, in_channels, 1 + seq_len]
+        transconv_caches = []
+        transconv_work_buffers = []
+
+        for block in self.decoder:
+            if isinstance(block, Qwen3TTSTokenizerV2CausalConvNet):
+                # Initial conv or final conv
+                in_channels = block.conv.in_channels
+                out_channels = block.conv.out_channels
+                decoder_conv_caches.append(
+                    torch.zeros(batch_size, in_channels, block.padding, device=device, dtype=dtype)
+                )
+                decoder_work_buffers.append(
+                    torch.zeros(batch_size, in_channels, block.padding + seq_len, device=device, dtype=dtype)
+                )
+                decoder_output_buffers.append(
+                    torch.zeros(batch_size, out_channels, seq_len, device=device, dtype=dtype)
+                )
+            elif isinstance(block, Qwen3TTSTokenizerV2DecoderDecoderBlock):
+                # Each DecoderBlock has ResidualUnits and possibly TransConvNet for upsampling
+                for res_unit in block.block:
+                    if isinstance(res_unit, Qwen3TTSTokenizerV2CausalTransConvNet):
+                        # Allocate TransConvNet cache and work buffer BEFORE upsampling
+                        in_channels = res_unit.conv.in_channels
+                        transconv_caches.append(
+                            torch.zeros(batch_size, in_channels, 1, device=device, dtype=dtype)
+                        )
+                        transconv_work_buffers.append(
+                            torch.zeros(batch_size, in_channels, 1 + seq_len, device=device, dtype=dtype)
+                        )
+                        # Now upsample: output length = input * stride
+                        stride = res_unit.conv.stride[0] if isinstance(res_unit.conv.stride, tuple) else res_unit.conv.stride
+                        seq_len = seq_len * stride
+                    elif isinstance(res_unit, Qwen3TTSTokenizerV2DecoderDecoderResidualUnit):
+                        # Only conv1 needs cache (conv2 has kernel_size=1)
+                        in_channels = res_unit.conv1.conv.in_channels
+                        decoder_conv_caches.append(
+                            torch.zeros(batch_size, in_channels, res_unit.conv1.padding, device=device, dtype=dtype)
+                        )
+                        decoder_work_buffers.append(
+                            torch.zeros(batch_size, in_channels, res_unit.conv1.padding + seq_len, device=device, dtype=dtype)
+                        )
+                        # ResidualUnit output has same shape as input (residual connection)
+                        decoder_output_buffers.append(
+                            torch.zeros(batch_size, in_channels, seq_len, device=device, dtype=dtype)
+                        )
+
+        # Pre-allocate attention cache with zeros
+        num_layers = self.config.num_hidden_layers
+        num_heads = self.config.num_key_value_heads
+        head_dim = getattr(
+            self.config, "head_dim",
+            self.config.hidden_size // self.config.num_attention_heads
+        )
+        sliding_window = self.config.sliding_window
+
+        attention_cache = torch.zeros(
+            batch_size, num_layers, num_heads, sliding_window, 2 * head_dim,
+            device=device, dtype=dtype
+        )
+
+        # Position offset as 1-element tensor for in-place updates
+        position_offset = torch.zeros(1, dtype=torch.long, device=device)
+
+        return Qwen3TTSDecoderCache(
+            attention_cache=attention_cache,
+            position_offset=position_offset,
+            pre_conv_cache=pre_conv_cache,
+            upsample_conv_caches=upsample_conv_caches,
+            decoder_conv_caches=decoder_conv_caches,
+            pre_conv_work_buffer=pre_conv_work_buffer,
+            upsample_work_buffers=upsample_work_buffers,
+            decoder_work_buffers=decoder_work_buffers,
+            pre_conv_output_buffer=pre_conv_output_buffer,
+            upsample_output_buffers=upsample_output_buffers,
+            decoder_output_buffers=decoder_output_buffers,
+            transconv_caches=transconv_caches,
+            transconv_work_buffers=transconv_work_buffers,
+        )
+
+    def forward_chunk(
+        self,
+        codes: torch.Tensor,
+        decoder_cache: Optional["Qwen3TTSDecoderCache"] = None,
+    ) -> Tuple[torch.Tensor, "Qwen3TTSDecoderCache"]:
+        """Forward with caching for streaming inference.
+
+        Args:
+            codes: [batch, num_quantizers, chunk_length]
+            decoder_cache: Previous cache or None for first chunk
+
+        Returns:
+            wav: [batch, 1, audio_length]
+            new_cache: Updated cache for next chunk
+        """
+        if codes.shape[1] != self.config.num_quantizers:
+            raise ValueError(f"Expected {self.config.num_quantizers} layer of codes, got {codes.shape[1]}")
+
+        batch_size = codes.shape[0]
+        device = codes.device
+
+        # Initialize cache if not provided
+        if decoder_cache is None:
+            decoder_cache = self.init_cache(batch_size, device, torch.float32)
+
+        # Quantizer decode (no caching needed)
+        hidden = self.quantizer.decode(codes)
+
+        # Pre-conv with caching, work buffer, and output buffer
+        hidden, _ = self.pre_conv.forward_chunk(
+            hidden,
+            decoder_cache.pre_conv_cache,
+            decoder_cache.pre_conv_work_buffer,
+            decoder_cache.pre_conv_output_buffer,
+        )
+        hidden = hidden.transpose(1, 2)
+
+        # Transformer with attention caching (in-place updates)
+        hidden, _, new_position_offset = self.pre_transformer.forward_chunk(
+            inputs_embeds=hidden,
+            position_offset=decoder_cache.position_offset,
+            attention_cache=decoder_cache.attention_cache,
+        )
+        # Update position offset in-place
+        decoder_cache.position_offset.copy_(new_position_offset)
+        hidden = hidden.permute(0, 2, 1)
+
+        # Upsample blocks with caching
+        upsample_cache_idx = 0
+        for blocks in self.upsample:
+            for block in blocks:
+                if isinstance(block, Qwen3TTSTokenizerV2ConvNeXtBlock):
+                    cache = decoder_cache.upsample_conv_caches[upsample_cache_idx] if decoder_cache.upsample_conv_caches else None
+                    work_buf = decoder_cache.upsample_work_buffers[upsample_cache_idx] if decoder_cache.upsample_work_buffers else None
+                    output_buf = decoder_cache.upsample_output_buffers[upsample_cache_idx] if decoder_cache.upsample_output_buffers else None
+                    hidden, _ = block.forward_chunk(hidden, cache, work_buf, output_buf)
+                    upsample_cache_idx += 1
+                elif isinstance(block, Qwen3TTSTokenizerV2CausalTransConvNet):
+                    # Upsample TransConvNet has kernel_size == stride, so no trimming needed
+                    # Use regular forward (no caching required)
+                    hidden = block(hidden)
+                else:
+                    # Other blocks - no caching needed
+                    hidden = block(hidden)
+
+        # Decoder blocks with caching
+        wav = hidden
+        decoder_cache_idx = 0
+        transconv_cache_idx = 0
+
+        for block in self.decoder:
+            if isinstance(block, Qwen3TTSTokenizerV2CausalConvNet):
+                # Initial conv or final conv
+                cache = decoder_cache.decoder_conv_caches[decoder_cache_idx] if decoder_cache.decoder_conv_caches else None
+                work_buf = decoder_cache.decoder_work_buffers[decoder_cache_idx] if decoder_cache.decoder_work_buffers else None
+                output_buf = decoder_cache.decoder_output_buffers[decoder_cache_idx] if decoder_cache.decoder_output_buffers else None
+                wav, _ = block.forward_chunk(wav, cache, work_buf, output_buf)
+                decoder_cache_idx += 1
+            elif isinstance(block, Qwen3TTSTokenizerV2DecoderDecoderBlock):
+                # DecoderBlock with 3 ResidualUnit caches + 1 TransConvNet cache
+                block_caches = []
+                block_work_bufs = []
+                block_output_bufs = []
+                for _ in range(3):  # 3 ResidualUnits per block
+                    if decoder_cache.decoder_conv_caches and decoder_cache_idx < len(decoder_cache.decoder_conv_caches):
+                        block_caches.append(decoder_cache.decoder_conv_caches[decoder_cache_idx])
+                    else:
+                        block_caches.append(None)
+                    if decoder_cache.decoder_work_buffers and decoder_cache_idx < len(decoder_cache.decoder_work_buffers):
+                        block_work_bufs.append(decoder_cache.decoder_work_buffers[decoder_cache_idx])
+                    else:
+                        block_work_bufs.append(None)
+                    if decoder_cache.decoder_output_buffers and decoder_cache_idx < len(decoder_cache.decoder_output_buffers):
+                        block_output_bufs.append(decoder_cache.decoder_output_buffers[decoder_cache_idx])
+                    else:
+                        block_output_bufs.append(None)
+                    decoder_cache_idx += 1
+
+                # Get TransConvNet cache and work buffer for this block
+                transconv_cache = None
+                transconv_work_buf = None
+                if decoder_cache.transconv_caches and transconv_cache_idx < len(decoder_cache.transconv_caches):
+                    transconv_cache = decoder_cache.transconv_caches[transconv_cache_idx]
+                if decoder_cache.transconv_work_buffers and transconv_cache_idx < len(decoder_cache.transconv_work_buffers):
+                    transconv_work_buf = decoder_cache.transconv_work_buffers[transconv_cache_idx]
+                transconv_cache_idx += 1
+
+                wav, _ = block.forward_chunk(
+                    wav, block_caches, block_work_bufs, block_output_bufs,
+                    transconv_cache, transconv_work_buf
+                )
+            else:
+                # SnakeBeta or other non-caching blocks
+                wav = block(wav)
+
+        # Return the same cache object (all updates were in-place)
+        return wav.clamp(min=-1, max=1), decoder_cache
+
 
 class Qwen3TTSTokenizerV2Encoder(MimiModel):
     """Encoder based on MimiModel with decoder parts disabled."""
@@ -1009,6 +1775,7 @@ class Qwen3TTSDecoder(nn.Module):
         self,
         model_repo: str = "Qwen/Qwen3-TTS-Tokenizer-12Hz",
         device: torch.device = torch.device("cuda"),
+        dtype: torch.dtype = torch.float32,
     ):
         """
         Initialize Qwen3 audio codec.
@@ -1016,9 +1783,11 @@ class Qwen3TTSDecoder(nn.Module):
         Args:
             model_repo: HuggingFace model repository ID
             device: Device to load the model on
+            dtype: Data type for model weights (e.g., torch.float32, torch.bfloat16)
         """
         super().__init__()
         self.device = device
+        self.dtype = dtype
 
         # Load config
         config_path = hf_hub_download(
@@ -1049,7 +1818,7 @@ class Qwen3TTSDecoder(nn.Module):
 
         # Load state dict into model
         self.model.load_state_dict(state_dict, strict=False)
-        self.model.to(device)
+        self.model.to(device=device, dtype=dtype)
         self.model.eval()
 
     def decode(self, codes: torch.Tensor) -> torch.Tensor:
@@ -1069,6 +1838,46 @@ class Qwen3TTSDecoder(nn.Module):
 
         # audio_values shape: (batch_size, 1, audio_length) with channel dimension
         return audio_values
+
+    def init_cache(
+        self,
+        batch_size: int,
+        device: Optional[torch.device] = None,
+        dtype: torch.dtype = torch.float32,
+        detokenize_interval: int = 10,
+    ) -> Qwen3TTSDecoderCache:
+        """Initialize empty cache for streaming inference.
+
+        Args:
+            batch_size: Number of items in batch
+            device: Device to create tensors on (defaults to self.device)
+            dtype: Data type for tensors
+            detokenize_interval: Number of tokens per chunk (for work buffer sizing)
+
+        Returns:
+            Qwen3TTSDecoderCache with all fields initialized
+        """
+        if device is None:
+            device = self.device
+        return self.model.decoder.init_cache(batch_size, device, dtype, detokenize_interval)
+
+    def decode_chunk(
+        self,
+        codes: torch.Tensor,
+        decoder_cache: Optional[Qwen3TTSDecoderCache] = None,
+    ) -> Tuple[torch.Tensor, Qwen3TTSDecoderCache]:
+        """Decode a chunk of tokens with caching for streaming inference.
+
+        Args:
+            codes: Tensor of shape (batch_size, num_quantizers, chunk_length)
+            decoder_cache: Previous cache or None for first chunk
+
+        Returns:
+            audio_values: Audio tensor. Shape: (batch_size, 1, audio_length)
+            new_cache: Updated cache for next chunk
+        """
+        audio_values, new_cache = self.model.decoder.forward_chunk(codes, decoder_cache)
+        return audio_values, new_cache
 
     def encode(
         self,
