@@ -176,27 +176,6 @@ async def list_models():
             supports_language=True,
             supports_instruct=True,
         ),
-        # CustomVoice 0.6B: speaker + language (no instruct for 0.6B)
-        ModelInfo(
-            id="Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
-            name="Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
-            supports_language=True,
-            supports_speaker=True,
-        ),
-        # Base 0.6B: voice cloning with optional audio + ref_text (no instruct)
-        ModelInfo(
-            id="Qwen/Qwen3-TTS-12Hz-0.6B-Base",
-            name="Qwen/Qwen3-TTS-12Hz-0.6B-Base",
-            supports_audio_input=True,
-            supports_language=True,
-            supports_ref_text=True,
-        ),
-        # VoiceDesign 0.6B: language only (no instruct for 0.6B)
-        ModelInfo(
-            id="Qwen/Qwen3-TTS-12Hz-0.6B-VoiceDesign",
-            name="Qwen/Qwen3-TTS-12Hz-0.6B-VoiceDesign",
-            supports_language=True,
-        ),
         # Standard models
         ModelInfo(
             id="canopylabs/orpheus-3b-0.1-ft",

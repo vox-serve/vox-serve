@@ -190,7 +190,8 @@ class StreamingAudioPlayer {
                 if (audioData.length > 0) {
                     this.processAudioData(audioData);
                 }
-                this.leftoverData = new Uint8Array(0);
+                // Note: processAudioData sets leftoverData for any partial samples,
+                // so we should NOT reset it here
             } else {
                 this.leftoverData = remaining;
             }
