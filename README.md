@@ -56,3 +56,11 @@ We currently support the following TTS and STS models:
 And we are actively working on expanding the support.
 
 `./examples` folder has more example usage.
+
+### Playground
+
+VoxServe includes a web-based playground for interactive testing. Start the playground server and use the browser UI to manage VoxServe, generate audio, and view real-time logs.
+
+![VoxServe Playground](examples/playground/static/images/playground-sample.png)
+
+See [examples/playground/README.md](examples/playground/README.md) for details.
