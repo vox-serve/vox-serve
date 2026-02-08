@@ -49,6 +49,8 @@
     <script>DOCUMENTATION_OPTIONS.pagename = '_autosummary/vox_serve.utils';</script>
     <link rel="index" title="Index" href="../genindex.html" />
     <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="CLI Reference" href="../cli.html" />
+    <link rel="prev" title="vox_serve.scheduler_entry" href="vox_serve.scheduler_entry.html" />
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
     <meta name="docbuild:last-update" content="Feb 08, 2026"/>
@@ -112,8 +114,6 @@
       
       
       
-        
-      
       <div class="bd-sidebar-primary bd-sidebar">
         
 
@@ -166,8 +166,22 @@
 <li class="toctree-l1"><a class="reference internal" href="../quickstart.html">Quickstart</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../concepts.html">Core Concepts</a></li>
 </ul>
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Usage Guides</span></p>
 <ul class="nav bd-sidenav">
+<li class="toctree-l1 has-children"><a class="reference internal" href="../usage/index.html">Usage Guides</a><details open="open"><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l2"><a class="reference internal" href="../usage/orpheus.html">Orpheus</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../usage/csm.html">CSM</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../usage/zonos.html">Zonos</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../usage/chatterbox.html">Chatterbox</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../usage/cosyvoice2.html">CosyVoice2</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../usage/qwen3-tts.html">Qwen3-TTS</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../usage/glm-voice.html">GLM-4-Voice</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../usage/step-audio.html">Step-Audio-2</a></li>
+</ul>
+</details></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul class="current nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../api.html">API Reference</a></li>
 
 <li class="toctree-l1"><a class="reference internal" href="../cli.html">CLI Reference</a></li>
@@ -408,8 +422,35 @@ document.write(`
 <div id="searchbox"></div>
                 <article class="bd-article">
                   
-  <section id="vox-serve-utils">
-<h1>vox_serve.utils<a class="headerlink" href="#vox-serve-utils" title="Link to this heading">#</a></h1>
+  <section id="module-vox_serve.utils">
+<span id="vox-serve-utils"></span><h1>vox_serve.utils<a class="headerlink" href="#module-vox_serve.utils" title="Link to this heading">#</a></h1>
+<p class="rubric">Functions</p>
+<div class="pst-scrollable-table-container"><table class="autosummary longtable table">
+<tbody>
+<tr class="row-odd"><td><p><code class="xref py py-obj docutils literal notranslate"><span class="pre">download_audio_from_url</span></code>(url[, cache_dir, ...])</p></td>
+<td><p>Download an audio file from a URL (excluding HuggingFace and GitHub), caching it locally.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="xref py py-obj docutils literal notranslate"><span class="pre">download_github_file</span></code>(owner, repo, path[, ...])</p></td>
+<td><p>Download a file from a GitHub repo, caching it locally.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_global_log_level</span></code>()</p></td>
+<td><p>Get the current global log level.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_logger</span></code>(name[, level])</p></td>
+<td><p>Get or create a logger with the given name using the global log level by default.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="xref py py-obj docutils literal notranslate"><span class="pre">load_hf_safetensor_state_dict</span></code>(repo_id[, ...])</p></td>
+<td><p>Downloads a safetensors HF repo and returns a merged state_dict (dict[str, Tensor]).</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="xref py py-obj docutils literal notranslate"><span class="pre">set_global_log_level</span></code>(level)</p></td>
+<td><p>Set the global log level for the entire application.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="xref py py-obj docutils literal notranslate"><span class="pre">setup_logger</span></code>(name[, level])</p></td>
+<td><p>Set up a centralized logger with consistent formatting.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
 </section>
 
 
@@ -423,6 +464,24 @@ document.write(`
                 <footer class="prev-next-footer d-print-none">
                   
 <div class="prev-next-area">
+    <a class="left-prev"
+       href="vox_serve.scheduler_entry.html"
+       title="previous page">
+      <i class="fa-solid fa-angle-left"></i>
+      <div class="prev-next-info">
+        <p class="prev-next-subtitle">previous</p>
+        <p class="prev-next-title">vox_serve.scheduler_entry</p>
+      </div>
+    </a>
+    <a class="right-next"
+       href="../cli.html"
+       title="next page">
+      <div class="prev-next-info">
+        <p class="prev-next-subtitle">next</p>
+        <p class="prev-next-title">CLI Reference</p>
+      </div>
+      <i class="fa-solid fa-angle-right"></i>
+    </a>
 </div>
                 </footer>
               
