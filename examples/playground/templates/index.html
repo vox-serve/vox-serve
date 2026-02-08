@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VoxServe Playground</title>
+    <link rel="stylesheet" href="/static/css/styles.css">
+</head>
+<body>
+    <div class="app-container">
+        <header class="header">
+            <div class="logo-title">
+                <img src="/static/images/logo-dark.png" alt="VoxServe" class="logo" height="40">
+                <h1>Playground</h1>
+            </div>
+            <div id="server-indicator" class="status-indicator status-stopped">
+                <span class="status-dot"></span>
+                <span class="status-text">Server Stopped</span>
+            </div>
+        </header>
+
+        <main class="main-content">
+            <!-- Left Column: TTS + Audio Player (merged) -->
+            <section class="left-column">
+                <div class="card tts-card">
+                    <h2>Text-to-Speech</h2>
+
+                    <div class="form-group">
+                        <label for="text-input">Text to Synthesize</label>
+                        <textarea id="text-input" rows="6" placeholder="Enter text here...">Have you ever seen the cherry blossoms bloom at the University of Washington?</textarea>
+                    </div>
+
+                    <!-- Model-specific parameters -->
+                    <div id="model-params" class="model-params hidden">
+                        <div class="form-row">
+                            <div class="form-group" id="language-group">
+                                <label for="language-input">Language</label>
+                                <select id="language-input">
+                                    <option value="">auto</option>
+                                    <option value="english" selected>English</option>
+                                    <option value="chinese">Chinese</option>
+                                    <option value="japanese">Japanese</option>
+                                    <option value="korean">Korean</option>
+                                    <option value="french">French</option>
+                                    <option value="german">German</option>
+                                    <option value="spanish">Spanish</option>
+                                    <option value="italian">Italian</option>
+                                    <option value="portuguese">Portuguese</option>
+                                    <option value="russian">Russian</option>
+                                </select>
+                            </div>
+                            <div class="form-group" id="speaker-group">
+                                <label for="speaker-input">Speaker</label>
+                                <select id="speaker-input">
+                                    <option value="ryan" selected>ryan</option>
+                                    <option value="aiden">aiden</option>
+                                    <option value="serena">serena</option>
+                                    <option value="vivian">vivian</option>
+                                    <option value="ono_anna">ono_anna</option>
+                                    <option value="sohee">sohee</option>
+                                    <option value="uncle_fu">uncle_fu</option>
+                                    <option value="eric">eric (四川话)</option>
+                                    <option value="dylan">dylan (北京话)</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="form-group" id="instruct-group">
+                            <label for="instruct-input">Instruct</label>
+                            <input type="text" id="instruct-input" placeholder="Voice style instructions (e.g., 'Speak slowly and calmly')">
+                        </div>
+                    </div>
+
+                    <!-- Reference Audio + Text (for voice cloning) -->
+                    <div id="audio-upload-group" class="voice-clone-group hidden">
+                        <label>Voice Cloning (optional)</label>
+                        <small class="form-hint">Provide reference audio and its transcript for voice cloning. If not provided, a default voice will be used.</small>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="audio-input">Reference Audio</label>
+                                <input type="file" id="audio-input" accept="audio/*">
+                            </div>
+                            <div class="form-group" id="ref-text-group">
+                                <label for="ref-text-input">Reference Text</label>
+                                <input type="text" id="ref-text-input" placeholder="Transcript of the reference audio">
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="generate-row">
+                        <div class="checkbox-inline">
+                            <input type="checkbox" id="streaming-checkbox" checked>
+                            <label for="streaming-checkbox">Streaming</label>
+                        </div>
+                        <div class="playback-info">
+                            <span id="playback-status">⏸️ Idle</span>
+                            <span class="ttfa-display">Time-To-First-Audio: <span id="ttfa-network">-</span></span>
+                        </div>
+                        <button id="generate-btn" class="btn btn-primary btn-large" disabled>Generate Audio</button>
+                        <button id="stop-audio-btn" class="btn btn-secondary" disabled>Stop</button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Right Column: Server Controls + Logs -->
+            <aside class="right-column">
+                <!-- Server Controls -->
+                <div class="card server-card">
+                    <h2>Server Controls</h2>
+
+                    <div class="form-group">
+                        <label for="model-select">Model</label>
+                        <select id="model-select">
+                            <option value="orpheus">Orpheus-3B</option>
+                        </select>
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="port-input">Port</label>
+                            <input type="number" id="port-input" value="12345" min="1024" max="65535">
+                        </div>
+                        <div class="form-group">
+                            <label for="batch-size">Max Batch Size</label>
+                            <input type="number" id="batch-size" value="8" min="1" max="128">
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label>GPUs</label>
+                        <div id="gpu-checkboxes" class="checkbox-group">
+                            <span class="loading-text">Loading GPUs...</span>
+                        </div>
+                    </div>
+
+                    <details class="advanced-section">
+                        <summary>Advanced Settings</summary>
+
+                        <!-- Memory Settings -->
+                        <div class="settings-group">
+                            <h4>Memory</h4>
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="max-num-pages">Max Num Pages</label>
+                                    <input type="number" id="max-num-pages" value="2048" min="1">
+                                </div>
+                                <div class="form-group">
+                                    <label for="page-size">Page Size</label>
+                                    <input type="number" id="page-size" value="128" min="1">
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Sampling Parameters -->
+                        <div class="settings-group">
+                            <h4>Sampling</h4>
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="top-p">Top-p</label>
+                                    <input type="number" id="top-p" step="0.01" min="0" max="1" placeholder="default">
+                                </div>
+                                <div class="form-group">
+                                    <label for="top-k">Top-k</label>
+                                    <input type="number" id="top-k" min="1" placeholder="default">
+                                </div>
+                            </div>
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="min-p">Min-p</label>
+                                    <input type="number" id="min-p" step="0.01" min="0" max="1" placeholder="default">
+                                </div>
+                                <div class="form-group">
+                                    <label for="temperature">Temperature</label>
+                                    <input type="number" id="temperature" step="0.1" min="0" placeholder="default">
+                                </div>
+                            </div>
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="max-tokens">Max Tokens</label>
+                                    <input type="number" id="max-tokens" min="1" placeholder="default">
+                                </div>
+                                <div class="form-group">
+                                    <label for="cfg-scale">CFG Scale</label>
+                                    <input type="number" id="cfg-scale" step="0.1" min="0" placeholder="default">
+                                </div>
+                            </div>
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="repetition-penalty">Repetition Penalty</label>
+                                    <input type="number" id="repetition-penalty" step="0.1" min="0" placeholder="default">
+                                </div>
+                                <div class="form-group">
+                                    <label for="repetition-window">Repetition Window</label>
+                                    <input type="number" id="repetition-window" min="1" placeholder="default">
+                                </div>
+                            </div>
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="detokenize-interval">Detokenize Interval</label>
+                                    <input type="number" id="detokenize-interval" min="1" placeholder="default">
+                                </div>
+                                <div class="form-group checkbox-inline" style="align-self: flex-end; padding-bottom: 0.5rem;">
+                                    <input type="checkbox" id="greedy">
+                                    <label for="greedy">Greedy Sampling</label>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Performance Settings -->
+                        <div class="settings-group">
+                            <h4>Performance</h4>
+                            <div class="form-group checkbox-inline">
+                                <input type="checkbox" id="cuda-graph" checked>
+                                <label for="cuda-graph">Enable CUDA Graph</label>
+                            </div>
+                            <div class="form-group checkbox-inline">
+                                <input type="checkbox" id="enable-disaggregation">
+                                <label for="enable-disaggregation">Enable Disaggregation</label>
+                            </div>
+                            <div class="form-group checkbox-inline">
+                                <input type="checkbox" id="enable-torch-compile">
+                                <label for="enable-torch-compile">Enable torch.compile</label>
+                            </div>
+                            <div class="form-group checkbox-inline">
+                                <input type="checkbox" id="enable-nvtx">
+                                <label for="enable-nvtx">Enable NVTX Profiling</label>
+                            </div>
+                        </div>
+
+                        <!-- Scheduler Settings -->
+                        <div class="settings-group">
+                            <h4>Scheduler</h4>
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="scheduler-type">Scheduler Type</label>
+                                    <select id="scheduler-type">
+                                        <option value="base" selected>base</option>
+                                        <option value="online">online</option>
+                                        <option value="offline">offline</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label for="dp-size">DP Size</label>
+                                    <input type="number" id="dp-size" value="1" min="1">
+                                </div>
+                            </div>
+                            <div class="form-group checkbox-inline">
+                                <input type="checkbox" id="async-scheduling">
+                                <label for="async-scheduling">Async Scheduling</label>
+                            </div>
+                        </div>
+
+                        <!-- Other Settings -->
+                        <div class="settings-group">
+                            <h4>Other</h4>
+                            <div class="form-group">
+                                <label for="log-level">Log Level</label>
+                                <select id="log-level">
+                                    <option value="DEBUG">DEBUG</option>
+                                    <option value="INFO" selected>INFO</option>
+                                    <option value="WARNING">WARNING</option>
+                                    <option value="ERROR">ERROR</option>
+                                    <option value="CRITICAL">CRITICAL</option>
+                                </select>
+                            </div>
+                        </div>
+                    </details>
+
+                    <div class="button-row">
+                        <button id="start-server-btn" class="btn btn-primary">Start Server</button>
+                        <button id="stop-server-btn" class="btn btn-danger" disabled>Stop Server</button>
+                    </div>
+
+                    <div id="server-status" class="status-box">
+                        <span id="status-message">Ready to start server</span>
+                    </div>
+                </div>
+
+                <!-- Server Logs (Collapsible) -->
+                <details class="card logs-card" id="logs-section" open>
+                    <summary class="logs-summary">
+                        <span class="logs-title">Server Logs</span>
+                        <div class="logs-controls" onclick="event.stopPropagation()">
+                            <label class="checkbox-inline">
+                                <input type="checkbox" id="auto-scroll" checked>
+                                <span>Auto-scroll</span>
+                            </label>
+                            <button id="clear-logs-btn" class="btn btn-small btn-secondary">Clear</button>
+                        </div>
+                    </summary>
+                    <div id="logs-container" class="logs-container">
+                        <div class="logs-placeholder">Server logs will appear here when the server is running...</div>
+                    </div>
+                </details>
+            </aside>
+        </main>
+    </div>
+
+    <script src="/static/js/audio-player.js"></script>
+    <script src="/static/js/main.js"></script>
+</body>
+</html>
