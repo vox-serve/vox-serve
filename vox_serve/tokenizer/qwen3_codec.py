@@ -1477,7 +1477,8 @@ class Qwen3TTSTokenizerV2Decoder(nn.Module):
                             torch.zeros(batch_size, in_channels, 1 + seq_len, device=device, dtype=dtype)
                         )
                         # Now upsample: output length = input * stride
-                        stride = res_unit.conv.stride[0] if isinstance(res_unit.conv.stride, tuple) else res_unit.conv.stride
+                        s = res_unit.conv.stride
+                        stride = s[0] if isinstance(s, tuple) else s
                         seq_len = seq_len * stride
                     elif isinstance(res_unit, Qwen3TTSTokenizerV2DecoderDecoderResidualUnit):
                         # Only conv1 needs cache (conv2 has kernel_size=1)
@@ -1486,7 +1487,13 @@ class Qwen3TTSTokenizerV2Decoder(nn.Module):
                             torch.zeros(batch_size, in_channels, res_unit.conv1.padding, device=device, dtype=dtype)
                         )
                         decoder_work_buffers.append(
-                            torch.zeros(batch_size, in_channels, res_unit.conv1.padding + seq_len, device=device, dtype=dtype)
+                            torch.zeros(
+                                batch_size,
+                                in_channels,
+                                res_unit.conv1.padding + seq_len,
+                                device=device,
+                                dtype=dtype,
+                            )
                         )
                         # ResidualUnit output has same shape as input (residual connection)
                         decoder_output_buffers.append(
@@ -1578,9 +1585,12 @@ class Qwen3TTSTokenizerV2Decoder(nn.Module):
         for blocks in self.upsample:
             for block in blocks:
                 if isinstance(block, Qwen3TTSTokenizerV2ConvNeXtBlock):
-                    cache = decoder_cache.upsample_conv_caches[upsample_cache_idx] if decoder_cache.upsample_conv_caches else None
-                    work_buf = decoder_cache.upsample_work_buffers[upsample_cache_idx] if decoder_cache.upsample_work_buffers else None
-                    output_buf = decoder_cache.upsample_output_buffers[upsample_cache_idx] if decoder_cache.upsample_output_buffers else None
+                    caches = decoder_cache.upsample_conv_caches
+                    cache = caches[upsample_cache_idx] if caches else None
+                    work_bufs = decoder_cache.upsample_work_buffers
+                    work_buf = work_bufs[upsample_cache_idx] if work_bufs else None
+                    out_bufs = decoder_cache.upsample_output_buffers
+                    output_buf = out_bufs[upsample_cache_idx] if out_bufs else None
                     hidden, _ = block.forward_chunk(hidden, cache, work_buf, output_buf)
                     upsample_cache_idx += 1
                 elif isinstance(block, Qwen3TTSTokenizerV2CausalTransConvNet):
@@ -1599,9 +1609,12 @@ class Qwen3TTSTokenizerV2Decoder(nn.Module):
         for block in self.decoder:
             if isinstance(block, Qwen3TTSTokenizerV2CausalConvNet):
                 # Initial conv or final conv
-                cache = decoder_cache.decoder_conv_caches[decoder_cache_idx] if decoder_cache.decoder_conv_caches else None
-                work_buf = decoder_cache.decoder_work_buffers[decoder_cache_idx] if decoder_cache.decoder_work_buffers else None
-                output_buf = decoder_cache.decoder_output_buffers[decoder_cache_idx] if decoder_cache.decoder_output_buffers else None
+                conv_caches = decoder_cache.decoder_conv_caches
+                cache = conv_caches[decoder_cache_idx] if conv_caches else None
+                work_bufs = decoder_cache.decoder_work_buffers
+                work_buf = work_bufs[decoder_cache_idx] if work_bufs else None
+                out_bufs = decoder_cache.decoder_output_buffers
+                output_buf = out_bufs[decoder_cache_idx] if out_bufs else None
                 wav, _ = block.forward_chunk(wav, cache, work_buf, output_buf)
                 decoder_cache_idx += 1
             elif isinstance(block, Qwen3TTSTokenizerV2DecoderDecoderBlock):
@@ -1614,12 +1627,14 @@ class Qwen3TTSTokenizerV2Decoder(nn.Module):
                         block_caches.append(decoder_cache.decoder_conv_caches[decoder_cache_idx])
                     else:
                         block_caches.append(None)
-                    if decoder_cache.decoder_work_buffers and decoder_cache_idx < len(decoder_cache.decoder_work_buffers):
-                        block_work_bufs.append(decoder_cache.decoder_work_buffers[decoder_cache_idx])
+                    work_bufs = decoder_cache.decoder_work_buffers
+                    if work_bufs and decoder_cache_idx < len(work_bufs):
+                        block_work_bufs.append(work_bufs[decoder_cache_idx])
                     else:
                         block_work_bufs.append(None)
-                    if decoder_cache.decoder_output_buffers and decoder_cache_idx < len(decoder_cache.decoder_output_buffers):
-                        block_output_bufs.append(decoder_cache.decoder_output_buffers[decoder_cache_idx])
+                    out_bufs = decoder_cache.decoder_output_buffers
+                    if out_bufs and decoder_cache_idx < len(out_bufs):
+                        block_output_bufs.append(out_bufs[decoder_cache_idx])
                     else:
                         block_output_bufs.append(None)
                     decoder_cache_idx += 1
@@ -1629,8 +1644,9 @@ class Qwen3TTSTokenizerV2Decoder(nn.Module):
                 transconv_work_buf = None
                 if decoder_cache.transconv_caches and transconv_cache_idx < len(decoder_cache.transconv_caches):
                     transconv_cache = decoder_cache.transconv_caches[transconv_cache_idx]
-                if decoder_cache.transconv_work_buffers and transconv_cache_idx < len(decoder_cache.transconv_work_buffers):
-                    transconv_work_buf = decoder_cache.transconv_work_buffers[transconv_cache_idx]
+                tw_bufs = decoder_cache.transconv_work_buffers
+                if tw_bufs and transconv_cache_idx < len(tw_bufs):
+                    transconv_work_buf = tw_bufs[transconv_cache_idx]
                 transconv_cache_idx += 1
 
                 wav, _ = block.forward_chunk(

@@ -1,14 +1,9 @@
-import base64
-import io
 import json
-import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urlparse
 
 import librosa
 import numpy as np
-import soundfile as sf
 import torch
 import torch.nn.functional as F
 from huggingface_hub import hf_hub_download
@@ -1468,8 +1463,8 @@ class Qwen3TTSModel(BaseLMWithDepth):
             # Voice cloning mode
             if audio_path is None or ref_text is None:
                 self.logger.warning(
-                    f"You need to provide both audio_path and ref_text for voice cloning mode. "
-                    f"Using default audio and text. "
+                    "You need to provide both audio_path and ref_text for voice cloning mode. "
+                    "Using default audio and text. "
                 )
                 # Download default audio using the util function if audio_path is None
                 from vox_serve.utils import download_audio_from_url
@@ -1478,7 +1473,10 @@ class Qwen3TTSModel(BaseLMWithDepth):
                     "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen3-TTS-Repo/clone_2.wav"
                 )
 
-                ref_text =  "Okay. Yeah. I resent you. I love you. I respect you. But you know what? You blew it! And thanks to you."
+                ref_text = (
+                    "Okay. Yeah. I resent you. I love you. I respect you. "
+                    "But you know what? You blew it! And thanks to you."
+                )
 
             audio, sr = self._load_audio_to_np(audio_path)
 
@@ -1705,7 +1703,8 @@ class Qwen3TTSModel(BaseLMWithDepth):
                     cb_embeds = self.model.talker.code_predictor.model.codec_embedding[cb - 1](
                         cb_tokens
                     )  # (T, hidden_size)
-                    input_features[ref_codes_start_pos:ref_codes_start_pos + ref_codes.shape[0]] += cb_embeds.to(self.dtype)
+                    ref_slice = ref_codes_start_pos + ref_codes.shape[0]
+                    input_features[ref_codes_start_pos:ref_slice] += cb_embeds.to(self.dtype)
         else:
             # Custom voice mode or x_vector_only mode
 
