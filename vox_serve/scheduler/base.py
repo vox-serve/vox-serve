@@ -318,6 +318,12 @@ class Scheduler:
                 if next_decode_idx < len(req.lm_output_audio_tokens):
                     req.next_audio_decode_idx = [next_decode_idx]
                     detokenize_requests.append(req)
+                else:
+                    # All tokens have been decoded but done_all wasn't set
+                    # (can happen when done_lm_generation is set after the last detokenize)
+                    # Add to detokenize_requests so _send_responses can send completion
+                    req.done_all = True
+                    detokenize_requests.append(req)
             elif next_decode_idx + detokenize_interval <= len(req.lm_output_audio_tokens):
                 req.next_audio_decode_idx = [next_decode_idx]
                 detokenize_requests.append(req)

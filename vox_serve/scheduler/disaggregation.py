@@ -186,6 +186,12 @@ class DisaggregationScheduler(Scheduler):
                     # For finished requests, queue if there are tokens left to decode
                     if next_decode_idx < len(req.lm_output_audio_tokens):
                         should_queue = True
+                    else:
+                        # All tokens have been decoded but done_all wasn't set
+                        # (can happen when done_lm_generation is set after the last detokenize)
+                        # Queue it so _send_responses can send completion message
+                        req.done_all = True
+                        should_queue = True
                 elif next_decode_idx + detokenize_interval <= len(req.lm_output_audio_tokens):
                     # For ongoing requests, queue if we have enough tokens
                     should_queue = True
