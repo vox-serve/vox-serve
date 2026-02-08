@@ -173,7 +173,7 @@ class ModelWorker:
             2,  # K/V
             self.page_size,
             self.model.num_key_value_heads,  # kv heads
-            self.model.hidden_size // self.model.num_attention_heads,  # head dim
+            self.model.head_dim,
             dtype=torch.bfloat16,
             device="cuda",
         )

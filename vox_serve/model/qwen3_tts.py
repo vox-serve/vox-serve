@@ -1126,6 +1126,11 @@ class Qwen3TTSModel(BaseLMWithDepth):
         return self._hidden_size
 
     @property
+    def head_dim(self) -> int:
+        """Head dimension of the model."""
+        return self.config.talker_config.head_dim
+
+    @property
     def depth_num_attention_heads(self) -> int:
         """Number of attention heads in the model."""
         return self._depth_num_attention_heads

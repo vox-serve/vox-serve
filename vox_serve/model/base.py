@@ -80,6 +80,11 @@ class BaseLM(ABC):
         pass
 
     @property
+    def head_dim(self) -> int:
+        """Head dimension of the model."""
+        return self.hidden_size // self.num_attention_heads
+
+    @property
     def has_depth_transformer(self) -> bool:
         """Indicates if the model has a depth transformer."""
         return False
