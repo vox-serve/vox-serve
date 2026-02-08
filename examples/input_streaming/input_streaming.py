@@ -3,10 +3,16 @@
 Input Streaming Example for vox-serve
 
 Demonstrates how to use the input streaming API to send text incrementally
-while audio is being generated. This is useful for:
+while audio is being generated AND streamed back concurrently. This is useful for:
 - Real-time transcription to speech
 - Conversational AI with streaming LLM output
 - Live captioning
+
+The new flow uses the /audio endpoint to receive audio immediately:
+1. POST /generate/stream/start -> get request_id
+2. GET /generate/stream/{request_id}/audio (in background thread) -> receive audio chunks
+3. POST /generate/stream/{request_id}/text (multiple times) -> send text chunks
+4. POST /generate/stream/{request_id}/end -> signal text completion
 
 Usage:
     # Basic usage with default text (sends word by word)
@@ -29,6 +35,7 @@ import argparse
 import json
 import re
 import sys
+import threading
 import time
 
 import requests
@@ -59,7 +66,10 @@ def stream_text_to_speech(
     language: str = None,
 ):
     """
-    Stream text to the vox-serve API word by word and save the resulting audio.
+    Stream text to the vox-serve API word by word and receive audio concurrently.
+
+    Uses the new /audio endpoint to receive audio chunks immediately as they
+    are generated, while continuing to send text via /text endpoint.
 
     Args:
         text: Full text to synthesize (will be sent word by word)
@@ -97,9 +107,40 @@ def stream_text_to_speech(
     request_id = resp.json()["request_id"]
     print(f"Request ID: {request_id}")
 
-    # Step 2: Send text word by word
-    words_sent = 0
+    # Shared state for audio receiver thread
+    audio_state = {
+        "total_bytes": 0,
+        "chunks_received": 0,
+        "first_chunk_time": None,
+        "error": None,
+    }
     start_time = time.time()
+
+    # Step 2: Start receiving audio in background thread
+    def receive_audio():
+        try:
+            resp = requests.get(
+                f"{base_url}/generate/stream/{request_id}/audio",
+                stream=True
+            )
+            resp.raise_for_status()
+
+            with open(output_path, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=8192):
+                    if audio_state["first_chunk_time"] is None:
+                        audio_state["first_chunk_time"] = time.time() - start_time
+                        print(f"  [Audio] First chunk received at {audio_state['first_chunk_time']:.2f}s")
+                    f.write(chunk)
+                    audio_state["total_bytes"] += len(chunk)
+                    audio_state["chunks_received"] += 1
+        except Exception as e:
+            audio_state["error"] = str(e)
+
+    audio_thread = threading.Thread(target=receive_audio, daemon=True)
+    audio_thread.start()
+
+    # Step 3: Send text word by word (while audio is being received)
+    words_sent = 0
 
     for i, word in enumerate(words):
         try:
@@ -110,7 +151,9 @@ def stream_text_to_speech(
             resp.raise_for_status()
             words_sent += 1
             # Show word without trailing whitespace for cleaner output
-            print(f"  Sent word {words_sent}: '{word.rstrip()}'")
+            chunks = audio_state['chunks_received']
+            chunk_info = f" (audio chunks: {chunks})" if chunks > 0 else ""
+            print(f"  Sent word {words_sent}: '{word.rstrip()}'{chunk_info}")
         except requests.exceptions.HTTPError as e:
             print(f"Error sending word: {e}")
             sys.exit(1)
@@ -123,35 +166,32 @@ def stream_text_to_speech(
     print()
     print(f"Sent {words_sent} words in {text_send_time:.2f}s")
 
-    # Step 3: End the stream and receive audio
-    print("Ending stream and receiving audio...")
-    audio_start_time = time.time()
-
+    # Step 4: Signal end of text input
+    print("Signaling end of text input...")
     try:
-        resp = requests.post(
-            f"{base_url}/generate/stream/{request_id}/end",
-            stream=True
-        )
+        resp = requests.post(f"{base_url}/generate/stream/{request_id}/end")
         resp.raise_for_status()
     except requests.exceptions.HTTPError as e:
         print(f"Error ending stream: {e}")
         sys.exit(1)
 
-    # Save audio to file
-    total_bytes = 0
-    with open(output_path, "wb") as f:
-        for chunk in resp.iter_content(chunk_size=8192):
-            f.write(chunk)
-            total_bytes += len(chunk)
+    # Step 5: Wait for audio thread to complete
+    print("Waiting for remaining audio chunks...")
+    audio_thread.join(timeout=60)  # 60 second timeout
 
-    audio_receive_time = time.time() - audio_start_time
     total_time = time.time() - start_time
+
+    if audio_state["error"]:
+        print(f"Error receiving audio: {audio_state['error']}")
+        sys.exit(1)
 
     print()
     print(f"Audio saved to: {output_path}")
-    print(f"Audio size: {total_bytes / 1024:.1f} KB")
+    print(f"Audio size: {audio_state['total_bytes'] / 1024:.1f} KB")
+    print(f"Audio chunks received: {audio_state['chunks_received']}")
+    if audio_state["first_chunk_time"]:
+        print(f"Time to first audio chunk: {audio_state['first_chunk_time']:.2f}s")
     print(f"Text send time: {text_send_time:.2f}s")
-    print(f"Audio receive time: {audio_receive_time:.2f}s")
     print(f"Total time: {total_time:.2f}s")
 
 
@@ -166,7 +206,8 @@ def llm_mode(
     LLM mode: chat with an LLM and hear its responses spoken.
 
     User input is sent to the LLM and the streaming response is converted
-    to speech in real-time.
+    to speech in real-time. Audio is streamed back concurrently using the
+    /audio endpoint.
 
     Args:
         base_url: URL of the vox-serve TTS API server
@@ -186,6 +227,7 @@ def llm_mode(
         print(f"Model: {llm_model}")
     print("Type your message and press Enter to chat with the LLM.")
     print("The LLM response will be streamed to TTS in real-time.")
+    print("Audio is streamed back concurrently as it's generated.")
     print("Type 'QUIT' to exit.")
     print()
 
@@ -227,6 +269,32 @@ def llm_mode(
         # Add user message to history
         messages.append({"role": "user", "content": user_input})
 
+        # Audio state for receiver thread
+        output_path = "llm_output.wav"
+        audio_state = {"total_bytes": 0, "error": None}
+
+        # Start receiving audio in background
+        def receive_audio(rid, path, state):
+            try:
+                resp = requests.get(
+                    f"{base_url}/generate/stream/{rid}/audio",
+                    stream=True
+                )
+                resp.raise_for_status()
+                with open(path, "wb") as f:
+                    for chunk in resp.iter_content(chunk_size=8192):
+                        f.write(chunk)
+                        state["total_bytes"] += len(chunk)
+            except Exception as e:
+                state["error"] = str(e)
+
+        audio_thread = threading.Thread(
+            target=receive_audio,
+            args=(request_id, output_path, audio_state),
+            daemon=True
+        )
+        audio_thread.start()
+
         # Stream LLM response to TTS
         print("Assistant: ", end="", flush=True)
 
@@ -249,19 +317,17 @@ def llm_mode(
             print("(No response from LLM)")
             continue
 
-        # End stream and receive audio
-        output_path = "llm_output.wav"
-        resp = requests.post(
-            f"{base_url}/generate/stream/{request_id}/end",
-            stream=True
-        )
+        # Signal end of text input
+        resp = requests.post(f"{base_url}/generate/stream/{request_id}/end")
         resp.raise_for_status()
 
-        with open(output_path, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=8192):
-                f.write(chunk)
+        # Wait for audio to finish
+        audio_thread.join(timeout=60)
 
-        print(f"Audio saved to: {output_path}")
+        if audio_state["error"]:
+            print(f"Error receiving audio: {audio_state['error']}")
+        else:
+            print(f"Audio saved to: {output_path} ({audio_state['total_bytes'] / 1024:.1f} KB)")
         print()
 
 
@@ -365,7 +431,8 @@ Examples:
   python input_streaming.py --mode llm --llm-url http://localhost:11434/v1 --llm-model llama3
 
   # LLM mode with OpenAI API
-  python input_streaming.py --mode llm --llm-url https://api.openai.com/v1 --llm-api-key $OPENAI_API_KEY --llm-model gpt-4
+  python input_streaming.py --mode llm --llm-url https://api.openai.com/v1 \\
+      --llm-api-key $OPENAI_API_KEY --llm-model gpt-4
 
   # Faster word sending
   python input_streaming.py --delay 0.01
@@ -374,7 +441,7 @@ Examples:
 
     parser.add_argument(
         "--text",
-        default="Hello! This is a demonstration of input streaming. "
+        default="This is a demonstration of input streaming. "
                 "Text is sent word by word while audio is being generated. "
                 "This enables real-time text to speech applications.",
         help="Text to synthesize"
