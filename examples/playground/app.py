@@ -1,6 +1,8 @@
 """FastAPI backend for VoxServe Playground."""
 
 import argparse
+import struct
+import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import List, Optional
@@ -42,7 +44,7 @@ class ServerStartRequest(BaseModel):
     """Request body for starting the server (mirrors all CLI arguments)."""
 
     # Model and server
-    model: str = "canopylabs/orpheus-3b-0.1-ft"
+    model: str = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
     port: int = 12345
     cuda_devices: List[int] = [0]
 
@@ -139,8 +141,62 @@ async def list_gpus():
 
 @app.get("/api/models", response_model=ModelsResponse)
 async def list_models():
-    """List supported models with their capabilities (full HuggingFace IDs)."""
+    """List supported models with their capabilities (full HuggingFace IDs).
+
+    Qwen3-TTS model capabilities:
+    - All models support language selection
+    - 1.7B models support instruct (voice style instructions)
+    - CustomVoice: uses predefined speaker IDs
+    - Base: supports voice cloning with optional reference audio + ref_text
+    - VoiceDesign: voice controlled primarily by instruct text
+    """
     models = [
+        # Qwen3-TTS models (prioritized, default is CustomVoice 1.7B)
+        # CustomVoice 1.7B: speaker + language + instruct
+        ModelInfo(
+            id="Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+            name="Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+            supports_language=True,
+            supports_speaker=True,
+            supports_instruct=True,
+        ),
+        # Base 1.7B: voice cloning with optional audio + ref_text + instruct
+        ModelInfo(
+            id="Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+            name="Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+            supports_audio_input=True,
+            supports_language=True,
+            supports_ref_text=True,
+            supports_instruct=True,
+        ),
+        # VoiceDesign 1.7B: language + instruct (voice from instruct)
+        ModelInfo(
+            id="Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+            name="Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+            supports_language=True,
+            supports_instruct=True,
+        ),
+        # CustomVoice 0.6B: speaker + language (no instruct for 0.6B)
+        ModelInfo(
+            id="Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+            name="Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+            supports_language=True,
+            supports_speaker=True,
+        ),
+        # Base 0.6B: voice cloning with optional audio + ref_text (no instruct)
+        ModelInfo(
+            id="Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+            name="Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+            supports_audio_input=True,
+            supports_language=True,
+            supports_ref_text=True,
+        ),
+        # VoiceDesign 0.6B: language only (no instruct for 0.6B)
+        ModelInfo(
+            id="Qwen/Qwen3-TTS-12Hz-0.6B-VoiceDesign",
+            name="Qwen/Qwen3-TTS-12Hz-0.6B-VoiceDesign",
+            supports_language=True,
+        ),
         # Standard models
         ModelInfo(
             id="canopylabs/orpheus-3b-0.1-ft",
@@ -177,53 +233,6 @@ async def list_models():
             id="FunAudioLLM/CosyVoice2-0.5B",
             name="FunAudioLLM/CosyVoice2-0.5B",
             supports_audio_input=True,
-        ),
-        # Qwen3-TTS models (all 6 from HuggingFace collection)
-        ModelInfo(
-            id="Qwen/Qwen3-TTS-12Hz-1.7B-Base",
-            name="Qwen/Qwen3-TTS-12Hz-1.7B-Base",
-            supports_audio_input=True,
-            supports_language=True,
-            supports_speaker=True,
-            supports_ref_text=True,
-        ),
-        ModelInfo(
-            id="Qwen/Qwen3-TTS-12Hz-0.6B-Base",
-            name="Qwen/Qwen3-TTS-12Hz-0.6B-Base",
-            supports_audio_input=True,
-            supports_language=True,
-            supports_speaker=True,
-            supports_ref_text=True,
-        ),
-        ModelInfo(
-            id="Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
-            name="Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
-            supports_audio_input=True,
-            supports_language=True,
-            supports_speaker=True,
-            supports_ref_text=True,
-        ),
-        ModelInfo(
-            id="Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
-            name="Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
-            supports_audio_input=True,
-            supports_language=True,
-            supports_speaker=True,
-            supports_ref_text=True,
-        ),
-        ModelInfo(
-            id="Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
-            name="Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
-            supports_audio_input=True,
-            supports_language=True,
-            supports_instruct=True,
-        ),
-        ModelInfo(
-            id="Qwen/Qwen3-TTS-12Hz-0.6B-VoiceDesign",
-            name="Qwen/Qwen3-TTS-12Hz-0.6B-VoiceDesign",
-            supports_audio_input=True,
-            supports_language=True,
-            supports_instruct=True,
         ),
     ]
     return ModelsResponse(models=models)
@@ -334,16 +343,52 @@ async def generate_audio(
         form_data.add_field("instruct", instruct)
 
     async def stream_response():
-        """Stream the audio response from VoxServe."""
+        """Stream the audio response from VoxServe with TTFA measurement.
+
+        Protocol: First 4 bytes are TTFA in milliseconds (uint32 little-endian),
+        followed by the WAV data.
+
+        We buffer the first chunk (WAV header), wait for the second chunk (first audio),
+        measure TTFA, then send: TTFA prefix + buffered header + audio chunks.
+        """
         timeout = aiohttp.ClientTimeout(total=600)
         async with aiohttp.ClientSession(timeout=timeout) as session:
+            request_start = time.perf_counter()
             async with session.post(voxserve_url, data=form_data) as response:
                 if response.status != 200:
                     error_text = await response.text()
                     raise Exception(f"VoxServe error: {response.status} - {error_text}")
 
+                chunk_count = 0
+                header_chunk = None
+                ttfa_sent = False
+
                 async for chunk in response.content.iter_any():
+                    chunk_count += 1
+
+                    if chunk_count == 1:
+                        # Buffer the first chunk (WAV header)
+                        header_chunk = chunk
+                        continue
+
+                    if chunk_count == 2 and not ttfa_sent:
+                        # Second chunk = first audio data, measure TTFA now
+                        ttfa_ms = int((time.perf_counter() - request_start) * 1000)
+                        # Send TTFA prefix first
+                        yield struct.pack("<I", ttfa_ms)
+                        # Then send buffered header
+                        if header_chunk:
+                            yield header_chunk
+                        ttfa_sent = True
+
                     yield chunk
+
+                # If we only got header chunk, still send TTFA and header
+                if not ttfa_sent:
+                    ttfa_ms = int((time.perf_counter() - request_start) * 1000)
+                    yield struct.pack("<I", ttfa_ms)
+                    if header_chunk:
+                        yield header_chunk
 
     return StreamingResponse(
         stream_response(),

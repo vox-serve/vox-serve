@@ -11,18 +11,16 @@ class StreamingAudioPlayer {
         this.bufferDurationMs = 100; // Target buffer before first play (100ms)
         this.accumulatedDuration = 0;
         this.isPlaying = false;
-        this.requestStartTime = null;
-        this.firstChunkTime = null;
         this.playbackStartTime = null;
 
         // Callbacks
         this.onStatusChange = null;
         this.onTTFANetwork = null;
-        this.onTTFAPlayback = null;
 
         // Streaming state
         this.abortController = null;
         this.wavInfo = null;
+        this.ttfaParsed = false;
         this.headerParsed = false;
         this.leftoverData = new Uint8Array(0);
     }
@@ -50,10 +48,9 @@ class StreamingAudioPlayer {
         this.pendingBuffers = [];
         this.accumulatedDuration = 0;
         this.isPlaying = false;
-        this.requestStartTime = null;
-        this.firstChunkTime = null;
         this.playbackStartTime = null;
         this.wavInfo = null;
+        this.ttfaParsed = false;
         this.headerParsed = false;
         this.leftoverData = new Uint8Array(0);
     }
@@ -142,32 +139,46 @@ class StreamingAudioPlayer {
         this.pendingBuffers = [];
 
         if (this.onStatusChange) {
-            this.onStatusChange('Playing...');
+            this.onStatusChange('▶️ Playing');
         }
     }
 
     /**
      * Process a raw audio chunk from the stream
+     *
+     * Stream format from server:
+     * - First 4 bytes: TTFA in milliseconds (uint32 little-endian)
+     * - Remaining: WAV data (44-byte header + audio samples)
      */
     processChunk(value) {
-        // Record first chunk time for network TTFA
-        if (this.firstChunkTime === null) {
-            this.firstChunkTime = performance.now();
-            if (this.requestStartTime && this.onTTFANetwork) {
-                const ttfa = this.firstChunkTime - this.requestStartTime;
-                this.onTTFANetwork(ttfa);
-            }
-        }
-
         // Append new data to leftover
         const currentData = new Uint8Array(this.leftoverData.length + value.length);
         currentData.set(this.leftoverData);
         currentData.set(value, this.leftoverData.length);
 
+        let offset = 0;
+
+        // First, parse TTFA prefix (4 bytes)
+        if (!this.ttfaParsed) {
+            if (currentData.length >= 4) {
+                // Parse uint32 little-endian TTFA
+                const ttfaMs = new DataView(currentData.buffer, currentData.byteOffset, 4).getUint32(0, true);
+                if (this.onTTFANetwork) {
+                    this.onTTFANetwork(ttfaMs);
+                }
+                this.ttfaParsed = true;
+                offset = 4;
+            } else {
+                this.leftoverData = currentData;
+                return;
+            }
+        }
+
+        // Then, parse WAV header (44 bytes)
         if (!this.headerParsed) {
-            // Wait for at least 44 bytes (WAV header)
-            if (currentData.length >= 44) {
-                this.wavInfo = this.parseWavHeader(currentData);
+            const remaining = currentData.slice(offset);
+            if (remaining.length >= 44) {
+                this.wavInfo = this.parseWavHeader(remaining);
                 if (!this.wavInfo) {
                     throw new Error("Failed to parse WAV header");
                 }
@@ -175,13 +186,13 @@ class StreamingAudioPlayer {
                 this.headerParsed = true;
 
                 // Process audio data after header
-                const audioData = currentData.slice(44);
+                const audioData = remaining.slice(44);
                 if (audioData.length > 0) {
                     this.processAudioData(audioData);
                 }
                 this.leftoverData = new Uint8Array(0);
             } else {
-                this.leftoverData = currentData;
+                this.leftoverData = remaining;
             }
         } else {
             this.processAudioData(currentData);
@@ -230,11 +241,8 @@ class StreamingAudioPlayer {
         // Create abort controller for cancellation
         this.abortController = new AbortController();
 
-        // Record request start time
-        this.requestStartTime = performance.now();
-
         if (this.onStatusChange) {
-            this.onStatusChange('Connecting...');
+            this.onStatusChange('⏳ Connecting');
         }
 
         try {
@@ -249,7 +257,7 @@ class StreamingAudioPlayer {
             }
 
             if (this.onStatusChange) {
-                this.onStatusChange('Streaming...');
+                this.onStatusChange('⬇️ Streaming');
             }
 
             const reader = response.body.getReader();
@@ -265,19 +273,30 @@ class StreamingAudioPlayer {
                 this.startPlayback();
             }
 
+            // Wait for actual playback to finish
+            if (this.isPlaying && this.audioContext) {
+                const remainingTime = this.nextPlayTime - this.audioContext.currentTime;
+                if (remainingTime > 0) {
+                    if (this.onStatusChange) {
+                        this.onStatusChange('▶️ Playing');
+                    }
+                    await new Promise(resolve => setTimeout(resolve, remainingTime * 1000));
+                }
+            }
+
             if (this.onStatusChange) {
-                this.onStatusChange('Playback finished');
+                this.onStatusChange('✅ Finished');
             }
 
         } catch (error) {
             if (error.name === 'AbortError') {
                 if (this.onStatusChange) {
-                    this.onStatusChange('Stopped');
+                    this.onStatusChange('⏹️ Stopped');
                 }
             } else {
                 console.error('Streaming failed:', error);
                 if (this.onStatusChange) {
-                    this.onStatusChange(`Error: ${error.message}`);
+                    this.onStatusChange('❌ Error');
                 }
                 throw error;
             }
@@ -294,7 +313,7 @@ class StreamingAudioPlayer {
         }
         this.reset();
         if (this.onStatusChange) {
-            this.onStatusChange('Idle');
+            this.onStatusChange('⏸️ Idle');
         }
     }
 }

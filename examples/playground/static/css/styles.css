@@ -202,9 +202,34 @@ body {
 .generate-row {
     display: flex;
     align-items: center;
-    justify-content: space-between;
     gap: 1rem;
     margin-top: 0.5rem;
+}
+
+.playback-info {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    margin-left: auto;
+    font-size: 0.875rem;
+    color: var(--text-secondary);
+}
+
+.playback-info #playback-status {
+    min-width: 100px;
+}
+
+.ttfa-display {
+    color: var(--text-primary);
+    display: flex;
+    align-items: center;
+}
+
+.ttfa-display #ttfa-network {
+    color: var(--text-primary);
+    font-weight: 700;
+    font-size: 2.5rem;
+    margin-left: 0.5rem;
 }
 
 /* Server Card */
@@ -221,7 +246,7 @@ body {
 }
 
 .logs-card[open] {
-    min-height: 200px;
+    min-height: 400px;
 }
 
 .logs-summary {
@@ -289,7 +314,7 @@ body {
     border-radius: 6px;
     border: 1px solid var(--border-color);
     margin-top: 0.75rem;
-    height: 200px;
+    height: 350px;
     overflow-y: auto;
     white-space: pre-wrap;
     word-break: break-word;
@@ -651,7 +676,7 @@ input[type="file"]::file-selector-button:hover {
 .settings-group h4 {
     font-size: 0.75rem;
     font-weight: 600;
-    color: var(--primary-color);
+    color: var(--text-primary);
     margin-bottom: 0.5rem;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -691,6 +716,31 @@ input[type="file"]::file-selector-button:hover {
 
 .model-params.hidden {
     display: none;
+}
+
+/* Voice Cloning Group (audio + ref_text) */
+.voice-clone-group {
+    padding: 0.875rem 1rem;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    margin-bottom: 0.875rem;
+}
+
+.voice-clone-group.hidden {
+    display: none;
+}
+
+.voice-clone-group > label {
+    display: block;
+    font-weight: 500;
+    color: var(--text-primary);
+    margin-bottom: 0.25rem;
+}
+
+.voice-clone-group > .form-hint {
+    display: block;
+    margin-bottom: 0.75rem;
 }
 
 /* Metrics Row */

@@ -16,7 +16,7 @@ class ServerConfig:
     """Configuration for VoxServe server launch (mirrors CLI arguments)."""
 
     # Model and server
-    model: str = "canopylabs/orpheus-3b-0.1-ft"
+    model: str = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
     port: int = 12345
     cuda_devices: List[int] = field(default_factory=lambda: [0])
 

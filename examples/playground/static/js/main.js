@@ -79,7 +79,6 @@ const elements = {
     // Audio player
     playbackStatus: document.getElementById('playback-status'),
     ttfaNetwork: document.getElementById('ttfa-network'),
-    ttfaPlayback: document.getElementById('ttfa-playback'),
     stopAudioBtn: document.getElementById('stop-audio-btn'),
 };
 
@@ -91,13 +90,9 @@ async function init() {
     audioPlayer = new StreamingAudioPlayer();
     audioPlayer.onStatusChange = (status) => {
         elements.playbackStatus.textContent = status;
-        elements.playbackStatus.classList.toggle('playing', status === 'Playing...');
     };
     audioPlayer.onTTFANetwork = (ttfa) => {
         elements.ttfaNetwork.textContent = `${Math.round(ttfa)}ms`;
-    };
-    audioPlayer.onTTFAPlayback = (ttfa) => {
-        elements.ttfaPlayback.textContent = `${Math.round(ttfa)}ms`;
     };
 
     // Load GPUs
@@ -132,7 +127,7 @@ async function loadGPUs() {
         elements.gpuCheckboxes.innerHTML = gpus.map((gpu, idx) => `
             <label>
                 <input type="checkbox" name="gpu" value="${gpu.index}" ${idx === 0 ? 'checked' : ''}>
-                GPU ${gpu.index}: ${gpu.name} (${gpu.memory_free_gb}/${gpu.memory_total_gb} GB)
+                GPU ${gpu.index}: ${gpu.name}
             </label>
         `).join('');
     } catch (error) {
@@ -192,26 +187,25 @@ function updateModelParams() {
     const modelId = elements.modelSelect.value;
     const caps = modelCapabilities[modelId] || {};
 
-    // Show/hide model params section
-    const hasParams = caps.supports_language || caps.supports_speaker ||
-                      caps.supports_ref_text || caps.supports_instruct;
+    // Show/hide model params section (language, speaker, instruct)
+    const hasParams = caps.supports_language || caps.supports_speaker || caps.supports_instruct;
     elements.modelParams.classList.toggle('hidden', !hasParams);
 
-    // Show/hide individual params
+    // Show/hide individual params within model-params section
     elements.languageGroup.style.display = caps.supports_language ? '' : 'none';
     elements.speakerGroup.style.display = caps.supports_speaker ? '' : 'none';
-    elements.refTextGroup.style.display = caps.supports_ref_text ? '' : 'none';
     elements.instructGroup.style.display = caps.supports_instruct ? '' : 'none';
 
-    // Update audio upload hint
-    if (caps.requires_audio) {
-        elements.audioUploadGroup.querySelector('label').textContent = 'Reference Audio (required)';
-    } else if (caps.supports_audio_input) {
-        elements.audioUploadGroup.querySelector('label').textContent = 'Reference Audio (optional)';
+    // Show/hide voice cloning section (audio + ref_text together)
+    elements.audioUploadGroup.classList.toggle('hidden', !caps.supports_audio_input);
+
+    // Set detokenize interval to 1 for Qwen models, clear for others
+    const isQwenModel = modelId.toLowerCase().includes('qwen');
+    if (isQwenModel) {
+        elements.detokenizeInterval.value = '1';
     } else {
-        elements.audioUploadGroup.style.display = 'none';
+        elements.detokenizeInterval.value = '';
     }
-    elements.audioUploadGroup.style.display = caps.supports_audio_input ? '' : 'none';
 }
 
 /**
@@ -284,10 +278,10 @@ async function startServer() {
         const result = await response.json();
 
         if (result.success) {
-            serverRunning = true;
             serverPort = config.port;
-            setStatus(result.message, 'success');
-            updateIndicator('running');
+            // Don't set serverRunning=true yet, wait for log confirmation
+            setStatus('Preparing...', '');
+            updateIndicator('starting');
             elements.startServerBtn.disabled = true;
             elements.stopServerBtn.disabled = false;
             elements.generateBtn.disabled = false;
@@ -340,9 +334,8 @@ async function generateAudio() {
         return;
     }
 
-    // Reset TTFA displays
+    // Reset TTFA display
     elements.ttfaNetwork.textContent = '-';
-    elements.ttfaPlayback.textContent = '-';
 
     // Build form data
     const formData = new FormData();
@@ -443,25 +436,24 @@ async function checkServerStatus() {
         const response = await fetch('/api/server/status');
         const status = await response.json();
 
-        if (status.running !== serverRunning) {
-            serverRunning = status.running;
-            if (serverRunning) {
-                serverPort = status.port;
-                updateIndicator('running');
-                elements.startServerBtn.disabled = true;
-                elements.stopServerBtn.disabled = false;
-                elements.generateBtn.disabled = false;
-                const uptime = formatUptime(status.uptime_seconds);
-                setStatus(`Running ${status.model} on port ${status.port} | uptime: ${uptime}`, 'success');
-                startLogPolling();
-            } else {
-                updateIndicator('stopped');
-                elements.startServerBtn.disabled = false;
-                elements.stopServerBtn.disabled = true;
-                elements.generateBtn.disabled = true;
-                stopLogPolling();
-            }
+        if (status.running && !serverRunning) {
+            // Process is running but we haven't confirmed ready yet
+            // Keep showing "Preparing..." - wait for log confirmation
+            serverPort = status.port;
+            elements.startServerBtn.disabled = true;
+            elements.stopServerBtn.disabled = false;
+            startLogPolling();
+        } else if (!status.running && (serverRunning || elements.stopServerBtn.disabled === false)) {
+            // Server stopped
+            serverRunning = false;
+            updateIndicator('stopped');
+            elements.startServerBtn.disabled = false;
+            elements.stopServerBtn.disabled = true;
+            elements.generateBtn.disabled = true;
+            setStatus('Server stopped', '');
+            stopLogPolling();
         } else if (serverRunning && status.uptime_seconds) {
+            // Server is confirmed running, update uptime
             const uptime = formatUptime(status.uptime_seconds);
             setStatus(`Running ${status.model} on port ${status.port} | uptime: ${uptime}`, 'success');
         }
@@ -501,6 +493,14 @@ function classifyLogLine(line) {
 }
 
 /**
+ * Check if log line indicates server is ready
+ */
+function checkServerReady(line) {
+    // Pattern: "Scheduler (DP rank X/Y) started successfully with model: ..."
+    return line.includes('Scheduler') && line.includes('started successfully');
+}
+
+/**
  * Append logs to the container
  */
 function appendLogs(logs) {
@@ -522,12 +522,29 @@ function appendLogs(logs) {
         }
         lineEl.textContent = line;
         elements.logsContainer.appendChild(lineEl);
+
+        // Check if server is ready based on log content
+        if (checkServerReady(line)) {
+            onServerReady();
+        }
     }
 
     // Auto-scroll if enabled
     if (elements.autoScroll.checked) {
         elements.logsContainer.scrollTop = elements.logsContainer.scrollHeight;
     }
+}
+
+/**
+ * Called when server ready message is detected in logs
+ */
+function onServerReady() {
+    serverRunning = true;
+    updateIndicator('running');
+    elements.startServerBtn.disabled = true;
+    elements.stopServerBtn.disabled = false;
+    elements.generateBtn.disabled = false;
+    setStatus('Server is ready!', 'success');
 }
 
 /**
