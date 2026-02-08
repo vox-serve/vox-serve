@@ -1603,7 +1603,7 @@ class Qwen3TTSModel(BaseLMWithDepth):
                 1 +                  # tts_bos + codec_pad
                 (prompt_ids.shape[1] - text_len_offset) +  # text tokens (for streaming: last text + codec_bos combined)
                 (0 if is_input_streaming else 1) +  # tts_eos (skip for input streaming)
-                (0 if is_input_streaming else 1)   # tts_pad + codec_bos (skip for input streaming - codec_bos is with last text token)
+                (0 if is_input_streaming else 1)   # tts_pad + codec_bos (skip if input stream; codec_bos in last text)
             )
         else:
             # Custom voice mode or x_vector_only mode
@@ -1617,7 +1617,7 @@ class Qwen3TTSModel(BaseLMWithDepth):
                 1 +                  # tts_bos + codec_pad
                 (prompt_ids.shape[1] - text_len_offset) +  # text tokens (for streaming: last text + codec_bos combined)
                 (0 if is_input_streaming else 1) +  # tts_eos (skip for input streaming)
-                (0 if is_input_streaming else 1)   # tts_pad + codec_bos (skip for input streaming - codec_bos is with last text token)
+                (0 if is_input_streaming else 1)   # tts_pad + codec_bos (skip if input stream; codec_bos in last text)
             )
 
         # Initialize tensors [seq_len, n_codebooks]

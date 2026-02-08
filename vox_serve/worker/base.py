@@ -389,10 +389,9 @@ class ModelWorker:
                     req.eos_injected = True
                 elif hasattr(self.model, 'config') and hasattr(self.model.config, 'tts_pad_token_id'):
                     req.input_tokens[0, -1] = self.model.config.tts_pad_token_id
-            else:
-                # Either waiting for more text, or EOS already injected - use pad token
-                if hasattr(self.model, 'config') and hasattr(self.model.config, 'tts_pad_token_id'):
-                    req.input_tokens[0, -1] = self.model.config.tts_pad_token_id
+            # Either waiting for more text, or EOS already injected - use pad token
+            elif hasattr(self.model, 'config') and hasattr(self.model.config, 'tts_pad_token_id'):
+                req.input_tokens[0, -1] = self.model.config.tts_pad_token_id
 
     def run_lm_prefill(self, requests: List[Request], lm_inputs: LMInputs) -> Optional[Coroutine]:
         if len(requests) == 0:
