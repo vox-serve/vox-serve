@@ -112,6 +112,12 @@ class OnlineScheduler(Scheduler):
                 # Only include if there are tokens left to decode
                 if next_decode_idx < len(req.lm_output_audio_tokens):
                     detokenize_candidates.append(req)
+                else:
+                    # All tokens have been decoded but done_all wasn't set
+                    # (can happen when done_lm_generation is set after the last detokenize)
+                    # Add to candidates so _send_responses can send completion
+                    req.done_all = True
+                    detokenize_candidates.append(req)
             elif next_decode_idx + detokenize_interval <= len(req.lm_output_audio_tokens):
                 detokenize_candidates.append(req)
 
@@ -126,9 +132,12 @@ class OnlineScheduler(Scheduler):
         #     print(f"Critical detokenize requests: {len(critical_requests)}, "
         #           f"Non-critical: {len(non_critical_requests)}")
 
-        # If there are no pressing requests ready for detokenization, do nothing
+        # Collect any done_all requests that need completion messages sent
+        done_all_requests = [req for req in detokenize_candidates if req.done_all]
+
+        # If there are no pressing requests ready for detokenization, only return done_all requests
         if not critical_requests:
-            return []
+            return done_all_requests
 
         selected_requests = []
 
@@ -186,7 +195,10 @@ class OnlineScheduler(Scheduler):
                 remaining -= 1
 
             # If we couldn't allocate any indices for this req, skip it
+            # unless it's done_all (needs to send completion message)
             if not audio_idx_list:
+                if req.done_all:
+                    selected_requests.append(req)
                 continue
 
             # Commit the allocation
@@ -218,7 +230,10 @@ class OnlineScheduler(Scheduler):
                     audio_idx_list.append(next_decode_idx)
                     remaining_slots -= 1
 
+                # Skip if no chunks, unless done_all (needs completion message)
                 if not audio_idx_list:
+                    if req.done_all:
+                        selected_requests.append(req)
                     continue
 
                 req.next_audio_decode_idx = audio_idx_list

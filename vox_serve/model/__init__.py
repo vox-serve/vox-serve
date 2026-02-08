@@ -30,8 +30,14 @@ MODEL_REGISTRY: Dict[str, Type[BaseLM]] = {
     "cosyvoice2": CosyVoice2Model,
     "FunAudioLLM/CosyVoice2-0.5B": CosyVoice2Model,
     "qwen3-tts": Qwen3TTSModel,
-    # TODO: Add actual HuggingFace model path when available
-    # "Qwen/Qwen3-TTS": Qwen3TTSModel,
+    "qwen3-tts-base": Qwen3TTSModel,
+    "qwen3-tts-voice-design": Qwen3TTSModel,
+    "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice": Qwen3TTSModel,
+    "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice": Qwen3TTSModel,
+    "Qwen/Qwen3-TTS-12Hz-1.7B-Base": Qwen3TTSModel,
+    "Qwen/Qwen3-TTS-12Hz-0.6B-Base": Qwen3TTSModel,
+    "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign": Qwen3TTSModel,
+    "Qwen/Qwen3-TTS-12Hz-0.6B-VoiceDesign": Qwen3TTSModel,
 }
 
 
@@ -106,13 +112,22 @@ def load_model(
         ValueError: If no suitable model class is found
     """
     model_class = get_model_class(model_name)
-    model = model_class(
-        model_name=model_name,
-        device=device,
-        dtype=dtype,
-        enable_torch_compile=enable_torch_compile,
+
+    # Only pass detokenize_interval to models that support it (currently only Qwen3TTS)
+    detokenize_interval = kwargs.pop("detokenize_interval", None)
+    model_kwargs = {
+        "model_name": model_name,
+        "device": device,
+        "dtype": dtype,
+        "enable_torch_compile": enable_torch_compile,
         **kwargs,
-    )
+    }
+    if detokenize_interval is not None:
+        if model_class != Qwen3TTSModel:
+            raise ValueError(f"Detokenize interval is only supported for Qwen3TTS models, got {model_name}")
+        model_kwargs["detokenize_interval"] = detokenize_interval
+
+    model = model_class(**model_kwargs)
 
     # Override default sampling config if CLI parameters are provided
     if any(param is not None for param in [

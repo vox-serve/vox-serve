@@ -1272,7 +1272,7 @@ class CudaGraphWorker(ModelWorker):
         # Check if any request is completely done
         for req in requests:
             if req.done_lm_generation and (
-                req.audio_decode_idx[-1] + self.detokenize_interval > len(req.lm_output_audio_tokens)
+                req.audio_decode_idx[-1] + self.detokenize_interval >= len(req.lm_output_audio_tokens)
             ):
                 req.done_all = True
 

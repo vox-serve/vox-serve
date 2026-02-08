@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from queue import Queue
-from typing import List, Optional, TypedDict
+from typing import Any, Dict, List, Optional, TypedDict
 
 import torch
 
@@ -18,6 +18,8 @@ class Request:
     prompt: str = None
     audio_path: str = None
     sampling_config: SamplingConfig = None
+    # Model-specific kwargs (e.g., language, speaker, ref_text for Qwen3-TTS)
+    model_kwargs: Dict[str, Any] = field(default_factory=dict)
 
     # next_position_id == len(input_tokens) + len(lm_output_tokens) + 1
     next_position_id: int = None

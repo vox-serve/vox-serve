@@ -57,6 +57,7 @@ class APIServer:
         page_size: int = 2048,
         async_scheduling: bool = False,
         dp_size: int = 1,
+        detokenize_interval: int = None,
     ):
         """Initialize the API server and start scheduler process(es).
 
@@ -85,6 +86,7 @@ class APIServer:
             page_size: Size of each KV cache page.
             async_scheduling: Enable async scheduling mode.
             dp_size: Data parallel replica count.
+            detokenize_interval: Interval for audio detokenization (model-specific).
         """
         self.model_name = model_name
         self.request_socket_path = request_socket_path
@@ -113,6 +115,7 @@ class APIServer:
         self.scheduler_type = scheduler_type
         self.async_scheduling = async_scheduling
         self.dp_size = dp_size
+        self.detokenize_interval = detokenize_interval
         self.scheduler_processes = None  # Will be a list for DP mode
         self.logger = get_logger(__name__)
 
@@ -265,6 +268,8 @@ class APIServer:
                         cmd.append("--enable-torch-compile")
                     if self.async_scheduling:
                         cmd.append("--async-scheduling")
+                    if self.detokenize_interval is not None:
+                        cmd.extend(["--detokenize-interval", str(self.detokenize_interval)])
 
                     self.logger.info(f"Starting DP rank {rank} with CUDA_VISIBLE_DEVICES={gpu_mapping[rank]}")
                     process = subprocess.Popen(cmd, env=env)
@@ -336,6 +341,8 @@ class APIServer:
                     cmd.append("--enable-torch-compile")
                 if self.async_scheduling:
                     cmd.append("--async-scheduling")
+                if self.detokenize_interval is not None:
+                    cmd.extend(["--detokenize-interval", str(self.detokenize_interval)])
 
                 process = subprocess.Popen(cmd)
                 self.scheduler_process = process
@@ -482,12 +489,18 @@ class APIServer:
                 if self.running:
                     self.logger.error(f"Sender loop error: {e}")
 
-    def start_streaming_request(self, text: str = None, audio_path: str = None) -> str:
+    def start_streaming_request(
+        self,
+        text: str = None,
+        audio_path: str = None,
+        model_kwargs: Dict = None,
+    ) -> str:
         """Create and enqueue a streaming request, returning its request ID.
 
         Args:
             text: Input text to synthesize.
             audio_path: Optional path to input audio for STS-capable models.
+            model_kwargs: Optional model-specific parameters (e.g., language, speaker).
 
         Returns:
             The request ID used for subsequent streaming.
@@ -511,6 +524,7 @@ class APIServer:
             "prompt": text,
             "audio_path": audio_path,
             "is_streaming": True,
+            "model_kwargs": model_kwargs or {},
         }
         request_json = json.dumps(request_dict)
         message = f"{request_json}|audio_data_placeholder".encode("utf-8")
@@ -573,13 +587,19 @@ class APIServer:
             # Small async sleep to avoid busy-waiting
             await asyncio.sleep(0.001)
 
-    def generate_audio(self, text: str = None, audio_path: str = None) -> str:
+    def generate_audio(
+        self,
+        text: str = None,
+        audio_path: str = None,
+        model_kwargs: Dict = None,
+    ) -> str:
         """
         Generate audio from text and return path to the audio file.
 
         Args:
             text: Input text to synthesize (optional if audio_path provided)
             audio_path: Path to input audio file (optional)
+            model_kwargs: Optional model-specific parameters (e.g., language, speaker).
 
         Returns:
             Path to the generated audio file
@@ -602,6 +622,7 @@ class APIServer:
                 "prompt": text,
                 "audio_path": audio_path,
                 "is_streaming": False,
+                "model_kwargs": model_kwargs or {},
             }
 
             request_json = json.dumps(request_dict)
@@ -684,7 +705,17 @@ api_server = None
 
 
 @app.post("/generate")
-async def generate(text: str = Form(...), audio: Optional[UploadFile] = File(None), streaming: bool = Form(True)):
+async def generate(
+    text: str = Form(...),
+    audio: Optional[UploadFile] = File(None),
+    streaming: bool = Form(True),
+    # Model-specific parameters (used by models like Qwen3-TTS)
+    language: Optional[str] = Form(None),
+    speaker: Optional[str] = Form(None),
+    ref_text: Optional[str] = Form(None),
+    instruct: Optional[str] = Form(None),
+    x_vector_only_mode: Optional[bool] = Form(None),
+):
     """
     Generate speech from text and return audio file or streaming response.
 
@@ -692,6 +723,11 @@ async def generate(text: str = Form(...), audio: Optional[UploadFile] = File(Non
         text: Input text to synthesize
         audio: Optional input audio file
         streaming: Whether to return streaming response (default: True)
+        language: Language code for synthesis (model-specific, e.g., "en", "zh", "auto")
+        speaker: Speaker ID for multi-speaker models (model-specific)
+        ref_text: Reference text for voice cloning (used with audio for ICL mode)
+        instruct: Instruction text for voice design/control (model-specific)
+        x_vector_only_mode: If True, use only speaker embedding without ICL (model-specific)
 
     Returns:
         Audio file as direct response (if streaming=False) or streaming audio response (if streaming=True)
@@ -709,10 +745,23 @@ async def generate(text: str = Form(...), audio: Optional[UploadFile] = File(Non
         content = await audio.read()
         await run_in_threadpool(Path(audio_path).write_bytes, content)
 
+    # Build model-specific kwargs (only include non-None values)
+    model_kwargs = {}
+    if language is not None:
+        model_kwargs["language"] = language
+    if speaker is not None:
+        model_kwargs["speaker"] = speaker
+    if ref_text is not None:
+        model_kwargs["ref_text"] = ref_text
+    if instruct is not None:
+        model_kwargs["instruct"] = instruct
+    if x_vector_only_mode is not None:
+        model_kwargs["x_vector_only_mode"] = x_vector_only_mode
+
     try:
         if streaming:
             # Streaming response: enqueue request immediately, then stream asynchronously
-            request_id = api_server.start_streaming_request(text, audio_path)
+            request_id = api_server.start_streaming_request(text, audio_path, model_kwargs)
 
             async def audio_stream():
                 # WAV header for 24kHz mono 16-bit audio
@@ -744,7 +793,7 @@ async def generate(text: str = Form(...), audio: Optional[UploadFile] = File(Non
             )
         else:
             # Non-streaming response
-            audio_file = await run_in_threadpool(api_server.generate_audio, text, audio_path)
+            audio_file = await run_in_threadpool(api_server.generate_audio, text, audio_path, model_kwargs)
             request_id = Path(audio_file).stem
 
             return FileResponse(path=audio_file, media_type="audio/wav", filename=f"{request_id}.wav")
@@ -888,6 +937,12 @@ def main():
         default="",
         help="Suffix to append to IPC socket paths to avoid conflicts (default: empty)",
     )
+    parser.add_argument(
+        "--detokenize-interval",
+        type=int,
+        default=None,
+        help="Interval for audio detokenization (default: None, model-specific). Only supported by qwen3-tts models.",
+    )
     args = parser.parse_args()
 
     # Set global log level for the entire application
@@ -961,6 +1016,7 @@ def main():
         enable_torch_compile=args.enable_torch_compile,
         async_scheduling=args.async_scheduling,
         dp_size=args.dp_size,
+        detokenize_interval=args.detokenize_interval,
     )
 
     # Register signal handlers for graceful shutdown

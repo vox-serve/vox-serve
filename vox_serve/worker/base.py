@@ -32,6 +32,7 @@ class ModelWorker:
         detokenizer_device: Optional[str] = None,
         dp_rank: int = 0,
         dp_size: int = 1,
+        detokenize_interval: int = None,
     ):
         # Load model with sampling parameters
         self.model = load_model(
@@ -48,6 +49,7 @@ class ModelWorker:
             greedy=greedy,
             enable_torch_compile=enable_torch_compile,
             audio_decoder_device=detokenizer_device,
+            detokenize_interval=detokenize_interval,
         )
         self.device = "cuda:0"
         self.detokenizer_device = detokenizer_device or self.device
@@ -240,7 +242,11 @@ class ModelWorker:
         for req in lm_requests:
             if not req.done_lm_prefill:
                 # prefill request
-                preprocess_output = self.model.preprocess(prompt=req.prompt, audio_path=req.audio_path)
+                preprocess_output = self.model.preprocess(
+                    prompt=req.prompt,
+                    audio_path=req.audio_path,
+                    **req.model_kwargs,
+                )
                 req.input_tokens = preprocess_output.input_tokens
                 # Set input length based on prepared input tokens
                 if req.input_tokens is not None:
@@ -619,7 +625,7 @@ class ModelWorker:
         # Check if any request is completely done
         for req in requests:
             if req.done_lm_generation and (
-                req.audio_decode_idx[-1] + self.detokenize_interval > len(req.lm_output_audio_tokens)
+                req.audio_decode_idx[-1] + self.detokenize_interval >= len(req.lm_output_audio_tokens)
             ):
                 req.done_all = True
 

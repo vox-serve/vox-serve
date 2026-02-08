@@ -126,5 +126,11 @@ class OfflineScheduler(Scheduler):
             if audio_idx_list:
                 req.next_audio_decode_idx = audio_idx_list
                 selected_requests.append(req)
+            elif req.done_lm_generation:
+                # All tokens have been decoded but done_all wasn't set
+                # (can happen when done_lm_generation is set after the last detokenize)
+                # Add to selected_requests so _send_responses can send completion
+                req.done_all = True
+                selected_requests.append(req)
 
         return selected_requests

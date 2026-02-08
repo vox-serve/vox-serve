@@ -36,6 +36,7 @@ class DecoderCache:
         sliced_values = {f.name: _slice(getattr(self, f.name)) for f in fields(self)}
         return type(self)(**sliced_values)
 
+    @torch.no_grad()
     def copy_from(self, src: "DecoderCache") -> None:
         """Copy data from source cache into this cache (in-place).
 
