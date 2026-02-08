@@ -60,6 +60,16 @@ class Request:
     is_pressing: bool = False
     is_streaming: bool = False
 
+    # Input streaming support - allows incremental text input during generation
+    is_input_streaming: bool = False
+    input_text_buffer: str = ""  # Buffer for accumulating text before prefill
+    pending_text_tokens: Queue = field(default_factory=Queue)  # Queue of text token IDs for decode phase
+    text_token_cursor: int = 0  # Index of next text token to consume
+    total_text_tokens: int = 0  # Total text tokens received so far
+    text_complete: bool = False  # True when TEXT_COMPLETE received
+    waiting_for_text: bool = False  # True when generation paused waiting for text
+    prefill_ready: bool = False  # True when enough text buffered to start prefill
+
     # timestamp tracking for online scheduling
     chunk_send_timestamps: List[float] = field(default_factory=list)  # when each chunk was sent
     chunk_durations: List[float] = field(default_factory=list)  # duration of each chunk in seconds

@@ -290,6 +290,10 @@ class ModelWorker:
 
             else:
                 # decode request
+                # For input streaming requests, inject the next text token
+                if req.is_input_streaming:
+                    self._inject_streaming_text_token(req)
+
                 input_ids_list.append(req.input_tokens)  # (1, codebook)
                 input_features_list.append(req.input_features)
                 input_masks_list.append(req.input_masks)
@@ -343,6 +347,26 @@ class ModelWorker:
             "repetition_cache": repetition_cache,
             "is_prefill": is_prefill,
         }
+
+    def _inject_streaming_text_token(self, req: Request) -> None:
+        """
+        For input streaming requests, get the next text token from the pending queue
+        and inject it into req.input_tokens[:, -1] (the text column).
+
+        This is called during decode phase for each input streaming request.
+        If no text token is available and text is complete, uses pad token.
+        """
+        try:
+            next_text_token = req.pending_text_tokens.get_nowait()
+            req.text_token_cursor += 1
+            # Inject into input_tokens - column -1 is text token
+            # input_tokens shape: (1, n_codebooks)
+            req.input_tokens[0, -1] = next_text_token
+        except Exception:
+            # No text available - use pad token (same as non-streaming behavior)
+            # This happens when text_complete=True and queue is drained
+            if hasattr(self.model, 'config') and hasattr(self.model.config, 'tts_pad_token_id'):
+                req.input_tokens[0, -1] = self.model.config.tts_pad_token_id
 
     def run_lm_prefill(self, requests: List[Request], lm_inputs: LMInputs) -> Optional[Coroutine]:
         if len(requests) == 0:

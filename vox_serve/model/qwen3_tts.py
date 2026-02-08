@@ -1887,7 +1887,10 @@ class Qwen3TTSModel(BaseLMWithDepth):
             # column 0 = audio token (codebook 0), column depth_n_codebooks = text token
             req.input_tokens = torch.zeros(1, self.n_codebooks, dtype=torch.long, device=self.device)
             req.input_tokens[0, 0] = output_ids_cb0[i, 0].item()  # Audio token at column 0
-            req.input_tokens[0, -1] = self.config.tts_pad_token_id  # Text token at last column
+            # For input streaming requests, text token will be injected by worker
+            # For non-streaming, use pad token as default
+            if not getattr(req, 'is_input_streaming', False):
+                req.input_tokens[0, -1] = self.config.tts_pad_token_id  # Text token at last column
 
             req.input_masks = torch.ones(self.n_codebooks, dtype=torch.bool, device=self.device)[None, :]
 
