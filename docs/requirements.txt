@@ -5,3 +5,4 @@ myst-parser>=2.0
 sphinx-copybutton>=0.5
 sphinxcontrib-mermaid>=0.9
 nbsphinx>=0.9
+linkify-it-py>=2.0
