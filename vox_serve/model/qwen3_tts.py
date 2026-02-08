@@ -1947,7 +1947,9 @@ class Qwen3TTSModel(BaseLMWithDepth):
         for i, req in enumerate(requests):
             token_id = output_ids[i].item()
             req.lm_output_tokens[-1][0, i_iteration] = token_id
-            req.lm_output_audio_tokens[-1][0, i_iteration] = token_id
+            # Don't overwrite the last audio token's depth codes when EOS was generated
+            if not req.done_lm_generation:
+                req.lm_output_audio_tokens[-1][0, i_iteration] = token_id
             req.input_features[:] += ci_embed[i : i + 1]
 
         return output_ids, ci_embed
