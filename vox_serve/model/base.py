@@ -118,6 +118,11 @@ class BaseLM(ABC):
             and self.default_sampling_config.repetition_penalty != 1.0
         )
 
+    @property
+    def supports_input_streaming(self) -> bool:
+        """Indicates if the model supports input streaming mode."""
+        return False
+
     def audio_decoder_initial_cache(self, batch_size: int) -> Optional[DecoderCache]:
         """
         Optional initial cache for audio decoders used during postprocessing.

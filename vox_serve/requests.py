@@ -69,6 +69,7 @@ class Request:
     text_complete: bool = False  # True when TEXT_COMPLETE received
     waiting_for_text: bool = False  # True when generation paused waiting for text
     prefill_ready: bool = False  # True when enough text buffered to start prefill
+    eos_injected: bool = False  # True after EOS token has been injected (for input streaming)
 
     # timestamp tracking for online scheduling
     chunk_send_timestamps: List[float] = field(default_factory=list)  # when each chunk was sent

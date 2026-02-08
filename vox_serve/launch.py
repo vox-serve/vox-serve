@@ -992,10 +992,13 @@ async def send_text_chunk(
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
-@app.post("/generate/stream/{request_id}/end")
-async def end_input_streaming(request_id: str):
+@app.get("/generate/stream/{request_id}/audio")
+async def stream_audio(request_id: str):
     """
-    Signal end of text input and return streaming audio response.
+    Start streaming audio output for an input streaming request.
+
+    Call this immediately after /start to receive audio chunks as they are generated,
+    while continuing to send text via /text endpoint.
 
     Args:
         request_id: Request identifier from start_input_streaming
@@ -1006,35 +1009,65 @@ async def end_input_streaming(request_id: str):
     if api_server is None:
         raise HTTPException(status_code=503, detail="Server not ready")
 
+    # Validate request exists
+    with api_server.request_lock:
+        request_data = api_server.pending_requests.get(request_id)
+        if not request_data:
+            raise HTTPException(status_code=404, detail=f"Request {request_id} not found")
+        if not request_data.get("input_streaming"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Request {request_id} is not an input streaming request",
+            )
+
+    async def audio_stream():
+        # WAV header for 24kHz mono 16-bit audio
+        wav_header = io.BytesIO()
+        with wave.open(wav_header, "wb") as wf:
+            wf.setnchannels(1)  # Mono
+            wf.setsampwidth(2)  # 16-bit
+            wf.setframerate(24000)  # 24kHz
+            wf.writeframes(b"")  # Empty data for header
+
+        wav_header.seek(0)
+        header_bytes = wav_header.read()
+        yield header_bytes
+
+        # Stream audio chunks asynchronously
+        async for chunk in api_server.async_stream_chunks(request_id):
+            yield chunk
+
+    return StreamingResponse(
+        audio_stream(),
+        media_type="audio/wav",
+        headers={
+            "Content-Disposition": f"attachment; filename=stream_{request_id[:8]}.wav",
+            "Cache-Control": "no-cache",
+        },
+    )
+
+
+@app.post("/generate/stream/{request_id}/end")
+async def end_input_streaming(request_id: str):
+    """
+    Signal end of text input for an input streaming request.
+
+    This signals that no more text will be sent. If you're using the /audio endpoint
+    to stream audio, that stream will complete after this is called.
+
+    Args:
+        request_id: Request identifier from start_input_streaming
+
+    Returns:
+        JSON confirmation
+    """
+    if api_server is None:
+        raise HTTPException(status_code=503, detail="Server not ready")
+
     try:
         # Signal text completion
         api_server.end_input_streaming(request_id)
-
-        async def audio_stream():
-            # WAV header for 24kHz mono 16-bit audio
-            wav_header = io.BytesIO()
-            with wave.open(wav_header, "wb") as wf:
-                wf.setnchannels(1)  # Mono
-                wf.setsampwidth(2)  # 16-bit
-                wf.setframerate(24000)  # 24kHz
-                wf.writeframes(b"")  # Empty data for header
-
-            wav_header.seek(0)
-            header_bytes = wav_header.read()
-            yield header_bytes
-
-            # Stream audio chunks asynchronously
-            async for chunk in api_server.async_stream_chunks(request_id):
-                yield chunk
-
-        return StreamingResponse(
-            audio_stream(),
-            media_type="audio/wav",
-            headers={
-                "Content-Disposition": f"attachment; filename=stream_{request_id[:8]}.wav",
-                "Cache-Control": "no-cache",
-            },
-        )
+        return {"status": "completed", "request_id": request_id}
     except HTTPException:
         raise
     except Exception as e:
