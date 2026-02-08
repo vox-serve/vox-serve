@@ -12,21 +12,46 @@ let lastLogCount = 0;
 
 // DOM Elements
 const elements = {
-    // Server controls
+    // Server controls - Basic
     modelSelect: document.getElementById('model-select'),
     portInput: document.getElementById('port-input'),
     gpuCheckboxes: document.getElementById('gpu-checkboxes'),
     batchSize: document.getElementById('batch-size'),
-    topP: document.getElementById('top-p'),
-    topK: document.getElementById('top-k'),
-    temperature: document.getElementById('temperature'),
-    maxTokens: document.getElementById('max-tokens'),
-    cudaGraph: document.getElementById('cuda-graph'),
     startServerBtn: document.getElementById('start-server-btn'),
     stopServerBtn: document.getElementById('stop-server-btn'),
     serverStatus: document.getElementById('server-status'),
     statusMessage: document.getElementById('status-message'),
     serverIndicator: document.getElementById('server-indicator'),
+
+    // Advanced - Scheduler
+    schedulerType: document.getElementById('scheduler-type'),
+    asyncScheduling: document.getElementById('async-scheduling'),
+    dpSize: document.getElementById('dp-size'),
+
+    // Advanced - Memory
+    maxNumPages: document.getElementById('max-num-pages'),
+    pageSize: document.getElementById('page-size'),
+
+    // Advanced - Sampling
+    topP: document.getElementById('top-p'),
+    topK: document.getElementById('top-k'),
+    minP: document.getElementById('min-p'),
+    temperature: document.getElementById('temperature'),
+    maxTokens: document.getElementById('max-tokens'),
+    cfgScale: document.getElementById('cfg-scale'),
+    repetitionPenalty: document.getElementById('repetition-penalty'),
+    repetitionWindow: document.getElementById('repetition-window'),
+    greedy: document.getElementById('greedy'),
+
+    // Advanced - Performance
+    cudaGraph: document.getElementById('cuda-graph'),
+    enableDisaggregation: document.getElementById('enable-disaggregation'),
+    enableTorchCompile: document.getElementById('enable-torch-compile'),
+    enableNvtx: document.getElementById('enable-nvtx'),
+
+    // Advanced - Other
+    logLevel: document.getElementById('log-level'),
+    detokenizeInterval: document.getElementById('detokenize-interval'),
 
     // Logs
     logsContainer: document.getElementById('logs-container'),
@@ -213,15 +238,41 @@ async function startServer() {
     clearLogs();
 
     const config = {
+        // Basic
         model: elements.modelSelect.value,
         port: parseInt(elements.portInput.value),
         cuda_devices: selectedGPUs,
         max_batch_size: parseInt(elements.batchSize.value),
+
+        // Scheduler
+        scheduler_type: elements.schedulerType.value,
+        async_scheduling: elements.asyncScheduling.checked,
+        dp_size: parseInt(elements.dpSize.value),
+
+        // Memory
+        max_num_pages: parseInt(elements.maxNumPages.value),
+        page_size: parseInt(elements.pageSize.value),
+
+        // Sampling
         top_p: elements.topP.value ? parseFloat(elements.topP.value) : null,
         top_k: elements.topK.value ? parseInt(elements.topK.value) : null,
+        min_p: elements.minP.value ? parseFloat(elements.minP.value) : null,
         temperature: elements.temperature.value ? parseFloat(elements.temperature.value) : null,
         max_tokens: elements.maxTokens.value ? parseInt(elements.maxTokens.value) : null,
+        cfg_scale: elements.cfgScale.value ? parseFloat(elements.cfgScale.value) : null,
+        repetition_penalty: elements.repetitionPenalty.value ? parseFloat(elements.repetitionPenalty.value) : null,
+        repetition_window: elements.repetitionWindow.value ? parseInt(elements.repetitionWindow.value) : null,
+        greedy: elements.greedy.checked,
+
+        // Performance
         enable_cuda_graph: elements.cudaGraph.checked,
+        enable_disaggregation: elements.enableDisaggregation.checked,
+        enable_torch_compile: elements.enableTorchCompile.checked,
+        enable_nvtx: elements.enableNvtx.checked,
+
+        // Other
+        log_level: elements.logLevel.value,
+        detokenize_interval: elements.detokenizeInterval.value ? parseInt(elements.detokenizeInterval.value) : null,
     };
 
     try {

@@ -39,17 +39,43 @@ server_manager = VoxServeServerManager()
 
 # Pydantic models for API
 class ServerStartRequest(BaseModel):
-    """Request body for starting the server."""
+    """Request body for starting the server (mirrors all CLI arguments)."""
 
+    # Model and server
     model: str = "canopylabs/orpheus-3b-0.1-ft"
-    port: int = 8000
+    port: int = 12345
     cuda_devices: List[int] = [0]
+
+    # Scheduler
+    scheduler_type: str = "base"
+    async_scheduling: bool = False
+
+    # Batch and memory
     max_batch_size: int = 8
+    max_num_pages: int = 2048
+    page_size: int = 128
+
+    # Sampling parameters
     top_p: Optional[float] = None
     top_k: Optional[int] = None
+    min_p: Optional[float] = None
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
+    repetition_penalty: Optional[float] = None
+    repetition_window: Optional[int] = None
+    cfg_scale: Optional[float] = None
+    greedy: bool = False
+
+    # Performance
     enable_cuda_graph: bool = True
+    enable_disaggregation: bool = False
+    dp_size: int = 1
+    enable_nvtx: bool = False
+    enable_torch_compile: bool = False
+
+    # Other
+    log_level: str = "INFO"
+    detokenize_interval: Optional[int] = None
 
 
 class ServerStartResponse(BaseModel):
@@ -113,48 +139,49 @@ async def list_gpus():
 
 @app.get("/api/models", response_model=ModelsResponse)
 async def list_models():
-    """List supported models with their capabilities."""
+    """List supported models with their capabilities (full HuggingFace IDs)."""
     models = [
+        # Standard models
         ModelInfo(
-            id="orpheus",
-            name="Orpheus-3B",
+            id="canopylabs/orpheus-3b-0.1-ft",
+            name="canopylabs/orpheus-3b-0.1-ft",
             supports_audio_input=True,
         ),
         ModelInfo(
-            id="csm",
-            name="CSM-1B",
+            id="sesame/csm-1b",
+            name="sesame/csm-1b",
         ),
         ModelInfo(
-            id="zonos",
-            name="Zonos-v0.1",
+            id="Zyphra/Zonos-v0.1-transformer",
+            name="Zyphra/Zonos-v0.1-transformer",
         ),
         ModelInfo(
-            id="glm",
-            name="GLM-4-Voice-9B",
-            supports_audio_input=True,
-            requires_audio=True,
-        ),
-        ModelInfo(
-            id="step",
-            name="Step-Audio-2-Mini",
+            id="zai-org/glm-4-voice-9b",
+            name="zai-org/glm-4-voice-9b",
             supports_audio_input=True,
             requires_audio=True,
         ),
         ModelInfo(
-            id="chatterbox",
-            name="Chatterbox",
+            id="stepfun-ai/Step-Audio-2-mini",
+            name="stepfun-ai/Step-Audio-2-mini",
             supports_audio_input=True,
             requires_audio=True,
         ),
         ModelInfo(
-            id="cosyvoice2",
-            name="CosyVoice2-0.5B",
+            id="ResembleAI/chatterbox",
+            name="ResembleAI/chatterbox",
+            supports_audio_input=True,
+            requires_audio=True,
+        ),
+        ModelInfo(
+            id="FunAudioLLM/CosyVoice2-0.5B",
+            name="FunAudioLLM/CosyVoice2-0.5B",
             supports_audio_input=True,
         ),
-        # Qwen3-TTS models from https://huggingface.co/collections/Qwen/qwen3-tts
+        # Qwen3-TTS models (all 6 from HuggingFace collection)
         ModelInfo(
             id="Qwen/Qwen3-TTS-12Hz-1.7B-Base",
-            name="Qwen3-TTS-1.7B-Base",
+            name="Qwen/Qwen3-TTS-12Hz-1.7B-Base",
             supports_audio_input=True,
             supports_language=True,
             supports_speaker=True,
@@ -162,7 +189,7 @@ async def list_models():
         ),
         ModelInfo(
             id="Qwen/Qwen3-TTS-12Hz-0.6B-Base",
-            name="Qwen3-TTS-0.6B-Base",
+            name="Qwen/Qwen3-TTS-12Hz-0.6B-Base",
             supports_audio_input=True,
             supports_language=True,
             supports_speaker=True,
@@ -170,7 +197,7 @@ async def list_models():
         ),
         ModelInfo(
             id="Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
-            name="Qwen3-TTS-1.7B-CustomVoice",
+            name="Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
             supports_audio_input=True,
             supports_language=True,
             supports_speaker=True,
@@ -178,7 +205,7 @@ async def list_models():
         ),
         ModelInfo(
             id="Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
-            name="Qwen3-TTS-0.6B-CustomVoice",
+            name="Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
             supports_audio_input=True,
             supports_language=True,
             supports_speaker=True,
@@ -186,14 +213,14 @@ async def list_models():
         ),
         ModelInfo(
             id="Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
-            name="Qwen3-TTS-1.7B-VoiceDesign",
+            name="Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
             supports_audio_input=True,
             supports_language=True,
             supports_instruct=True,
         ),
         ModelInfo(
             id="Qwen/Qwen3-TTS-12Hz-0.6B-VoiceDesign",
-            name="Qwen3-TTS-0.6B-VoiceDesign",
+            name="Qwen/Qwen3-TTS-12Hz-0.6B-VoiceDesign",
             supports_audio_input=True,
             supports_language=True,
             supports_instruct=True,
@@ -204,17 +231,32 @@ async def list_models():
 
 @app.post("/api/server/start", response_model=ServerStartResponse)
 async def start_server(request: ServerStartRequest):
-    """Start the VoxServe server."""
+    """Start the VoxServe server with full CLI configuration."""
     config = ServerConfig(
         model=request.model,
         port=request.port,
         cuda_devices=request.cuda_devices,
+        scheduler_type=request.scheduler_type,
+        async_scheduling=request.async_scheduling,
         max_batch_size=request.max_batch_size,
+        max_num_pages=request.max_num_pages,
+        page_size=request.page_size,
         top_p=request.top_p,
         top_k=request.top_k,
+        min_p=request.min_p,
         temperature=request.temperature,
         max_tokens=request.max_tokens,
+        repetition_penalty=request.repetition_penalty,
+        repetition_window=request.repetition_window,
+        cfg_scale=request.cfg_scale,
+        greedy=request.greedy,
         enable_cuda_graph=request.enable_cuda_graph,
+        enable_disaggregation=request.enable_disaggregation,
+        dp_size=request.dp_size,
+        enable_nvtx=request.enable_nvtx,
+        enable_torch_compile=request.enable_torch_compile,
+        log_level=request.log_level,
+        detokenize_interval=request.detokenize_interval,
     )
     success, message = server_manager.start(config)
     return ServerStartResponse(success=success, message=message)
@@ -241,7 +283,7 @@ async def server_status():
 
 
 @app.get("/api/server/logs")
-async def server_logs(lines: int = 100):
+async def server_logs(lines: int = 200):
     """Get recent server logs."""
     return {"logs": server_manager.get_logs(lines)}
 
