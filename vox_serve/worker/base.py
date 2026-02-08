@@ -32,6 +32,7 @@ class ModelWorker:
         detokenizer_device: Optional[str] = None,
         dp_rank: int = 0,
         dp_size: int = 1,
+        detokenize_interval: int = None,
     ):
         # Load model with sampling parameters
         self.model = load_model(
@@ -48,6 +49,7 @@ class ModelWorker:
             greedy=greedy,
             enable_torch_compile=enable_torch_compile,
             audio_decoder_device=detokenizer_device,
+            detokenize_interval=detokenize_interval,
         )
         self.device = "cuda:0"
         self.detokenizer_device = detokenizer_device or self.device

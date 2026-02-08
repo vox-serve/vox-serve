@@ -959,7 +959,11 @@ class Qwen3TTSModel(BaseLMWithDepth):
         tokenizer_path=None,  # TODO: Update with actual tokenizer path
         enable_torch_compile=False,
         audio_decoder_device=None,
+        detokenize_interval=None,
     ):
+        # Store detokenize_interval (default to 10 if not provided)
+        self._detokenize_interval = detokenize_interval if detokenize_interval is not None else 10
+
         if model_name == "qwen3-tts":
             model_name = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
         elif model_name == "qwen3-tts-base":
@@ -1167,7 +1171,7 @@ class Qwen3TTSModel(BaseLMWithDepth):
     @property
     def detokenize_interval(self) -> int:
         """Interval at which to detokenize outputs."""
-        return 10
+        return self._detokenize_interval
 
     @property
     def detokenize_overlap(self) -> int:

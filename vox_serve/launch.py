@@ -57,6 +57,7 @@ class APIServer:
         page_size: int = 2048,
         async_scheduling: bool = False,
         dp_size: int = 1,
+        detokenize_interval: int = None,
     ):
         """Initialize the API server and start scheduler process(es).
 
@@ -85,6 +86,7 @@ class APIServer:
             page_size: Size of each KV cache page.
             async_scheduling: Enable async scheduling mode.
             dp_size: Data parallel replica count.
+            detokenize_interval: Interval for audio detokenization (model-specific).
         """
         self.model_name = model_name
         self.request_socket_path = request_socket_path
@@ -113,6 +115,7 @@ class APIServer:
         self.scheduler_type = scheduler_type
         self.async_scheduling = async_scheduling
         self.dp_size = dp_size
+        self.detokenize_interval = detokenize_interval
         self.scheduler_processes = None  # Will be a list for DP mode
         self.logger = get_logger(__name__)
 
@@ -265,6 +268,8 @@ class APIServer:
                         cmd.append("--enable-torch-compile")
                     if self.async_scheduling:
                         cmd.append("--async-scheduling")
+                    if self.detokenize_interval is not None:
+                        cmd.extend(["--detokenize-interval", str(self.detokenize_interval)])
 
                     self.logger.info(f"Starting DP rank {rank} with CUDA_VISIBLE_DEVICES={gpu_mapping[rank]}")
                     process = subprocess.Popen(cmd, env=env)
@@ -336,6 +341,8 @@ class APIServer:
                     cmd.append("--enable-torch-compile")
                 if self.async_scheduling:
                     cmd.append("--async-scheduling")
+                if self.detokenize_interval is not None:
+                    cmd.extend(["--detokenize-interval", str(self.detokenize_interval)])
 
                 process = subprocess.Popen(cmd)
                 self.scheduler_process = process
@@ -930,6 +937,12 @@ def main():
         default="",
         help="Suffix to append to IPC socket paths to avoid conflicts (default: empty)",
     )
+    parser.add_argument(
+        "--detokenize-interval",
+        type=int,
+        default=None,
+        help="Interval for audio detokenization (default: None, model-specific). Only supported by qwen3-tts models.",
+    )
     args = parser.parse_args()
 
     # Set global log level for the entire application
@@ -1003,6 +1016,7 @@ def main():
         enable_torch_compile=args.enable_torch_compile,
         async_scheduling=args.async_scheduling,
         dp_size=args.dp_size,
+        detokenize_interval=args.detokenize_interval,
     )
 
     # Register signal handlers for graceful shutdown

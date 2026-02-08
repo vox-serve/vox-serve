@@ -38,6 +38,7 @@ class Scheduler:
         async_scheduling: bool = False,
         dp_rank: int = 0,
         dp_size: int = 1,
+        detokenize_interval: int = None,
     ):
         self.device = device
         self.max_batch_size = max_batch_size
@@ -77,6 +78,7 @@ class Scheduler:
             "enable_torch_compile": enable_torch_compile,
             "dp_rank": dp_rank,
             "dp_size": dp_size,
+            "detokenize_interval": detokenize_interval,
         }
 
         # Simplified worker selection logic
