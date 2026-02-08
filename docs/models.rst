@@ -5,7 +5,7 @@ VoxServe supports multiple TTS and STS model families. The tables below summariz
 current families, their shorthand codes, and a representative Hugging Face identifier.
 
 Text-to-speech (TTS)
--------------------
+--------------------
 
 .. list-table:: TTS model families
    :header-rows: 1
@@ -27,14 +27,17 @@ Text-to-speech (TTS)
      - ``canopylabs/orpheus-3b-0.1-ft`` (`link <https://huggingface.co/canopylabs/orpheus-3b-0.1-ft>`_)
      - TTS model developed by Canopy Labs. Using 3B LLM with SNAC detokenizer.
    * - ``qwen3-tts``
-     - ``Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice`` (`link <https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice>`_)
-     - TTS model developed by Alibaba Qwen team. Using 1.7B LLM with depth transformer and Mimi-like detokenizer. Currently supports custom voice mode only. Other modes under development.
+     - | ``Qwen/Qwen3-TTS-12Hz-1.7B-Base``
+       | ``Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice``
+       | ``Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign``
+       | (`link <https://huggingface.co/collections/Qwen/qwen3-tts>`_)
+     - TTS model developed by Alibaba Qwen team. Using 1.7B LLM with depth transformer and Mimi-like detokenizer.
    * - ``zonos``
      - ``Zyphra/Zonos-v0.1-transformer`` (`link <https://huggingface.co/Zyphra/Zonos-v0.1-transformer>`_)
      - TTS model developed by Zyphra. Using 1B LLM with DAC detokenizer.
 
 Speech-to-speech (STS)
----------------------
+----------------------
 
 .. list-table:: STS model families
    :header-rows: 1
