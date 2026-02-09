@@ -940,8 +940,13 @@ class Qwen3TTSTokenizerV2DecoderTransformerModel(nn.Module):
 
         # Create position IDs with offset using tensor operations (CUDA graph compatible)
         # Create base range [0, 1, 2, ..., seq_len-1] and add offset
+        # position_offset shape: [batch_size] or [1]
+        # base_positions shape: [seq_len]
+        # Broadcast to [batch_size, seq_len]
         base_positions = torch.arange(seq_len, device=inputs_embeds.device, dtype=torch.long)
-        position_ids = (base_positions + position_offset).unsqueeze(0).expand(batch_size, -1)
+        # Reshape position_offset to [batch_size, 1] for proper broadcasting
+        offset_expanded = position_offset.view(-1, 1)
+        position_ids = base_positions.unsqueeze(0) + offset_expanded  # [batch_size, seq_len]
 
         hidden_states = inputs_embeds
 
@@ -1514,8 +1519,8 @@ class Qwen3TTSTokenizerV2Decoder(nn.Module):
             device=device, dtype=dtype
         )
 
-        # Position offset as 1-element tensor for in-place updates
-        position_offset = torch.zeros(1, dtype=torch.long, device=device)
+        # Position offset tensor - one per batch item for independent tracking
+        position_offset = torch.zeros(batch_size, dtype=torch.long, device=device)
 
         return Qwen3TTSDecoderCache(
             attention_cache=attention_cache,
