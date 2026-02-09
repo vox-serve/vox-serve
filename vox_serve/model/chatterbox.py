@@ -14,7 +14,9 @@ from ..encoder.chatterbox import ChatterboxCondEnc, T3Cond
 from ..flashinfer_utils import FlashInferWrapper, apply_rope_pos_ids, rms_norm
 from ..requests import Request
 from ..sampling import Sampler, SamplingConfig
-from ..tokenizer.chatterbox import ChatterboxDecoder
+from ..tokenizer.cosyvoice2 import CosyVoice2Decoder, CosyVoice2DecoderCache
+from ..tokenizer.cosyvoice_flow import FlowDecoderCache, FlowEncoderCache
+from ..tokenizer.hifigan import HiFTGeneratorCache
 from .base import BaseLM, PreprocessOutput
 
 
@@ -406,16 +408,29 @@ class ChatterboxModel(BaseLM):
         dtype=torch.bfloat16,
         device="cuda:0",
         enable_torch_compile=False,
+        use_detokenizer_cache=False,
         audio_decoder_device=None,
     ):
         if model_name == "chatterbox":
             model_name = "ResembleAI/chatterbox"
         super().__init__(model_name, device, dtype, enable_torch_compile, audio_decoder_device)
         self.model_name = model_name
+        # use_detokenizer_cache controls cache behavior:
+        # - True: Per-request evolving cache (each request has its own cache that updates)
+        # - False: Shared prompt cache mode (single static cache shared across all requests/timesteps)
+        self.use_detokenizer_cache = use_detokenizer_cache
+
         self.config = ChatterboxConfig.english_only() if "chatterbox" in model_name else ChatterboxConfig.multilingual()
         self.model = ChatterboxForCausalLM(self.config)
-        self.audio_decoder = ChatterboxDecoder()
 
+        # Initialize the unified audio decoder (without loading weights yet)
+        self.audio_decoder = CosyVoice2Decoder(
+            device=self.audio_decoder_device,
+            shared_prompt_cache_mode=(not self.use_detokenizer_cache),
+            load_weights=False,  # We'll load weights from s3gen.safetensors
+        )
+
+        # Load LM model weights
         state_dict = {}
         with safe_open(
             hf_hub_download(repo_id=model_name, filename="t3_cfg.safetensors", revision=None),
@@ -426,7 +441,7 @@ class ChatterboxModel(BaseLM):
         self.model.load_state_dict(state_dict, strict=True)
         self.model.to(dtype).to(device)
 
-        # Initialize audio decoder on specified device (may differ from main device)
+        # Load audio decoder weights from s3gen.safetensors
         detokenizer_state_dict = {}
         with safe_open(
             hf_hub_download(repo_id=model_name, filename="s3gen.safetensors", revision=None),
@@ -434,16 +449,33 @@ class ChatterboxModel(BaseLM):
         ) as f:
             for key in f.keys():
                 detokenizer_state_dict[key] = f.get_tensor(key)
-        self.audio_decoder.load_state_dict(detokenizer_state_dict, strict=False)
-        self.audio_decoder.to(self.audio_decoder_device).eval()
+
+        # Split state dict into flow and hift components
+        flow_state_dict = {
+            k.replace("flow.", ""): v
+            for k, v in detokenizer_state_dict.items()
+            if k.startswith("flow.")
+        }
+        hift_state_dict = {
+            k.replace("mel2wav.", ""): v
+            for k, v in detokenizer_state_dict.items()
+            if k.startswith("mel2wav.")
+        }
+        self.audio_decoder.load_state_dict_split(flow_state_dict, hift_state_dict, strict=False)
 
         # Use provided tokenizer path or default to model_name
         self.text_tokenizer = self._load_tokenizer(model_name)
 
+        # Load default conditionals and move gen dict to audio_decoder_device
         self.default_conds = Conditionals.load(
             hf_hub_download(repo_id=model_name, filename="conds.pt", revision=None),
             map_location=device,
         )
+        # Create a copy on audio_decoder_device for postprocess
+        self.default_conds_audio_decoder = {
+            k: v.to(self.audio_decoder_device) if torch.is_tensor(v) else v
+            for k, v in self.default_conds.gen.items()
+        }
 
         self._num_attention_heads = self.model.config.num_attention_heads
         self._num_key_value_heads = self.model.config.num_key_value_heads
@@ -468,6 +500,141 @@ class ChatterboxModel(BaseLM):
             repetition_window=-1,
             cfg_scale=None,
         )
+
+        # Initialize decoder cache after default conditions are set
+        with torch.cuda.device(self.audio_decoder_device):
+            self._audio_decoder_initial_cache = (
+                self.audio_decoder.init_cache(self.default_conds_audio_decoder).to(self.audio_decoder_device)
+            )
+
+        # For prompt caching mode (use_detokenizer_cache=False), store the precomputed prompt cache
+        if not self.use_detokenizer_cache:
+            self._shared_prompt_cache = self._audio_decoder_initial_cache
+
+    def _expand_flow_encoder_cache(self, cache: FlowEncoderCache, batch_size: int) -> FlowEncoderCache:
+        """Expand flow encoder cache to match the given batch size."""
+        if batch_size == 1:
+            # Return a deep copy so per-request cache state is isolated
+            return FlowEncoderCache(
+                conformer_att_cache=cache.conformer_att_cache.clone()
+                if cache.conformer_att_cache is not None
+                else None,
+                conformer_cnn_cache=cache.conformer_cnn_cache.clone()
+                if cache.conformer_cnn_cache is not None
+                else None,
+                up_conformer_att_cache=cache.up_conformer_att_cache.clone()
+                if cache.up_conformer_att_cache is not None
+                else None,
+                up_conformer_cnn_cache=cache.up_conformer_cnn_cache.clone()
+                if cache.up_conformer_cnn_cache is not None
+                else None,
+            )
+
+        # Expand conformer attention caches (batch dimension is typically dim 0)
+        new_conformer_att_cache = None
+        if cache.conformer_att_cache is not None and cache.conformer_att_cache.numel() > 0:
+            new_conformer_att_cache = cache.conformer_att_cache.repeat(
+                batch_size, *[1] * (cache.conformer_att_cache.dim() - 1)
+            )
+
+        new_conformer_cnn_cache = None
+        if cache.conformer_cnn_cache is not None and cache.conformer_cnn_cache.numel() > 0:
+            new_conformer_cnn_cache = cache.conformer_cnn_cache.repeat(
+                batch_size, *[1] * (cache.conformer_cnn_cache.dim() - 1)
+            )
+
+        new_up_conformer_att_cache = None
+        if cache.up_conformer_att_cache is not None and cache.up_conformer_att_cache.numel() > 0:
+            new_up_conformer_att_cache = cache.up_conformer_att_cache.repeat(
+                batch_size, *[1] * (cache.up_conformer_att_cache.dim() - 1)
+            )
+
+        new_up_conformer_cnn_cache = None
+        if cache.up_conformer_cnn_cache is not None and cache.up_conformer_cnn_cache.numel() > 0:
+            new_up_conformer_cnn_cache = cache.up_conformer_cnn_cache.repeat(
+                batch_size, *[1] * (cache.up_conformer_cnn_cache.dim() - 1)
+            )
+
+        return FlowEncoderCache(
+            conformer_att_cache=new_conformer_att_cache,
+            conformer_cnn_cache=new_conformer_cnn_cache,
+            up_conformer_att_cache=new_up_conformer_att_cache,
+            up_conformer_cnn_cache=new_up_conformer_cnn_cache,
+        )
+
+    def _expand_flow_decoder_cache(self, cache: FlowDecoderCache, batch_size: int) -> FlowDecoderCache:
+        """Expand flow decoder cache to match the given batch size."""
+        if batch_size == 1:
+            # Return a deep copy so per-request cache state is isolated
+            return FlowDecoderCache(
+                cnn_cache=[
+                    [(layer_cache.clone() if layer_cache is not None else None) for layer_cache in timestep_cache]
+                    for timestep_cache in cache.cnn_cache
+                ]
+                if cache.cnn_cache is not None
+                else None,
+                att_cache=cache.att_cache.clone() if cache.att_cache is not None else None,
+            )
+
+        new_cnn_cache = None
+        if cache.cnn_cache is not None:
+            new_cnn_cache = [
+                [
+                    layer_cache.repeat(batch_size, 1, 1, 1) if layer_cache is not None else None
+                    for layer_cache in timestep_cache
+                ]
+                for timestep_cache in cache.cnn_cache
+            ]
+
+        new_att_cache = None
+        if cache.att_cache is not None:
+            new_att_cache = cache.att_cache.repeat(batch_size, 1, 1, 1, 1, 1, 1)
+
+        return FlowDecoderCache(
+            cnn_cache=new_cnn_cache,
+            att_cache=new_att_cache,
+        )
+
+    def audio_decoder_initial_cache(self, batch_size: int):
+        """Create initial decoder cache for the given batch size.
+
+        When use_detokenizer_cache=False (prompt caching mode):
+            Returns None - the shared prompt cache is stored in self._shared_prompt_cache
+            and will be used directly in postprocess() without worker management.
+
+        When use_detokenizer_cache=True (per-request caching mode):
+            Returns a per-request copy of the cache that the worker will manage and update.
+        """
+        if not self.use_detokenizer_cache:
+            # Prompt caching mode: return None so worker doesn't manage the cache
+            return None
+
+        base_cache = self._audio_decoder_initial_cache
+
+        # Expand flow caches to match the batch size
+        expanded_encoder_cache = self._expand_flow_encoder_cache(base_cache.flow_encoder_cache, batch_size)
+        expanded_decoder_cache = self._expand_flow_decoder_cache(base_cache.flow_decoder_cache, batch_size)
+
+        # Expand HiFT cache
+        expanded_hift_cache = None
+        if base_cache.hift_cache is not None:
+            expanded_hift_cache = HiFTGeneratorCache(
+                mel_cache=base_cache.hift_cache.mel_cache.repeat(batch_size, 1, 1)
+                if base_cache.hift_cache.mel_cache is not None
+                else None,
+                source_cache=base_cache.hift_cache.source_cache.repeat(batch_size, 1, 1)
+                if base_cache.hift_cache.source_cache is not None
+                else None,
+                speech_cache=base_cache.hift_cache.speech_cache.repeat(batch_size, 1)
+                if base_cache.hift_cache.speech_cache is not None
+                else None,
+            )
+
+        return CosyVoice2DecoderCache(
+            flow_encoder_cache=expanded_encoder_cache,
+            flow_decoder_cache=expanded_decoder_cache,
+            hift_cache=expanded_hift_cache,
+        ).to(self.audio_decoder_device)
 
     @property
     def n_codebooks(self):
@@ -497,7 +664,7 @@ class ChatterboxModel(BaseLM):
     @property
     def detokenize_interval(self) -> int:
         """Interval at which to detokenize outputs."""
-        return 25
+        return 28
 
     @property
     def detokenize_overlap(self) -> int:
@@ -511,7 +678,7 @@ class ChatterboxModel(BaseLM):
         """
         if self.default_sampling_config.max_tokens is not None:
             return self.default_sampling_config.max_tokens
-        return 200
+        return 1000
 
     @property
     def n_channels(self) -> int:
@@ -521,7 +688,7 @@ class ChatterboxModel(BaseLM):
     @property
     def output_audio_length(self) -> int:
         """Output audio length (in samples) at each postprocess call."""
-        return 21120
+        return 24000
 
     @property
     def supports_audio_input(self) -> bool:
@@ -706,11 +873,18 @@ class ChatterboxModel(BaseLM):
                 device=self.device,
             )
 
+        # In per-request caching mode, create a per-request decoder cache
+        # In prompt caching mode, decoder_cache is None (shared cache is used in postprocess)
+        decoder_cache = None
+        if self.use_detokenizer_cache:
+            decoder_cache = self.audio_decoder_initial_cache(batch_size=1)
+
         return PreprocessOutput(
             input_tokens=input_ids,
             repetition_cache=repetition_cache,
             input_masks=input_masks,
             input_features=input_features,
+            decoder_cache=decoder_cache,
         )
 
     def forward(
@@ -810,12 +984,41 @@ class ChatterboxModel(BaseLM):
 
         return output_ids, task
 
-    def postprocess(self, token_ids: torch.Tensor):
-        """Convert token IDs to audio bytes."""
-        # TODO: currently lacking the way to have request-specific ref_dict
-        audio_tensor = self.audio_decoder.decode(
-            token_ids[:, :, 0],
+    def postprocess(
+        self,
+        token_ids: torch.Tensor,
+        decoder_cache: CosyVoice2DecoderCache | None = None,
+    ):
+        """Convert token IDs to audio using chunk-based streaming decoding.
+
+        Args:
+            token_ids: Token IDs to convert to audio, shape (batch_size, seq_len, n_codebooks)
+            decoder_cache: Decoder cache from previous chunk (for per-request caching mode)
+                          or None (for prompt caching mode where shared cache is used)
+
+        Returns:
+            Audio tensor, shape (batch_size, 1, audio_samples)
+        """
+        if not self.use_detokenizer_cache:
+            # Prompt caching mode: use shared prompt cache for all requests
+            audio_tensor, _ = self.audio_decoder.decode_chunk(
+                token_ids[:, :, 0].to(self.audio_decoder_device),
+                speech_token_lens=self.detokenize_interval,
+                decoder_cache=self._shared_prompt_cache,
+                ref_dict=self.default_conds_audio_decoder,
+                last_chunk=False,
+            )
+            return audio_tensor[:, None, :]
+
+        # Per-request caching mode: use and update per-request cache
+        audio_tensor, new_decoder_cache = self.audio_decoder.decode_chunk(
+            token_ids[:, :, 0].to(self.audio_decoder_device),
             speech_token_lens=self.detokenize_interval,
-            ref_dict=self.default_conds.gen,
+            decoder_cache=decoder_cache,
+            ref_dict=self.default_conds_audio_decoder,
+            last_chunk=False,
         )
+        # Update the cache in-place for the next call
+        decoder_cache.copy_from(new_decoder_cache)
+
         return audio_tensor[:, None, :]
