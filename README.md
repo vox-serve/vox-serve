@@ -13,6 +13,7 @@ VoxServe is a serving system for Speech Language Models (SpeechLMs). VoxServe pr
 
 ### News
 
+- **[2025-02]** New blog post: [Light-Speed Qwen3-TTS Serving at Scale with VoxServe](https://vox-serve.github.io/2026/02/09/qwen3-tts-support.html)
 - **[2025-02]** We released our paper: [VoxServe: A Streaming-Centric Serving System for Speech Language Models](https://arxiv.org/abs/2602.00269)
 
 ### Usage
