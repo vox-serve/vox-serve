@@ -73,13 +73,17 @@ See the [models documentation](https://vox-serve.github.io/vox-serve/models.html
 
 VoxServe is optimized for real-time speech synthesis. The demo below shows a TTS request achieving **40 ms** Time-To-First-Audio (TTFA) on an NVIDIA H100 GPU with `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice`.
 
-<div style="padding:60% 0 0 0;position:relative;"><iframe src="https://player.vimeo.com/video/1163095537?badge=0&amp;autopause=0&amp;player_id=0&amp;app_id=58479" frameborder="0" allow="autoplay; fullscreen; picture-in-picture; clipboard-write; encrypted-media; web-share" referrerpolicy="strict-origin-when-cross-origin" style="position:absolute;top:0;left:0;width:100%;height:100%;" title="voxserve-qwen3tts-demo1"></iframe></div><script src="https://player.vimeo.com/api/player.js"></script>
+<a href="https://vimeo.com/1163095537">
+  <img src="https://vumbnail.com/1163095537.jpg" alt="Ultra-Low Latency Demo" width="600">
+</a>
 
 ### Real-Time LLM Integration
 
 Qwen3-TTS supports incremental text input, enabling seamless integration with LLMs for voice chatbots. The demo below shows VoxServe connected to a local LLM with low end-to-end latency.
 
-<div style="padding:60% 0 0 0;position:relative;"><iframe src="https://player.vimeo.com/video/1163095770?badge=0&amp;autopause=0&amp;player_id=0&amp;app_id=58479" frameborder="0" allow="autoplay; fullscreen; picture-in-picture; clipboard-write; encrypted-media; web-share" referrerpolicy="strict-origin-when-cross-origin" style="position:absolute;top:0;left:0;width:100%;height:100%;" title="voxserve-qwen3tts-demo2"></iframe></div><script src="https://player.vimeo.com/api/player.js"></script>
+<a href="https://vimeo.com/1163095770">
+  <img src="https://vumbnail.com/1163095770.jpg" alt="LLM Integration Demo" width="600">
+</a>
 
 ## Playground
 
