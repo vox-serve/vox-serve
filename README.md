@@ -1,5 +1,9 @@
 <p align="center">
-  <img src="docs/_static/images/logo-dark.png" alt="VoxServe Logo" width="320" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/_static/images/logo-dark.png">
+    <source media="(prefers-color-scheme: light)" srcset="docs/_static/images/logo-light.png">
+    <img src="docs/_static/images/logo-dark.png" alt="VoxServe Logo" width="320" />
+  </picture>
 </p>
 
 <h1 align="center">VoxServe</h1>
