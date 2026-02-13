@@ -1214,7 +1214,7 @@ class CudaGraphWorker(ModelWorker):
         self.cuda_graph_buffers["detokenize_input"][:actual_batch_size].copy_(token_ids_stacked)
 
         # If a decoder cache is required, batch-merge request caches and copy into the CUDA buffer
-        if self.cuda_graph_buffers["detokenize_cache"] is not None:
+        if self.cuda_graph_buffers["detokenize_cache"] is not None and decoder_caches:
             # Merge per-request caches along batch dimension
             batched_cache = DecoderCache.cat(decoder_caches)
             # Slice the buffer to the actual batch size and copy data from batched_cache

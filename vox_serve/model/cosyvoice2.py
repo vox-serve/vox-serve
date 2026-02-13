@@ -544,11 +544,17 @@ class CosyVoice2Model(BaseLM):
                 else None,
             )
 
+        # Expand speaker embedding if present
+        expanded_speaker_embedding = None
+        if base_cache.speaker_embedding is not None:
+            expanded_speaker_embedding = base_cache.speaker_embedding.repeat(batch_size, 1)
+
         # Clone cache tensors for the given batch size
         return CosyVoice2DecoderCache(
             flow_encoder_cache=expanded_encoder_cache,
             flow_decoder_cache=expanded_decoder_cache,
             hift_cache=expanded_hift_cache,
+            speaker_embedding=expanded_speaker_embedding,
         ).to(self.audio_decoder_device)
 
     @property
