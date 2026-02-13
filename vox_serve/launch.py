@@ -30,11 +30,12 @@ logger = get_logger(__name__)
 
 
 class APIServer:
-    """Manage scheduler processes and route API requests to the model backends."""
+    """Manage conductor processes and route API requests to the model backends."""
+
     def __init__(
         self,
         model_name: str = "canopylabs/orpheus-3b-0.1-ft",
-        scheduler_type: str = "base",
+        conductor_type: str = "base",
         request_socket_path: str = "/tmp/vox_serve_request.ipc",
         result_socket_path: str = "/tmp/vox_serve_result.ipc",
         output_dir: str = "/tmp/vox_serve_audio",
@@ -55,14 +56,14 @@ class APIServer:
         enable_torch_compile: bool = False,
         max_num_pages: int = None,
         page_size: int = 2048,
-        async_scheduling: bool = False,
+        async_mode: bool = False,
         dp_size: int = 1,
     ):
-        """Initialize the API server and start scheduler process(es).
+        """Initialize the API server and start conductor process(es).
 
         Args:
             model_name: Model identifier or local path.
-            scheduler_type: Scheduler backend to use.
+            conductor_type: Conductor type to use.
             request_socket_path: IPC path for request socket (without rank suffix).
             result_socket_path: IPC path for result socket.
             output_dir: Directory to write generated audio and uploads.
@@ -83,7 +84,7 @@ class APIServer:
             enable_torch_compile: Enable torch.compile optimization.
             max_num_pages: Maximum number of KV cache pages.
             page_size: Size of each KV cache page.
-            async_scheduling: Enable async scheduling mode.
+            async_mode: Enable async mode for conductor.
             dp_size: Data parallel replica count.
         """
         self.model_name = model_name
@@ -110,10 +111,10 @@ class APIServer:
         self.enable_torch_compile = enable_torch_compile
         self.max_num_pages = max_num_pages
         self.page_size = page_size
-        self.scheduler_type = scheduler_type
-        self.async_scheduling = async_scheduling
+        self.conductor_type = conductor_type
+        self.async_mode = async_mode
         self.dp_size = dp_size
-        self.scheduler_processes = None  # Will be a list for DP mode
+        self.conductor_processes = None  # Will be a list for DP mode
         self.logger = get_logger(__name__)
 
         # Concurrent request tracking
@@ -127,10 +128,10 @@ class APIServer:
         # Data parallel routing state
         self.dp_request_counter = 0  # Round-robin counter for request routing
 
-        # Start scheduler process(es)
-        self._start_schedulers()
+        # Start conductor process(es)
+        self._start_conductors()
 
-        # Wait a moment for schedulers to initialize
+        # Wait a moment for conductors to initialize
         time.sleep(2)
 
         # Initialize ZMQ context and sockets
@@ -171,15 +172,15 @@ class APIServer:
         # Register cleanup on exit
         atexit.register(self.cleanup)
 
-    def _start_schedulers(self):
-        """Start the scheduler process(es)."""
+    def _start_conductors(self):
+        """Start the conductor process(es)."""
         try:
             import subprocess
             import sys
 
             if self.dp_size > 1:
                 # Data parallel mode: use subprocess to set CUDA_VISIBLE_DEVICES before Python starts
-                self.scheduler_processes = []
+                self.conductor_processes = []
 
                 # Parse existing CUDA_VISIBLE_DEVICES mask if present
                 import os
@@ -202,26 +203,26 @@ class APIServer:
 
                 for rank in range(self.dp_size):
                     request_socket_path = f"{self.request_socket_path}_{rank}"
-                    # All schedulers connect to the same result socket (no rank suffix)
+                    # All conductors connect to the same result socket (no rank suffix)
                     result_socket_path = self.result_socket_path
 
                     # Create environment with CUDA_VISIBLE_DEVICES set to the mapped GPU
                     env = os.environ.copy()
                     env["CUDA_VISIBLE_DEVICES"] = str(gpu_mapping[rank])
 
-                    # Build command to run the scheduler entry point
+                    # Build command to run the conductor entry point
                     cmd = [
                         sys.executable,
                         "-m",
-                        "vox_serve.scheduler_entry",
+                        "vox_serve.conductor_entry",
                         "--dp-rank",
                         str(rank),
                         "--dp-size",
                         str(self.dp_size),
                         "--model-name",
                         self.model_name,
-                        "--scheduler-type",
-                        self.scheduler_type,
+                        "--conductor-type",
+                        self.conductor_type,
                         "--max-batch-size",
                         str(self.max_batch_size),
                         "--page-size",
@@ -263,36 +264,36 @@ class APIServer:
                         cmd.append("--enable-nvtx")
                     if self.enable_torch_compile:
                         cmd.append("--enable-torch-compile")
-                    if self.async_scheduling:
-                        cmd.append("--async-scheduling")
+                    if self.async_mode:
+                        cmd.append("--async-mode")
 
                     self.logger.info(f"Starting DP rank {rank} with CUDA_VISIBLE_DEVICES={gpu_mapping[rank]}")
                     process = subprocess.Popen(cmd, env=env)
-                    self.scheduler_processes.append(process)
+                    self.conductor_processes.append(process)
                     self.logger.info(
-                        f"Started scheduler process (DP rank {rank}/{self.dp_size}) with PID: {process.pid}"
+                        f"Started conductor process (DP rank {rank}/{self.dp_size}) with PID: {process.pid}"
                     )
             else:
-                # Single scheduler mode - use subprocess for consistency
-                self.scheduler_processes = None
+                # Single conductor mode - use subprocess for consistency
+                self.conductor_processes = None
 
                 # Use rank 0 with suffix for request, but no suffix for result
                 request_socket_path = f"{self.request_socket_path}_0"
                 result_socket_path = self.result_socket_path
 
-                # Build command to run the scheduler entry point
+                # Build command to run the conductor entry point
                 cmd = [
                     sys.executable,
                     "-m",
-                    "vox_serve.scheduler_entry",
+                    "vox_serve.conductor_entry",
                     "--dp-rank",
                     "0",
                     "--dp-size",
                     "1",
                     "--model-name",
                     self.model_name,
-                    "--scheduler-type",
-                    self.scheduler_type,
+                    "--conductor-type",
+                    self.conductor_type,
                     "--max-batch-size",
                     str(self.max_batch_size),
                     "--page-size",
@@ -334,16 +335,16 @@ class APIServer:
                     cmd.append("--enable-nvtx")
                 if self.enable_torch_compile:
                     cmd.append("--enable-torch-compile")
-                if self.async_scheduling:
-                    cmd.append("--async-scheduling")
+                if self.async_mode:
+                    cmd.append("--async-mode")
 
                 process = subprocess.Popen(cmd)
-                self.scheduler_process = process
-                self.logger.info(f"Started scheduler process with PID: {process.pid}")
+                self.conductor_process = process
+                self.logger.info(f"Started conductor process with PID: {process.pid}")
 
         except Exception as e:
-            self.logger.error(f"Failed to start scheduler: {e}")
-            raise RuntimeError(f"Could not start scheduler process: {e}") from e
+            self.logger.error(f"Failed to start conductor: {e}")
+            raise RuntimeError(f"Could not start conductor process: {e}") from e
 
     def _process_messages(self):
         """Process incoming scheduler messages in a background thread."""
@@ -407,38 +408,38 @@ class APIServer:
                     self.logger.error(f"Error in message processing: {e}")
                 continue
 
-    def _stop_scheduler(self):
-        """Stop scheduler process(es) if they are running."""
+    def _stop_conductor(self):
+        """Stop conductor process(es) if they are running."""
         if self.dp_size > 1:
-            # Stop all scheduler processes in DP mode
-            if self.scheduler_processes:
-                self.logger.info(f"Stopping {self.dp_size} scheduler processes...")
-                for i, process in enumerate(self.scheduler_processes):
+            # Stop all conductor processes in DP mode
+            if self.conductor_processes:
+                self.logger.info(f"Stopping {self.dp_size} conductor processes...")
+                for i, process in enumerate(self.conductor_processes):
                     if process.poll() is None:  # Process is still running
                         try:
                             process.terminate()
                             try:
                                 process.wait(timeout=1)
                             except subprocess.TimeoutExpired:
-                                self.logger.warning(f"Scheduler {i} didn't terminate gracefully, forcing kill...")
+                                self.logger.warning(f"Conductor {i} didn't terminate gracefully, forcing kill...")
                                 process.kill()
                                 process.wait(timeout=1)
                         except Exception as e:
-                            self.logger.error(f"Error stopping scheduler {i}: {e}")
-                self.logger.info("All scheduler processes stopped")
-        elif hasattr(self, "scheduler_process") and self.scheduler_process and self.scheduler_process.poll() is None:
-            self.logger.info("Stopping scheduler process...")
+                            self.logger.error(f"Error stopping conductor {i}: {e}")
+                self.logger.info("All conductor processes stopped")
+        elif hasattr(self, "conductor_process") and self.conductor_process and self.conductor_process.poll() is None:
+            self.logger.info("Stopping conductor process...")
             try:
-                self.scheduler_process.terminate()
+                self.conductor_process.terminate()
                 try:
-                    self.scheduler_process.wait(timeout=1)
+                    self.conductor_process.wait(timeout=1)
                 except subprocess.TimeoutExpired:
-                    self.logger.warning("Scheduler didn't terminate gracefully, forcing kill...")
-                    self.scheduler_process.kill()
-                    self.scheduler_process.wait(timeout=1)
+                    self.logger.warning("Conductor didn't terminate gracefully, forcing kill...")
+                    self.conductor_process.kill()
+                    self.conductor_process.wait(timeout=1)
             except Exception as e:
-                self.logger.error(f"Error stopping scheduler: {e}")
-            self.logger.info("Scheduler process stopped")
+                self.logger.error(f"Error stopping conductor: {e}")
+            self.logger.info("Conductor process stopped")
 
     def _enqueue_request(self, payload: bytes) -> None:
         """Enqueue a request payload to be forwarded to the scheduler.
@@ -664,7 +665,7 @@ class APIServer:
         except Exception as e:
             self.logger.error(f"Error cleaning up ZMQ: {e}")
 
-        self._stop_scheduler()
+        self._stop_conductor()
 
 
 # Initialize FastAPI app
@@ -812,13 +813,13 @@ def main():
         help="Model name or path to use for text-to-speech synthesis (default: canopylabs/orpheus-3b-0.1-ft)",
     )
     parser.add_argument(
-        "--scheduler-type",
+        "--conductor-type",
         type=str,
         default="base",
-        choices=["base", "online", "offline"],
-        help="Type of scheduler to use (default: base)",
+        choices=["base", "online", "offline", "disaggregated"],
+        help="Type of conductor to use (default: base)",
     )
-    parser.add_argument("--async-scheduling", action="store_true", help="Enable async scheduling mode (default: False)")
+    parser.add_argument("--async-mode", action="store_true", help="Enable async mode for conductor (default: False)")
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind the server to (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=8000, help="Port to bind the server to (default: 8000)")
     parser.add_argument("--max-batch-size", type=int, default=8, help="Maximum batch size for inference (default: 8)")
@@ -924,13 +925,13 @@ def main():
             sys.exit(1)
         logger.info(f"Data parallel mode enabled with {args.dp_size} replicas (using GPUs 0-{args.dp_size - 1})")
 
-    # Automatically select disaggregation scheduler if enable_disaggregation is set with CUDA graphs
-    scheduler_type = args.scheduler_type
+    # Automatically select disaggregated conductor if enable_disaggregation is set with CUDA graphs
+    conductor_type = args.conductor_type
     if args.enable_disaggregation and enable_cuda_graph:
         logger.info(
-            "Disaggregation mode enabled: using 'disaggregation' scheduler with parallel LM and detokenization loops"
+            "Disaggregation mode enabled: using 'disaggregated' conductor with parallel LM and detokenization loops"
         )
-        scheduler_type = "disaggregation"
+        conductor_type = "disaggregated"
 
     # Construct socket paths with optional suffix
     request_socket_path = f"/tmp/vox_serve_request{args.socket_suffix}.ipc"
@@ -940,7 +941,7 @@ def main():
     global api_server
     api_server = APIServer(
         model_name=args.model,
-        scheduler_type=scheduler_type,
+        conductor_type=conductor_type,
         request_socket_path=request_socket_path,
         result_socket_path=result_socket_path,
         max_batch_size=args.max_batch_size,
@@ -959,7 +960,7 @@ def main():
         enable_disaggregation=args.enable_disaggregation,
         enable_nvtx=args.enable_nvtx,
         enable_torch_compile=args.enable_torch_compile,
-        async_scheduling=args.async_scheduling,
+        async_mode=args.async_mode,
         dp_size=args.dp_size,
     )
 
@@ -969,7 +970,7 @@ def main():
 
     try:
         logger.info(f"Starting vox-serve API server with model: {args.model}")
-        logger.info("Scheduler and API server will be available shortly...")
+        logger.info("Conductor and API server will be available shortly...")
         uvicorn.run(app, host=args.host, port=args.port, access_log=False)
     except KeyboardInterrupt:
         logger.info("\nShutdown requested by user")

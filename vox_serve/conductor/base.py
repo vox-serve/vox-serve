@@ -1,18 +1,40 @@
+"""
+Conductor base class for distributed inference coordination.
+
+The Conductor orchestrates request lifecycle and coordinates
+strategy execution across one or more Pools.
+"""
+
 import asyncio
 import json
 import time
-from typing import List
+from typing import List, Optional
 
 import torch
 import zmq
 import zmq.asyncio
 
+from ..pool import CudaGraphPool, Pool
 from ..requests import Request
+from ..strategy import (
+    AudioCodecStrategy,
+    EncoderStrategy,
+    LLMStrategy,
+)
 from ..utils import get_logger
-from ..worker import CudaGraphWorker, ModelWorker
 
 
-class Scheduler:
+class Conductor:
+    """
+    Coordinates distributed inference across multiple Pools.
+
+    The Conductor is responsible for:
+    - Managing request lifecycle (intake, processing, completion)
+    - Selecting which requests to process in each step
+    - Coordinating strategy execution on Pools
+    - Communicating results back to clients via ZMQ
+    """
+
     def __init__(
         self,
         model_name_or_path: str,
@@ -48,20 +70,22 @@ class Scheduler:
         # Create logger with rank prefix for data parallel mode
         base_logger = get_logger(__name__)
         if dp_size > 1:
-            # Use LoggerAdapter to add rank prefix
             import logging
-            self.logger = logging.LoggerAdapter(base_logger, {'dp_rank': dp_rank})
-            # Override the process method to add rank prefix
+
+            self.logger = logging.LoggerAdapter(base_logger, {"dp_rank": dp_rank})
             self.logger.process = lambda msg, kwargs: (f"[DP {dp_rank}/{dp_size}] {msg}", kwargs)
         else:
             self.logger = base_logger
 
         self.logger.info(f"Using {'async' if async_scheduling else 'sync'} scheduling mode")
 
-        # Choose worker based on user configuration
-        worker_kwargs = {
+        # Create Pool
+        pool_kwargs = {
             "model_name": model_name_or_path,
+            "device": str(device),
             "max_batch_size": max_batch_size,
+            "max_num_pages": max_num_pages,
+            "page_size": page_size,
             "top_p": top_p,
             "top_k": top_k,
             "min_p": min_p,
@@ -71,30 +95,31 @@ class Scheduler:
             "repetition_window": repetition_window,
             "cfg_scale": cfg_scale,
             "greedy": greedy,
-            "max_num_pages": max_num_pages,
-            "page_size": page_size,
             "enable_nvtx": enable_nvtx,
             "enable_torch_compile": enable_torch_compile,
             "dp_rank": dp_rank,
             "dp_size": dp_size,
         }
 
-        # Simplified worker selection logic
         if enable_disaggregation:
-            worker_kwargs["detokenizer_device"] = "cuda:1"
+            pool_kwargs["secondary_device"] = "cuda:1"
 
+        # Choose pool type based on configuration
         if enable_cuda_graph:
-            opt_text = " with disaggregation optimization" if enable_disaggregation else " with CUDA graph optimization"
-            self.logger.info(f"Using CudaGraphWorker{opt_text}")
-            self.model_worker = CudaGraphWorker(**worker_kwargs)
+            opt_text = " with disaggregation" if enable_disaggregation else " with CUDA graphs"
+            self.logger.info(f"Using CudaGraphPool{opt_text}")
+            self.pool: Pool = CudaGraphPool(**pool_kwargs)
         else:
-            opt_text = (
-                " with disaggregation optimization"
-                if enable_disaggregation
-                else " without CUDA graph optimization"
-            )
-            self.logger.info(f"Using ModelWorker{opt_text}")
-            self.model_worker = ModelWorker(**worker_kwargs)
+            opt_text = " with disaggregation" if enable_disaggregation else ""
+            self.logger.info(f"Using Pool{opt_text}")
+            self.pool = Pool(**pool_kwargs)
+
+        # Create and register strategies
+        self._init_strategies()
+
+        # Initialize CUDA graphs if using CudaGraphPool
+        if enable_cuda_graph and isinstance(self.pool, CudaGraphPool):
+            self.pool.initialize_cuda_graphs(self.llm_strategy)
 
         self.active_requests: List[Request] = []
 
@@ -116,26 +141,40 @@ class Scheduler:
         try:
             self.request_socket.setsockopt(zmq.RCVHWM, 256)
             self.result_socket.setsockopt(zmq.SNDHWM, 1024)
-            # Fast shutdown behavior
             self.request_socket.setsockopt(zmq.LINGER, 0)
             self.result_socket.setsockopt(zmq.LINGER, 0)
         except Exception:
             pass
 
-        self.available_batch_sizes = self.model_worker.available_batch_sizes
+        self.available_batch_sizes = self.pool.available_batch_sizes
 
         # Audio parameters for duration calculation
-        # Assuming 24kHz mono 16-bit audio
         self.sample_rate = 24000
-        self.bytes_per_sample = 2  # 16-bit = 2 bytes
+        self.bytes_per_sample = 2  # 16-bit
         self.channels = 1  # mono
+
+    def _init_strategies(self):
+        """Initialize and register strategies with the pool."""
+        model = self.pool.model
+
+        # Encoder strategy (for preprocessing)
+        self.encoder_strategy = EncoderStrategy(model)
+
+        # LLM strategy (for generation)
+        self.llm_strategy = LLMStrategy(model)
+        self.pool.register_strategy(self.llm_strategy)
+
+        # Audio codec strategy (for detokenization)
+        self.audio_codec_strategy = AudioCodecStrategy(model)
+        self.pool.register_strategy(self.audio_codec_strategy)
+
+        self.logger.info("Strategies initialized: encoder, llm, audio_codec")
 
     def _step(self):
         """
-        Process the next batch of requests.
+        Process the next batch of requests (sync version).
         """
-
-        # insert/remove requests to self.active_requests
+        # Intake new requests
         self._prepare_requests()
 
         # Select requests for detokenization
@@ -144,47 +183,41 @@ class Scheduler:
         # Select requests for LM processing
         lm_requests = self._select_lm_requests()
 
-        # Prepare LM inputs outside the worker and run either prefill or decode
-        lm_inputs = self.model_worker.prepare_lm_inputs(lm_requests, detokenize_requests)
+        # Prepare LM inputs
+        lm_inputs = self._prepare_lm_inputs(lm_requests, detokenize_requests)
 
-        # run detokenization if needed
-        self.model_worker.run_detokenize(detokenize_requests)
+        # Run detokenization
+        self._run_detokenize(detokenize_requests)
 
-        # return results to clients
+        # Send responses
         self._send_responses(detokenize_requests)
 
-        if lm_inputs is not None and lm_inputs["is_prefill"]:
-            task = self.model_worker.run_lm_prefill(lm_requests, lm_inputs)
-        else:
-            task = self.model_worker.run_lm_decode(lm_requests, lm_inputs)
+        # Run LM step
+        if lm_inputs is not None:
+            if lm_inputs["is_prefill"]:
+                task = self._run_lm_prefill(lm_requests, lm_inputs)
+            else:
+                task = self._run_lm_decode(lm_requests, lm_inputs)
 
-        # Execute the sampling task right away for synchronous scheduling
-        if task is not None:
-            asyncio.run(task)
-
+            if task is not None:
+                asyncio.run(task)
 
     async def _step_async(self, task, lm_requests, detokenize_requests):
         """
         Process the next batch of requests asynchronously.
         """
-
-        # insert/remove requests to self.active_requests
         await self._prepare_requests_async()
 
-        # Prepare LM inputs outside the worker and run either prefill or decode
-        lm_inputs = self.model_worker.prepare_lm_inputs(lm_requests, detokenize_requests)
+        lm_inputs = self._prepare_lm_inputs(lm_requests, detokenize_requests)
 
         async def run_model():
-            # run detokenization if needed
-            self.model_worker.run_detokenize(detokenize_requests)
-
-            # return results to clients
+            self._run_detokenize(detokenize_requests)
             await self._send_responses_async(detokenize_requests)
 
             if lm_inputs is not None and lm_inputs["is_prefill"]:
-                coro = self.model_worker.run_lm_prefill(lm_requests, lm_inputs)
+                coro = self._run_lm_prefill(lm_requests, lm_inputs)
             else:
-                coro = self.model_worker.run_lm_decode(lm_requests, lm_inputs)
+                coro = self._run_lm_decode(lm_requests, lm_inputs)
 
             next_task = asyncio.create_task(coro) if coro else None
             return next_task
@@ -193,20 +226,12 @@ class Scheduler:
             if task is not None:
                 await task
 
-            # Select requests for detokenization
             next_detokenize_requests = self._select_detokenize_requests()
-
-            # Select requests for LM processing
             next_lm_requests = self._select_lm_requests()
-
             return next_lm_requests, next_detokenize_requests
 
-        model_result, scheduling_result = await asyncio.gather(
-            run_model(),
-            run_scheduling()
-        )
+        model_result, scheduling_result = await asyncio.gather(run_model(), run_scheduling())
 
-        # Unpack the results from the completed tasks
         next_task = model_result
         next_lm_requests, next_detokenize_requests = scheduling_result
 
@@ -215,13 +240,13 @@ class Scheduler:
     async def _run_async_loop(self):
         task, lm_requests, detokenize_requests = None, [], []
         while True:
-            task, lm_requests, detokenize_requests = await self._step_async(task, lm_requests, detokenize_requests)
+            task, lm_requests, detokenize_requests = await self._step_async(
+                task, lm_requests, detokenize_requests
+            )
             await asyncio.sleep(0)
 
     def run_forever(self):
-        """
-        Run the scheduler indefinitely.
-        """
+        """Run the conductor indefinitely."""
         if self.async_scheduling:
             asyncio.run(self._run_async_loop())
         else:
@@ -229,22 +254,80 @@ class Scheduler:
                 self._step()
                 torch.cuda.synchronize()
 
+    def _prepare_lm_inputs(self, lm_requests, detokenize_requests):
+        """Prepare inputs for LM processing."""
+        # Copy decode indices before processing
+        for req in detokenize_requests:
+            req.audio_decode_idx = req.next_audio_decode_idx.copy()
+
+        if len(lm_requests) == 0:
+            return None
+
+        # Determine phase
+        is_prefill = any(not req.done_lm_prefill for req in lm_requests)
+        phase = "prefill" if is_prefill else "decode"
+
+        # Get resources
+        resources = self.pool.get_resources(self.llm_strategy.name)
+
+        # Prepare inputs using strategy
+        prepared = self.llm_strategy.prepare_inputs(lm_requests, resources, phase)
+        if prepared is not None:
+            prepared["is_prefill"] = is_prefill
+
+        return prepared
+
+    def _run_lm_prefill(self, requests, lm_inputs):
+        """Run LM prefill phase."""
+        resources = self.pool.get_resources(self.llm_strategy.name)
+
+        async def run():
+            return await self.llm_strategy.execute(
+                requests, resources, "prefill", lm_inputs
+            )
+
+        return run()
+
+    def _run_lm_decode(self, requests, lm_inputs):
+        """Run LM decode phase."""
+        if lm_inputs is None or len(requests) == 0:
+            return None
+
+        resources = self.pool.get_resources(self.llm_strategy.name)
+
+        async def run():
+            return await self.llm_strategy.execute(
+                requests, resources, "decode", lm_inputs
+            )
+
+        return run()
+
+    def _run_detokenize(self, requests):
+        """Run detokenization."""
+        if len(requests) == 0:
+            return
+
+        resources = self.pool.get_resources(self.audio_codec_strategy.name)
+
+        async def run():
+            outputs = await self.audio_codec_strategy.execute(
+                requests, resources, "decode"
+            )
+            self.audio_codec_strategy.post_process(requests, outputs, resources)
+
+        asyncio.run(run())
+
     def _select_lm_requests(self):
-        """
-        Select requests that need LM processing.
-        For prefill requests, ensure batch size and sequence length don't exceed worker limitations.
-        Allocate prefill requests first, then decode requests in remaining slots.
-        """
+        """Select requests that need LM processing."""
         lm_requests = []
 
-        # Get worker limitations
-        if isinstance(self.model_worker, CudaGraphWorker):
-            max_prefill_batch_size = self.model_worker.prefill_graph_batch_size
-            max_seq_len = max(self.model_worker.cuda_graph_seq_len_buckets)
+        # Get constraints
+        if isinstance(self.pool, CudaGraphPool):
+            max_prefill_batch_size = self.pool.prefill_graph_batch_size
+            max_seq_len = max(self.pool.cuda_graph_seq_len_buckets)
         else:
-            # Fallback for non-CUDA graph worker
             max_prefill_batch_size = self.max_batch_size
-            max_seq_len = 1024  # Default assumption
+            max_seq_len = 1024
 
         # Separate prefill and decode requests
         prefill_requests = []
@@ -259,7 +342,7 @@ class Scheduler:
             else:
                 decode_requests.append(req)
 
-        # First, allocate prefill requests with constraints
+        # Allocate prefill requests with constraints
         if prefill_requests:
             current_batch_size = 0
             current_seq_len = 0
@@ -267,10 +350,10 @@ class Scheduler:
             for req in prefill_requests:
                 req_seq_len = req.input_length if req.input_length else 0
 
-                # Check if adding this request would exceed constraints
-                if (current_batch_size + 1 <= max_prefill_batch_size and
-                    current_seq_len + req_seq_len <= max_seq_len):
-
+                if (
+                    current_batch_size + 1 <= max_prefill_batch_size
+                    and current_seq_len + req_seq_len <= max_seq_len
+                ):
                     lm_requests.append(req)
                     current_batch_size += 1
                     current_seq_len += req_seq_len
@@ -278,43 +361,40 @@ class Scheduler:
                     if current_batch_size >= max_prefill_batch_size:
                         break
 
-                # allow only one prefill request for now
+                # Allow only one prefill request for now
                 break
 
             remaining_slots = max_prefill_batch_size - len(lm_requests)
-
         else:
             remaining_slots = self.max_batch_size
 
+        # Fill with decode requests
         for i in range(remaining_slots):
             if len(lm_requests) >= self.max_batch_size:
                 break
-
             if i >= len(decode_requests):
                 break
-
             lm_requests.append(decode_requests[i])
 
         return lm_requests
 
     def _select_detokenize_requests(self):
-        """
-        Select requests that need detokenization.
-        """
+        """Select requests that need detokenization."""
         detokenize_requests = []
 
-        detokenize_interval = self.model_worker.detokenize_interval
-        detokenize_overlap = self.model_worker.detokenize_overlap
+        detokenize_interval = self.pool.detokenize_interval
+        detokenize_overlap = self.pool.detokenize_overlap
         step = detokenize_interval - detokenize_overlap
 
         for req in self.active_requests:
             if len(detokenize_requests) >= self.max_batch_size:
                 break
 
-            # req.next_audio_decode_idx[-1] is the last decode index
-            next_decode_idx = req.next_audio_decode_idx[-1] + step if req.next_audio_decode_idx else 0
+            next_decode_idx = (
+                req.next_audio_decode_idx[-1] + step if req.next_audio_decode_idx else 0
+            )
+
             if req.done_lm_generation:
-                # Only schedule if there are tokens left to decode
                 if next_decode_idx < len(req.lm_output_audio_tokens):
                     req.next_audio_decode_idx = [next_decode_idx]
                     detokenize_requests.append(req)
@@ -325,15 +405,11 @@ class Scheduler:
         return detokenize_requests
 
     def _send_responses(self, detokenize_requests):
-        """
-        Send responses back to clients for detokenized requests (sync version).
-        """
+        """Send responses back to clients (sync version)."""
         for req in detokenize_requests:
             while not req.output_audio.empty():
-                # Send audio chunk message: request_id|AUDIO|audio_data
                 audio_chunk = req.output_audio.get()
 
-                # Record timestamp and duration for streaming requests
                 if req.is_streaming:
                     send_time = time.time()
                     duration = self._calculate_chunk_duration(audio_chunk)
@@ -343,27 +419,26 @@ class Scheduler:
                 message = req.request_id.encode("utf-8") + b"|AUDIO|" + audio_chunk
                 self.result_socket.send(message)
 
-            # send completion notification for finished requests
             if req.done_all:
-                self.model_worker.free_kv_cache(req)
-                completion_message = {"status": "completed", "reason": req.finish_reason or "unknown"}
-                # Send completion message: request_id|COMPLETION|json_data
+                self.pool.free_pages(req)
+                completion_message = {
+                    "status": "completed",
+                    "reason": req.finish_reason or "unknown",
+                }
                 completion_payload = (
-                    req.request_id.encode("utf-8") + b"|COMPLETION|" + json.dumps(completion_message).encode("utf-8")
+                    req.request_id.encode("utf-8")
+                    + b"|COMPLETION|"
+                    + json.dumps(completion_message).encode("utf-8")
                 )
                 self.logger.debug("Sending completion for request %s", req.request_id)
                 self.result_socket.send(completion_payload)
 
     async def _send_responses_async(self, detokenize_requests):
-        """
-        Send responses back to clients for detokenized requests (async version).
-        """
+        """Send responses back to clients (async version)."""
         for req in detokenize_requests:
             while not req.output_audio.empty():
-                # Send audio chunk message: request_id|AUDIO|audio_data
                 audio_chunk = req.output_audio.get()
 
-                # Record timestamp and duration for streaming requests
                 if req.is_streaming:
                     send_time = time.time()
                     duration = self._calculate_chunk_duration(audio_chunk)
@@ -373,59 +448,52 @@ class Scheduler:
                 message = req.request_id.encode("utf-8") + b"|AUDIO|" + audio_chunk
                 await self.result_socket.send(message)
 
-            # send completion notification for finished requests
             if req.done_all:
-                self.model_worker.free_kv_cache(req)
-                completion_message = {"status": "completed", "reason": req.finish_reason or "unknown"}
-                # Send completion message: request_id|COMPLETION|json_data
+                self.pool.free_pages(req)
+                completion_message = {
+                    "status": "completed",
+                    "reason": req.finish_reason or "unknown",
+                }
                 completion_payload = (
-                    req.request_id.encode("utf-8") + b"|COMPLETION|" + json.dumps(completion_message).encode("utf-8")
+                    req.request_id.encode("utf-8")
+                    + b"|COMPLETION|"
+                    + json.dumps(completion_message).encode("utf-8")
                 )
                 self.logger.debug("Sending completion for request %s", req.request_id)
                 await self.result_socket.send(completion_payload)
 
     def _calculate_chunk_duration(self, audio_chunk: bytes) -> float:
-        """
-        Calculate the duration of an audio chunk in seconds.
-        Assumes 24kHz mono 16-bit PCM audio.
-        """
+        """Calculate the duration of an audio chunk in seconds."""
         num_samples = len(audio_chunk) // (self.channels * self.bytes_per_sample)
-        duration_seconds = num_samples / self.sample_rate
-        return duration_seconds
+        return num_samples / self.sample_rate
 
-    def _handle_request_payload(self, message_payload):
-        """
-        Handle request payload parsing and create Request object.
-        Returns a Request object if successful, None if malformed.
-        """
+    def _handle_request_payload(self, message_payload) -> Optional[Request]:
+        """Handle request payload parsing and create Request object."""
         delimiter_pos = message_payload.find(b"|")
         if delimiter_pos != -1:
-            # Parse JSON request data
             json_data = message_payload[:delimiter_pos].decode("utf-8")
             request_dict = json.loads(json_data)
 
-            # Create Request object from deserialized data
             new_request = Request(
                 request_id=request_dict["request_id"],
                 prompt=request_dict["prompt"],
-                audio_path=request_dict.get("audio_path") if self.model_worker.supports_audio_input else None,
+                audio_path=(
+                    request_dict.get("audio_path")
+                    if self.pool.supports_audio_input
+                    else None
+                ),
                 is_streaming=request_dict.get("is_streaming", False),
-                is_pressing=request_dict.get("is_streaming", False), # at first, streaming requests are pressing
+                is_pressing=request_dict.get("is_streaming", False),
             )
 
             self.logger.debug("new_request=%s", new_request)
             return new_request
         else:
-            self.logger.warning(f"Received malformed audio message: {message_payload[:50]}...")
+            self.logger.warning(f"Received malformed message: {message_payload[:50]}...")
             return None
 
     def _prepare_requests(self):
-        """
-        Prepare requests for processing (sync version).
-        This method gathers new requests from clients.
-        """
-
-        # get new requests from ZMQ
+        """Prepare requests for processing (sync version)."""
         while True:
             try:
                 message_payload = self.request_socket.recv(flags=zmq.NOBLOCK)
@@ -440,16 +508,10 @@ class Scheduler:
 
                 self.logger.error(f"Traceback: {traceback.format_exc()}")
 
-        # Filter out completed requests
         self.active_requests = [req for req in self.active_requests if not req.done_all]
 
     async def _prepare_requests_async(self):
-        """
-        Prepare requests for processing (async version).
-        This method gathers new requests from clients.
-        """
-
-        # get new requests from ZMQ
+        """Prepare requests for processing (async version)."""
         while True:
             try:
                 message_payload = await self.request_socket.recv(flags=zmq.DONTWAIT)
@@ -464,6 +526,4 @@ class Scheduler:
 
                 self.logger.error(f"Traceback: {traceback.format_exc()}")
 
-        # Filter out completed requests
         self.active_requests = [req for req in self.active_requests if not req.done_all]
-

@@ -1,17 +1,40 @@
-from .base import Scheduler
+"""
+Offline Conductor for batch processing scenarios.
+
+Optimized for throughput over latency. Prioritizes LM generation completion
+before detokenization to maximize GPU utilization for token generation.
+"""
+
+from typing import List
+
+from ..pool import CudaGraphPool
+from ..requests import Request
+from .base import Conductor
 
 
-class OfflineScheduler(Scheduler):
-    def _select_lm_requests(self):
+class OfflineConductor(Conductor):
+    """
+    Conductor optimized for offline/batch processing.
+
+    Features:
+    - Prioritizes LM requests when any are ongoing
+    - Only detokenizes when all LM generation is complete
+    - Maximizes batch utilization for throughput
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def _select_lm_requests(self) -> List[Request]:
         """
         Offline scheduling: prioritize LM requests when any are ongoing.
         """
         lm_requests = []
 
-        # Get worker limitations
-        if hasattr(self.model_worker, 'prefill_graph_batch_size'):
-            max_prefill_batch_size = self.model_worker.prefill_graph_batch_size
-            max_seq_len = max(self.model_worker.cuda_graph_seq_len_buckets)
+        # Get constraints
+        if isinstance(self.pool, CudaGraphPool):
+            max_prefill_batch_size = self.pool.prefill_graph_batch_size
+            max_seq_len = max(self.pool.cuda_graph_seq_len_buckets)
         else:
             max_prefill_batch_size = self.max_batch_size
             max_seq_len = 1024
@@ -43,9 +66,10 @@ class OfflineScheduler(Scheduler):
             for req in prefill_requests:
                 req_seq_len = req.input_length if req.input_length else 200
 
-                if (current_batch_size + 1 <= max_prefill_batch_size and
-                    current_seq_len + req_seq_len <= max_seq_len):
-
+                if (
+                    current_batch_size + 1 <= max_prefill_batch_size
+                    and current_seq_len + req_seq_len <= max_seq_len
+                ):
                     lm_requests.append(req)
                     current_batch_size += 1
                     current_seq_len += req_seq_len
@@ -53,7 +77,7 @@ class OfflineScheduler(Scheduler):
                     if current_batch_size >= max_prefill_batch_size:
                         break
 
-                # allow only one prefill request for now
+                # Allow only one prefill request for now
                 break
 
             remaining_slots = max_prefill_batch_size - len(lm_requests)
@@ -72,10 +96,12 @@ class OfflineScheduler(Scheduler):
 
         return lm_requests
 
-    def _select_detokenize_requests(self):
+    def _select_detokenize_requests(self) -> List[Request]:
         """
         Offline scheduling: only detokenize when no LM requests are ongoing.
-        Naive approach: go through requests one by one, add every chunk until max batch size.
+
+        Naive approach: go through requests one by one, add every chunk
+        until max batch size is reached.
         """
         # Check if there are any ongoing LM requests
         has_ongoing_lm = False
@@ -89,8 +115,8 @@ class OfflineScheduler(Scheduler):
             return []
 
         # No ongoing LM requests, do detokenization with biggest batch size
-        detokenize_interval = self.model_worker.detokenize_interval
-        detokenize_overlap = self.model_worker.detokenize_overlap
+        detokenize_interval = self.pool.detokenize_interval
+        detokenize_overlap = self.pool.detokenize_overlap
         step = detokenize_interval - detokenize_overlap
 
         selected_requests = []
@@ -101,7 +127,9 @@ class OfflineScheduler(Scheduler):
             if total_chunks >= self.max_batch_size:
                 break
 
-            next_decode_idx = req.next_audio_decode_idx[-1] + step if req.next_audio_decode_idx else 0
+            next_decode_idx = (
+                req.next_audio_decode_idx[-1] + step if req.next_audio_decode_idx else 0
+            )
             audio_idx_list = []
 
             # Add all available chunks for this request until we hit the batch limit
