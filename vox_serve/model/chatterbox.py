@@ -1058,13 +1058,8 @@ class ChatterboxModel(BaseLM):
         audio_embeds = self.model.speech_emb(
             torch.clamp(input_ids[:, 0], 0, self.model.config.speech_tokens_dict_size - 1)
         )
-        # Dynamic position offset: conditioning length + text length
-        # Default: 45 for default prompt (34 cond + 11 text-related)
-        # With perceiver resampler: cond_length = 32 (perceiver) + 1 (speaker) + 1 (emotion) = 34
-        pos_offset = getattr(self, "_cond_length", 34) + getattr(self, "_text_length", 11)
-        audio_embeds = audio_embeds + self.model.speech_pos_emb(
-            torch.clamp(position_ids - pos_offset, 0, self.model.config.max_speech_tokens)
-        )
+
+        audio_embeds = audio_embeds + self.model.speech_pos_emb(position_ids)
 
         inputs_embeds = torch.where(input_masks, audio_embeds, input_features)
 
