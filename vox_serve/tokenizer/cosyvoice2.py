@@ -1012,10 +1012,22 @@ class CosyVoice2Decoder(nn.Module):
 
         initial_mel_cache = prompt_mels[:, :, -self.mel_cache_len:]
 
+        # Generate proper source and speech cache from initial_mel_cache
+        # This ensures the first generated chunk has valid cache values for smooth transition
+        with torch.no_grad():
+            initial_mel_float = initial_mel_cache.to(torch.float32)
+            # Generate source signal from mel via F0 prediction
+            f0 = self.hift.f0_predictor(initial_mel_float)
+            s = self.hift.f0_upsamp(f0[:, None]).transpose(1, 2)
+            s, _, _ = self.hift.m_source(s)
+            initial_source = s.transpose(1, 2)
+            # Generate speech from mel + source
+            initial_speech = self.hift.decode(x=initial_mel_float, s=initial_source)
+
         hift_cache = HiFTGeneratorCache(
             mel_cache=initial_mel_cache,
-            source_cache=torch.zeros(1, 1, self.source_cache_len, device=self.device, dtype=torch.float32),
-            speech_cache=torch.zeros(1, self.source_cache_len, device=self.device, dtype=torch.bfloat16),
+            source_cache=initial_source[:, :, -self.source_cache_len:].to(torch.float32),
+            speech_cache=initial_speech[:, -self.source_cache_len:].to(torch.bfloat16),
         )
 
         # Extract speaker embedding as a proper tensor for CUDA graph compatibility
@@ -1160,8 +1172,16 @@ class CosyVoice2Decoder(nn.Module):
 
         # HiFT forward pass with caching
         output_mels = output_mels.to(torch.float32).to(self.device)
+
+        # Get source cache for continuity (expand if needed in shared prompt mode)
+        if self.shared_prompt_cache_mode and batch_size > 1:
+            source_cache_input = decoder_cache.hift_cache.source_cache.expand(batch_size, -1, -1)
+        else:
+            source_cache_input = decoder_cache.hift_cache.source_cache
+
         output_wavs, source = self.hift.forward_chunk(
             output_mels,
+            cache_source=source_cache_input,
         )
 
         # For fade_in_out, expand hift_cache if needed (in shared prompt mode)
