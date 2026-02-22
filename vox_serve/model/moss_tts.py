@@ -802,6 +802,13 @@ class MossTTSModel(BaseLMWithDepth):
             return self.default_sampling_config.max_tokens
         return 2048
 
+    def audio_decoder_initial_cache(self, batch_size: int):
+        return self.audio_decoder.init_cache(
+            batch_size=batch_size,
+            device=self.audio_decoder_device,
+            dtype=torch.float32,
+        )
+
     # ---------------------------------------------------------------------------
     # Core methods
     # ---------------------------------------------------------------------------
@@ -846,7 +853,12 @@ class MossTTSModel(BaseLMWithDepth):
         else:
             unified_codes = self._build_unified_codes_text_only(text_token_ids)
 
-        return PreprocessOutput(input_tokens=unified_codes)
+        decoder_cache = self.audio_decoder.init_cache(
+            batch_size=1,
+            device=self.audio_decoder_device,
+            dtype=torch.float32,
+        )
+        return PreprocessOutput(input_tokens=unified_codes, decoder_cache=decoder_cache)
 
     def _build_user_content(
         self,
@@ -1113,11 +1125,12 @@ class MossTTSModel(BaseLMWithDepth):
 
         return output_ids, ci_embed
 
-    def postprocess(self, token_ids: torch.Tensor, **kwargs) -> torch.Tensor:
+    def postprocess(self, token_ids: torch.Tensor, decoder_cache=None, **kwargs) -> torch.Tensor:
         """Convert audio tokens to waveform.
 
         Args:
             token_ids: (batch, interval, 33)
+            decoder_cache: Optional MossAudioDecoderCache for streaming decode.
 
         Returns:
             (batch, 1, audio_length) waveform tensor
@@ -1128,5 +1141,9 @@ class MossTTSModel(BaseLMWithDepth):
         audio_tokens = audio_tokens.clamp(0, self.config.audio_vocab_size - 1)  # clamp to [0, 1023]
 
         audio_tokens = audio_tokens.to(self.audio_decoder_device)
-        audio_tensor = self.audio_decoder.decode(audio_tokens)  # (batch, 1, audio_length)
+
+        if decoder_cache is not None:
+            audio_tensor = self.audio_decoder.decode_chunk(audio_tokens, decoder_cache)
+        else:
+            audio_tensor = self.audio_decoder.decode(audio_tokens)
         return audio_tensor
