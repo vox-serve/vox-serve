@@ -8,6 +8,7 @@ from .chatterbox import ChatterboxModel
 from .cosyvoice2 import CosyVoice2Model
 from .csm import CSMModel
 from .glm_voice import GLMVoiceModel
+from .moss_tts import MossTTSModel
 from .orpheus import OrpheusModel
 from .qwen3_tts import Qwen3TTSModel
 from .step_audio_2 import StepAudio2Model
@@ -23,6 +24,9 @@ MODEL_REGISTRY: Dict[str, Type[BaseLM]] = {
     "Zyphra/Zonos-v0.1-transformer": ZonosModel,
     "glm": GLMVoiceModel,
     "zai-org/glm-4-voice-9b": GLMVoiceModel,
+    "moss-tts": MossTTSModel,
+    "moss-tts-local": MossTTSModel,
+    "OpenMOSS-Team/MOSS-TTS-Local-Transformer": MossTTSModel,
     "step": StepAudio2Model,
     "stepfun-ai/Step-Audio-2-mini": StepAudio2Model,
     "chatterbox": ChatterboxModel,
@@ -84,7 +88,7 @@ def load_model(
     cfg_scale: float = None,
     greedy: bool = False,
     enable_torch_compile: bool = False,
-    **kwargs: Any
+    **kwargs: Any,
 ) -> BaseLM | BaseLMWithDepth:
     """
     Load a model instance based on the model name.
@@ -130,9 +134,22 @@ def load_model(
     model = model_class(**model_kwargs)
 
     # Override default sampling config if CLI parameters are provided
-    if any(param is not None for param in [
-        top_p, top_k, min_p, temperature, max_tokens, repetition_penalty, repetition_window, cfg_scale
-    ]) or greedy:
+    if (
+        any(
+            param is not None
+            for param in [
+                top_p,
+                top_k,
+                min_p,
+                temperature,
+                max_tokens,
+                repetition_penalty,
+                repetition_window,
+                cfg_scale,
+            ]
+        )
+        or greedy
+    ):
         # Get current default config
         current_config = model.default_sampling_config
 
@@ -144,12 +161,10 @@ def load_model(
             temperature=temperature if temperature is not None else current_config.temperature,
             max_tokens=max_tokens if max_tokens is not None else current_config.max_tokens,
             repetition_penalty=(
-                repetition_penalty if repetition_penalty is not None
-                else current_config.repetition_penalty
+                repetition_penalty if repetition_penalty is not None else current_config.repetition_penalty
             ),
             repetition_window=(
-                repetition_window if repetition_window is not None
-                else current_config.repetition_window
+                repetition_window if repetition_window is not None else current_config.repetition_window
             ),
             cfg_scale=cfg_scale if cfg_scale is not None else current_config.cfg_scale,
             greedy=greedy,
