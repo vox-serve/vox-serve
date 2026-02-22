@@ -11,7 +11,7 @@ from transformers import AutoTokenizer
 from ..flashinfer_utils import FlashInferWrapper, apply_rope_pos_ids, rms_norm
 from ..requests import Request
 from ..sampling import Sampler, SamplingConfig
-from ..tokenizer.moss_audio_tokenizer import MossAudioTokenizerDecoder
+from ..tokenizer.moss_audio_tokenizer import MossAudioTokenizer
 from ..utils import get_logger
 from .base import BaseLMWithDepth, PreprocessOutput
 
@@ -603,7 +603,7 @@ class MossTTSModel(BaseLMWithDepth):
 
         # Load audio decoder
         with torch.cuda.device(self.audio_decoder_device):
-            self.audio_decoder = MossAudioTokenizerDecoder(
+            self.audio_decoder = MossAudioTokenizer(
                 device=self.audio_decoder_device,
                 dtype=torch.float32,
             )
@@ -721,6 +721,10 @@ class MossTTSModel(BaseLMWithDepth):
     # ---------------------------------------------------------------------------
 
     @property
+    def supports_audio_input(self) -> bool:
+        return True
+
+    @property
     def n_codebooks(self) -> int:
         return 1 + self.config.n_vq  # 33
 
@@ -807,21 +811,165 @@ class MossTTSModel(BaseLMWithDepth):
 
     def preprocess(self, prompt: str = None, audio_path: str = None, **kwargs) -> PreprocessOutput:
         """Build unified_codes from text prompt using MOSS chat template."""
-        assert audio_path is None, "Audio input not yet supported for MOSS TTS"
+        instruction = kwargs.get("instruct", None)
+        language = kwargs.get("language", None)
 
-        # Build user message and apply chat template
-        messages = [{"role": "user", "content": self._build_user_content(prompt)}]
+        # Encode reference audio if provided
+        audio_codes = None
+        if audio_path is not None:
+            audio_codes = self._load_and_encode_reference_audio(audio_path)  # (T_audio, 32)
+
+        # Build user content
+        user_content = self._build_user_content(
+            prompt=prompt,
+            has_reference=(audio_codes is not None),
+            instruction=instruction,
+            language=language,
+        )
+
+        # Apply chat template
+        messages = [{"role": "user", "content": user_content}]
         content = self.text_tokenizer.apply_chat_template(
             messages,
             add_generation_prompt=True,
             tokenize=False,
         )
+
+        if audio_codes is not None:
+            # Replace <|audio|> placeholder with slot token sequence
+            content = self._replace_audio_placeholder(content, len(audio_codes))
+
         text_token_ids = self.text_tokenizer.encode(content)
 
+        if audio_codes is not None:
+            unified_codes = self._build_unified_codes_with_audio(text_token_ids, audio_codes)
+        else:
+            unified_codes = self._build_unified_codes_text_only(text_token_ids)
+
+        return PreprocessOutput(input_tokens=unified_codes)
+
+    def _build_user_content(
+        self,
+        prompt: str,
+        has_reference: bool = False,
+        instruction: str = None,
+        tokens: int = None,
+        quality: str = None,
+        language: str = None,
+    ) -> str:
+        """Build the user instruction content for MOSS TTS."""
+        reference = "[S1]:\n<|audio|>" if has_reference else "None"
+        return (
+            "<user_inst>\n"
+            f"- Reference(s):\n{reference}\n"
+            f"- Instruction:\n{instruction if instruction is not None else 'None'}\n"
+            f"- Tokens:\n{tokens if tokens is not None else 'None'}\n"
+            f"- Quality:\n{quality if quality is not None else 'None'}\n"
+            "- Sound Event:\nNone\n"
+            "- Ambient Sound:\nNone\n"
+            f"- Language:\n{language if language is not None else 'None'}\n"
+            f"- Text:\n{prompt}\n"
+            "</user_inst>"
+        )
+
+    def _load_and_encode_reference_audio(self, audio_path: str) -> torch.Tensor:
+        """Load, preprocess, and encode reference audio for voice cloning.
+
+        Returns:
+            (T_audio, 32) audio codes tensor on CPU.
+        """
+        import torchaudio
+
+        wav, sr = torchaudio.load(audio_path)
+
+        # Stereo to mono
+        if wav.shape[0] > 1:
+            wav = torch.mean(wav, dim=0, keepdim=True)
+
+        # Resample to 24kHz if needed
+        if sr != 24000:
+            wav = torchaudio.functional.resample(wav, orig_freq=sr, new_freq=24000)
+
+        # Loudness normalize (operates on 1D)
+        wav = self._loudness_normalize(wav.squeeze(0)).unsqueeze(0)  # (1, audio_length)
+
+        return self.audio_decoder.encode(wav)  # (T_audio, 32)
+
+    @staticmethod
+    def _loudness_normalize(
+        wav: torch.Tensor,
+        target_dbfs: float = -20,
+        max_gain_db: float = 3,
+    ) -> torch.Tensor:
+        """Normalize audio loudness to target dBFS, clamping gain."""
+        wav = wav.to(torch.float32)
+        if wav.numel() == 0:
+            return wav
+        current_dbfs = 10.0 * torch.log10(torch.mean(wav**2) + 1e-9)
+        gain = float(target_dbfs - current_dbfs)
+        gain = max(-max_gain_db, min(gain, max_gain_db))
+        factor = 10.0 ** (gain / 20.0)
+        return wav * factor
+
+    def _replace_audio_placeholder(self, content: str, audio_length: int) -> str:
+        """Replace <|audio|> placeholder with audio slot token sequence."""
+        audio_start_token = self.text_tokenizer.convert_ids_to_tokens(self.config.audio_start_token_id)
+        audio_end_token = self.text_tokenizer.convert_ids_to_tokens(self.config.audio_end_token_id)
+        audio_user_slot_token = self.text_tokenizer.convert_ids_to_tokens(self.config.audio_user_slot_token_id)
+        replacement = audio_start_token + audio_user_slot_token * audio_length + audio_end_token
+        return content.replace("<|audio|>", replacement, 1)
+
+    def _build_unified_codes_with_audio(self, text_token_ids: list, audio_codes: torch.Tensor) -> torch.Tensor:
+        """Build unified codes with reference audio.
+
+        Args:
+            text_token_ids: Token IDs from tokenizer.encode()
+            audio_codes: (T_audio, 32) audio codes on CPU
+
+        Returns:
+            (T+1, 33) unified codes tensor on device
+        """
+        n_cb = self.n_codebooks  # 33
+        text_codes = torch.tensor(text_token_ids, dtype=torch.long, device=self.device)
+        seq_len = len(text_codes)
+
+        # Find audio_start and audio_end positions
+        audio_start_positions = (text_codes == self.config.audio_start_token_id).nonzero(as_tuple=True)[0]
+        audio_end_positions = (text_codes == self.config.audio_end_token_id).nonzero(as_tuple=True)[0]
+        audio_start_idx = int(audio_start_positions[0].item())
+        audio_end_idx = int(audio_end_positions[0].item())
+
+        # Build audio channels (T, 32) - all pad initially
+        audio_channels = torch.full(
+            (seq_len, self.config.n_vq),
+            self.config.audio_pad_code,
+            dtype=torch.long,
+            device=self.device,
+        )
+
+        # Insert actual audio codes between start and end markers
+        audio_codes_device = audio_codes.to(self.device)
+        audio_channels[audio_start_idx + 1 : audio_start_idx + 1 + len(audio_codes)] = audio_codes_device
+
+        # Concatenate: text channel (T, 1) + audio channels (T, 32) → (T, 33)
+        unified_codes = torch.cat([text_codes.unsqueeze(1), audio_channels], dim=1)
+
+        # Append audio_start_token row for generation trigger
+        audio_start_row = torch.full((1, n_cb), self.config.audio_pad_code, dtype=torch.long, device=self.device)
+        audio_start_row[0, 0] = self.config.audio_start_token_id
+        unified_codes = torch.cat([unified_codes, audio_start_row], dim=0)
+
+        return unified_codes
+
+    def _build_unified_codes_text_only(self, text_token_ids: list) -> torch.Tensor:
+        """Build unified codes for text-only mode (no reference audio).
+
+        Returns:
+            (T+1, 33) unified codes tensor on device
+        """
         seq_len = len(text_token_ids)
         n_cb = self.n_codebooks  # 33
 
-        # Create unified_codes: (T, 33) where col 0 = text, cols 1-32 = audio_pad_code
         unified_codes = torch.full(
             (seq_len, n_cb),
             self.config.audio_pad_code,
@@ -835,22 +983,7 @@ class MossTTSModel(BaseLMWithDepth):
         audio_start_row[0, 0] = self.config.audio_start_token_id
         unified_codes = torch.cat([unified_codes, audio_start_row], dim=0)
 
-        return PreprocessOutput(input_tokens=unified_codes)
-
-    def _build_user_content(self, prompt: str) -> str:
-        """Build the user instruction content for MOSS TTS."""
-        return (
-            "<user_inst>\n"
-            "- Reference(s):\nNone\n"
-            "- Instruction:\nNone\n"
-            "- Tokens:\nNone\n"
-            "- Quality:\nNone\n"
-            "- Sound Event:\nNone\n"
-            "- Ambient Sound:\nNone\n"
-            "- Language:\nNone\n"
-            f"- Text:\n{prompt}\n"
-            "</user_inst>"
-        )
+        return unified_codes
 
     def forward(
         self,
