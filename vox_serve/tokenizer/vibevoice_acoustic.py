@@ -1,7 +1,8 @@
 from dataclasses import dataclass
 import math
 from functools import partial
-from typing import typing as tp, Optional, Tuple, List, Union, Dict, Any
+from typing import Optional, Tuple, List, Dict
+import typing as tp
 import torch
 from torch import nn
 import numpy as np
@@ -26,9 +27,6 @@ try:
 except ImportError:
     APEX_AVAILABLE = False
     # logger.warning("APEX FusedRMSNorm not available, using native implementation")
-
-from dataclasses import dataclass
-from typing import Optional
 
 @dataclass
 class VibeVoiceDecoderCache(DecoderCache):
@@ -139,8 +137,7 @@ def init_vibevoice_decoder_cache(acoustic_tokenizer: "VibeVoiceAcousticTokenizer
     for name, layer in layers:
         c_in = int(layer.in_channels)
         t_ctx = int(getattr(layer, "context_size", 0))
-        if t_ctx < 0:
-            t_ctx = 0
+        assert t_ctx >= 0, f"Negative context_size={t_ctx} for {name}"
         # Fixed shape for CUDA graphs:
         states[name] = torch.zeros((batch_size, c_in, t_ctx), device=device, dtype=dtype)
 
@@ -206,71 +203,6 @@ class VibeVoiceTensorStreamingCache:
         # layer_id is None, sample_indices provided
         assert sample_indices is not None
         self.set_to_zero(sample_indices)
-
-class VibeVoiceTokenizerStreamingCache:
-    """Cache for streaming convolution, similar to KV cache in attention"""
-    def __init__(self):
-        self.cache = {}  # Dict mapping (layer_id, sample_idx) to state tensor
-        
-    def get(self, layer_id: str, sample_indices: torch.Tensor) -> Optional[torch.Tensor]:
-        """Get cached states for given layer and sample indices"""
-        states = []
-        max_length = 0
-        
-        # First pass: collect states and find max length
-        for idx in sample_indices.tolist():
-            key = (layer_id, idx)
-            if key not in self.cache:
-                return None  # If any sample is missing, return None
-            state = self.cache[key]
-            states.append(state)
-            max_length = max(max_length, state.shape[-1])
-        
-        # Second pass: pad states to max length if needed
-        if len(states) > 0 and states[0].dim() >= 2:
-            padded_states = []
-            for state in states:
-                if state.shape[-1] < max_length:
-                    # Pad on the time dimension (last dimension)
-                    pad_size = max_length - state.shape[-1]
-                    # Pad with zeros on the LEFT to align the most recent samples
-                    padded_state = F.pad(state, (pad_size, 0), mode='constant', value=0)
-                    padded_states.append(padded_state)
-                else:
-                    padded_states.append(state)
-            return torch.stack(padded_states, dim=0)
-        else:
-            return torch.stack(states, dim=0)
-    
-    def set(self, layer_id: str, sample_indices: torch.Tensor, states: torch.Tensor):
-        """Set cached states for given layer and sample indices"""
-        for i, idx in enumerate(sample_indices.tolist()):
-            key = (layer_id, idx)
-            self.cache[key] = states[i].detach()
-
-    def set_to_zero(self, sample_indices: torch.Tensor):
-        """Set all cached states to zero for given sample indices"""
-        for key in list(self.cache.keys()):
-            layer_id, sample_idx = key
-            if sample_idx in sample_indices.tolist():
-                # Create zero tensor with same shape and dtype as cached tensor
-                cached_tensor = self.cache[key]
-                self.cache[key] = torch.zeros_like(cached_tensor)
-                
-    def clear(self, layer_id: Optional[str] = None, sample_indices: Optional[torch.Tensor] = None):
-        """Clear cache for specific layer/samples or everything"""
-        if layer_id is None and sample_indices is None:
-            self.cache.clear()
-        elif layer_id is not None and sample_indices is None:
-            # Clear all samples for a specific layer
-            keys_to_remove = [k for k in self.cache.keys() if k[0] == layer_id]
-            for k in keys_to_remove:
-                del self.cache[k]
-        elif layer_id is not None and sample_indices is not None:
-            # Clear specific samples for a specific layer
-            for idx in sample_indices.tolist():
-                key = (layer_id, idx)
-                self.cache.pop(key, None)
 
 # Normalization modules
 class ConvLayerNorm(nn.LayerNorm):
@@ -462,7 +394,7 @@ class SConv1d(nn.Module):
         return self._layer_id
         
     def forward(self, x: torch.Tensor, 
-                cache: Optional[VibeVoiceTokenizerStreamingCache] = None,
+                cache: Optional[VibeVoiceTensorStreamingCache] = None,
                 sample_indices: Optional[torch.Tensor] = None,
                 use_cache: bool = False,
                 debug: bool = False,
@@ -472,7 +404,7 @@ class SConv1d(nn.Module):
         
         Args:
             x: Input tensor [batch_size, channels, time]
-            cache: VibeVoiceTokenizerStreamingCache object for maintaining states
+            cache: VibeVoiceTensorStreamingCache object for maintaining states
             sample_indices: Indices identifying each sample for cache management
             use_cache: Whether to use cached states for streaming
             debug: Whether to print debug information
@@ -495,7 +427,7 @@ class SConv1d(nn.Module):
         return self._forward_streaming(x, cache, sample_indices, debug, is_final_chunk)
     
     def _forward_streaming(self, x: torch.Tensor, 
-                          cache: VibeVoiceTokenizerStreamingCache,
+                          cache: VibeVoiceTensorStreamingCache,
                           sample_indices: torch.Tensor,
                           debug: bool = False,
                           is_final_chunk: bool = False) -> torch.Tensor:
@@ -504,24 +436,10 @@ class SConv1d(nn.Module):
         
         # Cache operations (not compiled)
         cached_states = cache.get(self.layer_id, sample_indices)
-        
-        if cached_states is None:
-            # First chunk - initialize with zeros for context
-            if self.context_size > 0:
-                cached_states = torch.zeros(B, C, self.context_size, device=x.device, dtype=x.dtype)
-                if debug:
-                    print(f"[DEBUG] Initialized cache with shape: {cached_states.shape}, context_size={self.context_size}")
-            else:
-                cached_states = torch.zeros(B, C, 0, device=x.device, dtype=x.dtype)
-                if debug:
-                    print(f"[DEBUG] No context needed (kernel_size=stride)")
+        assert cached_states is not None, "cached_states is None"
         
         # Concatenate cached states with input
-        if cached_states.shape[2] > 0:
-            input_with_context = torch.cat([cached_states, x], dim=2)
-        else:
-            input_with_context = x
-        
+        input_with_context = torch.cat([cached_states, x], dim=2)
         # For final chunk, add extra padding to ensure ceil behavior (same as non-streaming)
         if is_final_chunk:
             extra_padding = get_extra_padding_for_conv1d(
@@ -529,35 +447,11 @@ class SConv1d(nn.Module):
             )
             if extra_padding > 0:
                 input_with_context = pad1d(input_with_context, (0, extra_padding), mode=self.pad_mode)
-                if debug:
-                    print(f"[DEBUG] Final chunk: added extra_padding={extra_padding}")
-            
-        if debug:
-            print(f"[DEBUG] Input shape: {x.shape}, Cache shape: {cached_states.shape}, Combined: {input_with_context.shape}")
-        
-        # Apply convolution directly - no extra padding in streaming mode
-        # The conv layer will handle its own padding internally
-        output = self.conv(input_with_context)
 
-        if debug:
-            print(f"[DEBUG] Output shape: {output.shape}")
-        
+        output = self.conv(input_with_context)
         # Update cache for next chunk
         if self.context_size > 0:
-            # Calculate how many samples to keep
-            total_input_length = input_with_context.shape[2]
-            
-            # Keep the last context_size samples
-            if total_input_length >= self.context_size:
-                new_cache_start = total_input_length - self.context_size
-                new_cache = input_with_context[:, :, new_cache_start:]
-            else:
-                # If we have less than context_size samples, keep everything
-                new_cache = input_with_context
-                
-            if debug:
-                print(f"[DEBUG] New cache shape: {new_cache.shape}")
-                
+            new_cache = input_with_context[:, :, -self.context_size:]
             cache.set(self.layer_id, sample_indices, new_cache)
         
         return output
@@ -637,7 +531,7 @@ class SConvTranspose1d(nn.Module):
         return self._layer_id
     
     def forward(self, x: torch.Tensor,
-                cache: Optional[VibeVoiceTokenizerStreamingCache] = None,
+                cache: Optional[VibeVoiceTensorStreamingCache] = None,
                 sample_indices: Optional[torch.Tensor] = None,
                 use_cache: bool = False,
                 debug: bool = False) -> torch.Tensor:
@@ -657,32 +551,16 @@ class SConvTranspose1d(nn.Module):
         return self._forward_streaming(x, cache, sample_indices, debug)
     
     def _forward_streaming(self, x: torch.Tensor,
-                          cache: VibeVoiceTokenizerStreamingCache,
+                          cache: VibeVoiceTensorStreamingCache,
                           sample_indices: torch.Tensor,
                           debug: bool = False) -> torch.Tensor:
-        """Streaming forward pass with cache operations kept separate from compiled code"""
         B, C, T = x.shape
         
-        # Cache operations (not compiled)
-        cached_input = cache.get(self.layer_id, sample_indices)
-        
-        if cached_input is None:
-            # First chunk - no history yet
-            cached_input = torch.zeros(B, C, 0, device=x.device, dtype=x.dtype)
-            if debug:
-                print(f"[DEBUG] Initialized empty cache for transposed conv")
-        
-        # Concatenate cached input with new input
+        cached_input = cache.get(self.layer_id, sample_indices)   # [B,C,k-1]
+        assert cached_input.shape[2] == self.context_size
+
         full_input = torch.cat([cached_input, x], dim=2)
-        
-        if debug:
-            print(f"[DEBUG] Input shape: {x.shape}, Cache shape: {cached_input.shape}, Combined: {full_input.shape}")
-        
-        # First chunk or debug mode - use uncompiled version
         full_output = self.convtr(full_input)
-        
-        if debug:
-            print(f"[DEBUG] Full transposed conv output shape: {full_output.shape}")
         
         # Calculate padding to remove
         if self.causal:
@@ -695,36 +573,12 @@ class SConvTranspose1d(nn.Module):
         # Remove padding
         if padding_left + padding_right > 0:
             full_output = unpad1d(full_output, (padding_left, padding_right))
-        
-        if debug:
-            print(f"[DEBUG] After unpadding: {full_output.shape}")
-        
-        # Determine which part of the output corresponds to the new input
-        if cached_input.shape[2] == 0:
-            # First chunk - return all output
-            output = full_output
-        else:
-            # Subsequent chunks - return only the new output
-            expected_new_output = T * self.stride
-            
-            # Take the last expected_new_output samples
-            if full_output.shape[2] >= expected_new_output:
-                output = full_output[:, :, -expected_new_output:]
-            else:
-                output = full_output
-        
-        if debug:
-            print(f"[DEBUG] Final streaming output shape: {output.shape}")
-        
-        # Update cache
-        if full_input.shape[2] > self.context_size:
-            new_cache = full_input[:, :, -self.context_size:]
-        else:
-            new_cache = full_input
-        
-        if debug:
-            print(f"[DEBUG] New cache shape: {new_cache.shape}")
-            
+
+        expected_new_output = T * self.stride
+        assert full_output.shape[2] >= expected_new_output, f"full_output.shape[2]={full_output.shape[2]}; expected_new_output={expected_new_output}"
+        output = full_output[:, :, -expected_new_output:]
+        assert self.context_size > 0, "ConvTranspose1d streaming expects kernel_size>1"
+        new_cache = full_input[:, :, -self.context_size:]
         cache.set(self.layer_id, sample_indices, new_cache)
         
         return output
@@ -996,9 +850,7 @@ class TokenizerDecoder(nn.Module):
 
         return self.norm(x)
     
-    def forward(self, x, cache=None, sample_indices=None, use_cache=False, debug=False):
-        x = self.forward_features(x, cache=cache, sample_indices=sample_indices, use_cache=use_cache, debug=debug)
-        x = self.head(x, cache=cache, sample_indices=sample_indices, use_cache=use_cache, debug=debug)
+    # No forward pass needed
 
 class VibeVoiceAcousticTokenizerModel(PreTrainedModel):
     """VibeVoice speech tokenizer decoder for acoustic tokens"""
@@ -1074,11 +926,7 @@ class VibeVoiceAcousticTokenizerModel(PreTrainedModel):
         audio = self.decoder(latents, cache=cache, sample_indices=sample_indices, use_cache=use_cache, debug=debug)
         return audio
 
-    def forward(self, audio, cache=None, sample_indices=None, use_cache=False, debug=False):
-        """Full forward pass: encode audio to latents, then decode back to audio"""
-        latents = self.encoder(audio, cache=cache, sample_indices=sample_indices, use_cache=use_cache, debug=debug)
-        audio = self.decoder(latents, cache=cache, sample_indices=sample_indices, use_cache=use_cache, debug=debug)
-        return audio
+    # No forward pass needed
 
 class VibeVoiceDecoder(nn.Module):
     """
@@ -1089,44 +937,43 @@ class VibeVoiceDecoder(nn.Module):
     Batch size = 1 for now.
     """
 
-    def __init__(self, acoustic_tokenizer, device):
+    def __init__(self, acoustic_tokenizer: "VibeVoiceAcousticTokenizerModel", device: str | torch.device):
         super().__init__()
-        self.acoustic_tokenizer = acoustic_tokenizer
-        self.device = device
+        self.device = torch.device(device)
+        self.acoustic_tokenizer = acoustic_tokenizer.to(self.device)
+        self._layer_id_to_name = build_layer_id_to_name(self.acoustic_tokenizer)
 
-    def init_cache(self) -> VibeVoiceDecoderCache:
-        return VibeVoiceDecoderCache(acoustic_cache=VibeVoiceTokenizerStreamingCache(), started=False)
+    def init_cache(self, batch_size: int) -> VibeVoiceDecoderCache:
+        p = next(self.acoustic_tokenizer.parameters())
+        return init_vibevoice_decoder_cache(
+            acoustic_tokenizer=self.acoustic_tokenizer,
+            batch_size=batch_size,
+            device=p.device,
+            dtype=p.dtype,
+        )
 
     @torch.inference_mode()
-    def decode_chunk(
-        self,
-        speech_latents: torch.Tensor,              # [1, 1, vae_dim] (or [1, vae_dim])
-        decoder_cache: VibeVoiceDecoderCache,
-        last_chunk: bool = False,
-    ) -> tuple[torch.Tensor, VibeVoiceDecoderCache]:
-        # enforce batch=1
-        if speech_latents.dim() == 2:
-            speech_latents = speech_latents.unsqueeze(1)  # [1,1,D]
-        assert speech_latents.shape[0] == 1
+    def decode_chunk(self, latents: torch.Tensor, decoder_cache: VibeVoiceDecoderCache) -> tuple[torch.Tensor, VibeVoiceDecoderCache]:
+        # latents expected [B, 1, D] or [B, D]
+        if latents.ndim == 2:
+            latents = latents.unsqueeze(1)
 
-        sample_indices = torch.tensor([0], device=self.acoustic_tokenizer.device)
+        B = latents.shape[0]
+        assert B == 1, "Batch size must be 1 for streaming"
+        
+        sample_indices = torch.arange(B, device=self.device, dtype=torch.long)
+
+        cache_view = VibeVoiceTensorStreamingCache(self._layer_id_to_name, decoder_cache)
 
         audio = self.acoustic_tokenizer.decode(
-            speech_latents.to(self.acoustic_tokenizer.device),
-            cache=decoder_cache.acoustic_cache,
+            latents.to(self.device),
+            cache=cache_view,
             sample_indices=sample_indices,
             use_cache=True,
             debug=False,
         )
 
-        decoder_cache.started = True
-
-        # If you need “flush” behavior for last_chunk, you can plumb it later.
         return audio, decoder_cache
-
-    def reset_cache(self, decoder_cache: VibeVoiceDecoderCache) -> None:
-        decoder_cache.acoustic_cache.clear()
-        decoder_cache.started = False
     
 
 __all__ = [
