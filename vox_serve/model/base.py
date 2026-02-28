@@ -277,6 +277,127 @@ class BaseLM(ABC):
         pass
 
 
+class BaseLMWithContinuousSpeech(BaseLM):
+    """
+    Base class for language models that generate continuous speech representations.
+
+    Unlike BaseLMWithDepth (which generates discrete tokens across multiple codebooks),
+    these models output continuous latent vectors that are processed by a diffusion head
+    and then decoded to audio by an acoustic tokenizer decoder.
+    """
+
+    def __init__(
+        self,
+        model_name: str,
+        device: str = "cuda",
+        dtype: torch.dtype = torch.bfloat16,
+        enable_torch_compile: bool = False,
+        audio_decoder_device: str = None,
+    ):
+        super().__init__(model_name, device, dtype, enable_torch_compile, audio_decoder_device)
+
+    @property
+    def has_depth_transformer(self) -> bool:
+        """Indicates if the model has a depth transformer."""
+        return False
+
+    @property
+    @abstractmethod
+    def latent_dim(self) -> int:
+        """Dimension of the continuous speech latents."""
+        pass
+
+    @abstractmethod
+    def lm_forward(
+        self,
+        input_ids: torch.Tensor,
+        position_ids: torch.Tensor,
+        attn_wrapper: FlashInferWrapper,
+        kv_cache: torch.Tensor,
+        **kwargs,
+    ) -> torch.Tensor:
+        """
+        Forward pass through the backbone LM (voice prompt processing).
+        
+        Args:
+            input_ids: Pseudo tokens matching cached prompt length
+            position_ids: Position IDs
+            attn_wrapper: FlashInfer attention wrapper
+            kv_cache: KV cache tensor (already prefilled)
+            **kwargs: Additional parameters
+            
+        Returns:
+            Text logits. Shape: (batch_size, n_codebooks, vocab_size)
+        """
+        pass
+
+    @abstractmethod
+    def tts_lm_forward(
+        self,
+        tts_lm_input_ids: torch.Tensor,
+        tts_text_ids: torch.Tensor,
+        position_ids: torch.Tensor,
+        attn_wrapper: FlashInferWrapper,
+        kv_cache: torch.Tensor,
+        input_masks: torch.Tensor,
+        **kwargs,
+    ) -> torch.Tensor:
+        """
+        Forward pass through the TTS LM adapter for text-to-speech.
+        
+        Args:
+            tts_lm_input_ids: Pseudo tokens for TTS LM portion
+            tts_text_ids: Actual encoded text tokens for the script
+            position_ids: Position IDs
+            attn_wrapper: FlashInfer attention wrapper
+            kv_cache: KV cache tensor
+            input_masks: Speech/text masks
+            **kwargs: Additional parameters
+            
+        Returns:
+            Hidden states for diffusion head. Shape: (batch_size, seq_len, hidden_size)
+        """
+        pass
+
+    @abstractmethod
+    def diffusion_forward(
+        self,
+        hidden_states: torch.Tensor,
+        **kwargs,
+    ) -> torch.Tensor:
+        """
+        Forward pass through diffusion head to generate speech latents.
+
+        Args:
+            hidden_states: Hidden states from backbone model. Shape: (batch_size, seq_len, hidden_size)
+            **kwargs: Additional model-specific parameters
+
+        Returns:
+            Continuous speech latents. Shape: (batch_size, seq_len, latent_dim)
+        """
+        pass
+
+    @abstractmethod
+    def postprocess(
+        self,
+        latents: torch.Tensor,
+        decoder_cache: Optional[DecoderCache] = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        """
+        Convert continuous latents to audio waveform.
+
+        Args:
+            latents: Continuous speech latents from diffusion head. Shape: (batch_size, seq_len, latent_dim)
+            decoder_cache: Optional decoder cache for acoustic decoder
+            **kwargs: Additional model-specific parameters
+
+        Returns:
+            Audio tensor. Shape: (batch_size, n_channels, audio_length)
+        """
+        pass
+
+
 class BaseLMWithDepth(BaseLM):
     """
     Base class for language models with depth transformer used in vox-serve.
