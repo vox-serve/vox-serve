@@ -15,7 +15,7 @@ from typing import Dict, Any, Optional, Tuple, List
 from ..flashinfer_utils import FlashInferWrapper
 from ..requests import Request
 from ..sampling import SamplingConfig
-from .base import BaseLMWithContinuousSpeech, PreprocessOutput
+from .base import BaseLMWithContinuousSpeech, PreprocessOutput, VibeVoiceForwardOutput
 from ..tokenizer.base import DecoderCache
 from ..utils import get_logger
 
@@ -171,6 +171,8 @@ class VibeVoiceModel(BaseLMWithContinuousSpeech):
         This includes:
         - Language backbone (lower Qwen2 layers for text encoding)
         - TTS backbone (upper Qwen2 layers for speech generation)
+        - Diffusion head (for speech latent generation)
+        - Acoustic connector (bridge from latent to TTS LM hidden size)
         """
         from .qwen2 import load_vibevoice_qwen2_split_from_hf
 
@@ -200,6 +202,12 @@ class VibeVoiceModel(BaseLMWithContinuousSpeech):
         
         # Load TTS component weights from HuggingFace checkpoint
         self._load_tts_component_weights()
+        
+        # Load diffusion head for speech latent generation
+        self._init_diffusion_head()
+        
+        # Initialize acoustic connector (bridge from latent to TTS LM hidden size)
+        self._init_acoustic_connector()
 
     def _load_tts_component_weights(self):
         """
@@ -294,6 +302,189 @@ class VibeVoiceModel(BaseLMWithContinuousSpeech):
         except Exception as e:
             self.logger.warning(
                 f"Failed to load TTS component weights from HuggingFace checkpoint: {e}. "
+                "Using random initialization."
+            )
+
+    def _init_diffusion_head(self):
+        """
+        Initialize the diffusion head for speech latent generation.
+        
+        Loads the VibeVoiceDiffusionHead from the HuggingFace checkpoint.
+        This component is used in the NON-GRAPH region for diffusion sampling.
+        """
+        from .vibevoice_diffusion_head import VibeVoiceDiffusionHead
+        from huggingface_hub import hf_hub_download
+        from safetensors.torch import load_file
+        
+        try:
+            # Try to load diffusion head from HuggingFace
+            diffusion_head_path = hf_hub_download(
+                repo_id=self.model_name,
+                filename="diffusion_head/config.json",
+                revision=None
+            )
+            
+            # Load the diffusion head
+            self.diffusion_head = VibeVoiceDiffusionHead.from_pretrained(
+                self.model_name,
+                subfolder="diffusion_head",
+            ).to(self.device).to(self.dtype)
+            
+            self.logger.info("Loaded VibeVoiceDiffusionHead from HuggingFace checkpoint")
+            
+        except Exception as e:
+            self.logger.warning(
+                f"Failed to load diffusion head from HuggingFace checkpoint: {e}. "
+                "Using default initialization."
+            )
+            # Fall back to default config
+            from .vibevoice_config import VibeVoiceDiffusionHeadConfig
+            config = VibeVoiceDiffusionHeadConfig(
+                hidden_size=self._hidden_size,
+                latent_size=self._latent_dim,
+            )
+            self.diffusion_head = VibeVoiceDiffusionHead(config).to(self.device).to(self.dtype)
+        
+        # Initialize diffusion scheduler (DPM-Solver for faster sampling)
+        self._init_diffusion_scheduler()
+    
+    def _init_diffusion_scheduler(self):
+        """
+        Initialize the DPM-Solver scheduler for diffusion sampling.
+        
+        Uses DPMSolverMultistepScheduler for efficient sampling with fewer steps.
+        """
+        try:
+            from diffusers import DPMSolverMultistepScheduler
+            
+            self.scheduler = DPMSolverMultistepScheduler(
+                num_train_timesteps=1000,
+                beta_schedule="cosine",
+                prediction_type="v_prediction",
+            )
+            self.logger.info("Initialized DPMSolverMultistepScheduler for diffusion sampling")
+        except ImportError:
+            self.logger.warning(
+                "diffusers not available, falling back to simple DDPM scheduler"
+            )
+            self.scheduler = None
+    
+    def _init_acoustic_connector(self):
+        """
+        Initialize the acoustic connector that bridges latents to TTS LM hidden size.
+        
+        The connector projects speech latents (latent_dim=64) to the hidden size
+        of the TTS LM (hidden_size=1536) so they can be injected as input embeddings.
+        
+        Structure matches HuggingFace model:
+            - fc1: latent_dim -> hidden_size
+            - fc2: hidden_size -> hidden_size
+            - norm: LayerNorm(hidden_size)
+        """
+        class AcousticConnector(nn.Module):
+            def __init__(self, latent_dim, hidden_size):
+                super().__init__()
+                self.fc1 = nn.Linear(latent_dim, hidden_size)
+                self.fc2 = nn.Linear(hidden_size, hidden_size)
+                self.norm = nn.LayerNorm(hidden_size)
+            
+            def forward(self, x):
+                x = self.fc1(x)
+                x = torch.nn.functional.gelu(x)
+                x = self.fc2(x)
+                x = self.norm(x)
+                return x
+        
+        self.acoustic_connector = AcousticConnector(
+            self._latent_dim,
+            self._hidden_size
+        ).to(self.device).to(self.dtype)
+        
+        # Try to load acoustic connector weights from HuggingFace
+        self._load_acoustic_connector_weights()
+    
+    def _load_acoustic_connector_weights(self):
+        """
+        Load acoustic connector weights from HuggingFace checkpoint.
+        """
+        from huggingface_hub import hf_hub_download
+        from safetensors.torch import load_file
+        
+        connector_keys = [
+            "model.acoustic_connector.fc1.weight",
+            "model.acoustic_connector.fc1.bias",
+            "model.acoustic_connector.fc2.weight",
+            "model.acoustic_connector.fc2.bias",
+            "model.acoustic_connector.norm.weight",
+        ]
+        
+        try:
+            # Download the model safetensors index
+            index_path = hf_hub_download(
+                repo_id=self.model_name,
+                filename="model.safetensors.index.json",
+                revision=None
+            )
+            
+            with open(index_path, "r", encoding="utf-8") as f:
+                import json
+                index_data = json.load(f)
+            
+            weight_map = index_data.get("weight_map", {})
+            
+            # Collect all shards needed for acoustic connector
+            shards_needed = set()
+            for key in connector_keys:
+                if key in weight_map:
+                    shards_needed.add(weight_map[key])
+            
+            if not shards_needed:
+                self.logger.warning(
+                    "No acoustic_connector weights found in checkpoint weight map, "
+                    "using random initialization"
+                )
+                return
+            
+            # Load all needed shards
+            loaded_weights = {}
+            for shard in shards_needed:
+                shard_path = hf_hub_download(
+                    repo_id=self.model_name,
+                    filename=shard,
+                    revision=None
+                )
+                shard_state = load_file(shard_path, device=str(self.device))
+                for key in connector_keys:
+                    if key in shard_state:
+                        loaded_weights[key] = shard_state[key]
+            
+            # Apply weights to acoustic connector
+            if "model.acoustic_connector.fc1.weight" in loaded_weights:
+                self.acoustic_connector.fc1.weight.data.copy_(
+                    loaded_weights["model.acoustic_connector.fc1.weight"]
+                )
+            if "model.acoustic_connector.fc1.bias" in loaded_weights:
+                self.acoustic_connector.fc1.bias.data.copy_(
+                    loaded_weights["model.acoustic_connector.fc1.bias"]
+                )
+            if "model.acoustic_connector.fc2.weight" in loaded_weights:
+                self.acoustic_connector.fc2.weight.data.copy_(
+                    loaded_weights["model.acoustic_connector.fc2.weight"]
+                )
+            if "model.acoustic_connector.fc2.bias" in loaded_weights:
+                self.acoustic_connector.fc2.bias.data.copy_(
+                    loaded_weights["model.acoustic_connector.fc2.bias"]
+                )
+            if "model.acoustic_connector.norm.weight" in loaded_weights:
+                self.acoustic_connector.norm.weight.data.copy_(
+                    loaded_weights["model.acoustic_connector.norm.weight"]
+                )
+            
+            self.logger.info("Loaded acoustic_connector weights from HuggingFace checkpoint")
+                
+        except Exception as e:
+            self.logger.warning(
+                f"Failed to load acoustic connector weights from HuggingFace checkpoint: {e}. "
                 "Using random initialization."
             )
 
@@ -610,6 +801,570 @@ class VibeVoiceModel(BaseLMWithContinuousSpeech):
         
         return eos_logits, hidden_states[:, -1:, :], kv_cache
 
+    def forward(
+        self,
+        # === LM Backbone Inputs ===
+        lm_input_ids: torch.Tensor,
+        lm_position_ids: torch.Tensor,
+        lm_attn_wrapper: FlashInferWrapper,
+        lm_kv_cache: torch.Tensor,
+        # === TTS LM Inputs ===
+        tts_input_ids: torch.Tensor,
+        tts_position_ids: torch.Tensor,
+        tts_attn_wrapper: FlashInferWrapper,
+        tts_kv_cache: torch.Tensor,
+        # === Bridge Inputs ===
+        lm_last_hidden_state: torch.Tensor,
+        tts_text_masks: torch.Tensor,
+        # === Optional Cached Features ===
+        lm_input_features: Optional[torch.Tensor] = None,
+        tts_input_features: Optional[torch.Tensor] = None,
+        # === Control Flags ===
+        phase: str = "text",
+    ) -> VibeVoiceForwardOutput:
+        """
+        Unified forward for both text and speech phases.
+
+        This method chains the LM backbone and TTS LM forward passes in a single
+        coherent call, supporting CUDA graph compatibility through fixed-shape
+        tensor inputs.
+
+        TEXT phase: forward_lm → forward_tts_lm (chain both)
+        SPEECH phase: forward_tts_lm only (with acoustic_embed injection)
+
+        Args:
+            lm_input_ids: Input token IDs for LM backbone.
+                Shape: [batch_size, text_window_size] or [batch_size, 1] for cached
+            lm_position_ids: Position IDs for LM tokens.
+                Shape: [batch_size, text_window_size]
+            lm_attn_wrapper: Pre-planned FlashInfer wrapper for LM backbone.
+            lm_kv_cache: Paged KV cache for LM backbone.
+            tts_input_ids: Input token IDs for TTS LM.
+                Shape: [batch_size, 1] (single step)
+            tts_position_ids: Position IDs for TTS tokens.
+                Shape: [batch_size, 1]
+            tts_attn_wrapper: Pre-planned FlashInfer wrapper for TTS LM.
+            tts_kv_cache: Paged KV cache for TTS LM.
+            lm_last_hidden_state: Hidden states to inject into TTS LM.
+                Shape: [batch_size, 1, hidden_size] for speech phase, or
+                       [batch_size, text_window_size, hidden_size] for text phase
+            tts_text_masks: Mask for text/speech distinction.
+                Shape: [batch_size, 1] - 1=text, 0=speech
+            lm_input_features: Pre-computed hidden states for cached LM prompts.
+                Shape: [batch_size, seq_len, hidden_size] or None
+            tts_input_features: Pre-computed hidden states for cached TTS prompts.
+                Shape: [batch_size, seq_len, hidden_size] or None
+            phase: Generation phase - "text" or "speech".
+
+        Returns:
+            VibeVoiceForwardOutput with:
+                - lm_hidden_state: [batch_size, seq_len, hidden_size] or None for speech phase
+                - tts_hidden_state: [batch_size, 1, hidden_size]
+                - eos_logits: [batch_size, 1]
+
+        Note:
+            KV caches are updated in-place and not returned in the output.
+        """
+        if phase == "text":
+            # TEXT phase: Chain LM backbone → TTS LM
+            lm_hidden_state, lm_kv_cache = self.forward_lm(
+                input_ids=lm_input_ids,
+                position_ids=lm_position_ids,
+                attn_wrapper=lm_attn_wrapper,
+                kv_cache=lm_kv_cache,
+                input_features=lm_input_features,
+            )
+
+            # Use LM hidden state as input to TTS LM
+            tts_lm_input = lm_hidden_state
+        else:
+            # SPEECH phase: Skip LM, use acoustic_embed directly
+            lm_hidden_state = None
+            tts_lm_input = lm_last_hidden_state
+
+        # Forward through TTS LM
+        eos_logits, tts_hidden_state, tts_kv_cache = self.forward_tts_lm(
+            input_ids=tts_input_ids,
+            position_ids=tts_position_ids,
+            attn_wrapper=tts_attn_wrapper,
+            kv_cache=tts_kv_cache,
+            lm_last_hidden_state=tts_lm_input,
+            tts_text_masks=tts_text_masks,
+            input_features=tts_input_features,
+        )
+
+        return VibeVoiceForwardOutput(
+            lm_hidden_state=lm_hidden_state,
+            tts_hidden_state=tts_hidden_state,
+            eos_logits=eos_logits,
+        )
+
+    # Window constants
+    TTS_TEXT_WINDOW_SIZE = 5
+    TTS_SPEECH_WINDOW_SIZE = 6
+
+    def generate_step(
+        self,
+        request: Request,
+        lm_attn_wrapper,
+        lm_kv_cache: torch.Tensor,
+        tts_attn_wrapper,
+        tts_kv_cache: torch.Tensor,
+        dummy_token_id: int = 0,
+        cfg_scale: float = 3.0,
+        num_diffusion_steps: int = 10,
+    ) -> Tuple[str, Optional[VibeVoiceForwardOutput]]:
+        """
+        Execute a single step of the windowed generation loop.
+
+        This method implements the state machine from the plan:
+        1. TEXT WINDOW LOOP: Process text tokens in windows of TTS_TEXT_WINDOW_SIZE
+        2. SPEECH WINDOW LOOP: Generate TTS_SPEECH_WINDOW_SIZE speech steps per text window
+
+        Args:
+            request: The Request object containing generation state
+            lm_attn_wrapper: FlashInfer wrapper for LM backbone
+            lm_kv_cache: KV cache for LM backbone
+            tts_attn_wrapper: FlashInfer wrapper for TTS LM
+            tts_kv_cache: KV cache for TTS LM
+            dummy_token_id: Token ID to use as placeholder for speech steps
+            cfg_scale: Classifier-free guidance scale for diffusion sampling
+            num_diffusion_steps: Number of diffusion steps for sampling
+
+        Returns:
+            Tuple of (phase, output) where:
+                - phase: "text" | "speech" | "finished"
+                - output: VibeVoiceForwardOutput or None if finished
+        """
+        # Check if generation is complete
+        if self._is_generation_finished(request):
+            return "finished", None
+
+        # Determine current phase
+        text_window_idx = request.text_window_index
+        speech_step = request.speech_step_in_window
+        total_text_tokens = len(request.text_tokens)
+
+        # Calculate text window boundaries
+        text_start = text_window_idx * self.TTS_TEXT_WINDOW_SIZE
+        text_end = min(text_start + self.TTS_TEXT_WINDOW_SIZE, total_text_tokens)
+
+        # TEXT WINDOW LOOP: Process text tokens if we haven't finished all windows
+        if text_window_idx * self.TTS_TEXT_WINDOW_SIZE < total_text_tokens:
+            # Check if we should process a text window or continue speech
+            if speech_step == 0:
+                # Start of a new text window - process text
+                return self._process_text_window(
+                    request=request,
+                    text_tokens=request.text_tokens[text_start:text_end],
+                    lm_attn_wrapper=lm_attn_wrapper,
+                    lm_kv_cache=lm_kv_cache,
+                    tts_attn_wrapper=tts_attn_wrapper,
+                    tts_kv_cache=tts_kv_cache,
+                )
+            else:
+                # Still in speech window from previous text window
+                return self._process_speech_step(
+                    request=request,
+                    dummy_token_id=dummy_token_id,
+                    tts_attn_wrapper=tts_attn_wrapper,
+                    tts_kv_cache=tts_kv_cache,
+                    cfg_scale=cfg_scale,
+                    num_diffusion_steps=num_diffusion_steps,
+                )
+        else:
+            # All text windows processed - continue speech generation until EOS
+            return self._process_speech_step(
+                request=request,
+                dummy_token_id=dummy_token_id,
+                tts_attn_wrapper=tts_attn_wrapper,
+                tts_kv_cache=tts_kv_cache,
+                cfg_scale=cfg_scale,
+                num_diffusion_steps=num_diffusion_steps,
+            )
+
+    def _process_text_window(
+        self,
+        request: Request,
+        text_tokens: List[int],
+        lm_attn_wrapper,
+        lm_kv_cache: torch.Tensor,
+        tts_attn_wrapper,
+        tts_kv_cache: torch.Tensor,
+    ) -> Tuple[str, VibeVoiceForwardOutput]:
+        """
+        Process a text window: forward LM → forward TTS LM.
+
+        Updates request state:
+            - text_window_index: incremented after processing
+            - speech_step_in_window: reset to 0
+            - lm_last_hidden_state, tts_hidden_state, eos_logits: updated
+        """
+        batch_size = 1
+        window_size = len(text_tokens)
+
+        # Prepare LM inputs
+        lm_input_ids = torch.tensor([text_tokens], dtype=torch.long, device=self.device)
+        lm_position_ids = torch.arange(
+            request.next_position_id,
+            request.next_position_id + window_size,
+            dtype=torch.long,
+            device=self.device,
+        ).unsqueeze(0)
+
+        # Prepare TTS inputs (same tokens for TTS LM)
+        tts_input_ids = lm_input_ids.clone()
+        tts_position_ids = lm_position_ids.clone()
+
+        # Text mask: 1 for text positions
+        tts_text_masks = torch.ones(batch_size, window_size, dtype=torch.long, device=self.device)
+
+        # Run unified forward in text phase
+        output = self.forward(
+            lm_input_ids=lm_input_ids,
+            lm_position_ids=lm_position_ids,
+            lm_attn_wrapper=lm_attn_wrapper,
+            lm_kv_cache=lm_kv_cache,
+            tts_input_ids=tts_input_ids,
+            tts_position_ids=tts_position_ids,
+            tts_attn_wrapper=tts_attn_wrapper,
+            tts_kv_cache=tts_kv_cache,
+            lm_last_hidden_state=None,  # Will be computed in text phase
+            tts_text_masks=tts_text_masks,
+            phase="text",
+        )
+
+        # Update request state
+        request.lm_last_hidden_state = output.lm_hidden_state[:, -1:, :]  # Keep last token hidden state
+        request.tts_hidden_state = output.tts_hidden_state
+        request.eos_logits = output.eos_logits
+
+        # Update position tracking
+        request.next_position_id += window_size
+
+        # Check EOS (rare in text phase, but possible)
+        if self._check_eos(request, output.eos_logits):
+            request.finished_tags = torch.tensor([True], device=self.device)
+            return "finished", output
+
+        # Move to speech phase
+        request.text_window_index += 1
+        request.speech_step_in_window = 0
+
+        return "text", output
+
+    def _process_speech_step(
+        self,
+        request: Request,
+        dummy_token_id: int,
+        tts_attn_wrapper,
+        tts_kv_cache: torch.Tensor,
+        cfg_scale: float = 3.0,
+        num_diffusion_steps: int = 10,
+    ) -> Tuple[str, VibeVoiceForwardOutput]:
+        """
+        Process a single speech step: diffusion sample → acoustic decode → TTS LM forward.
+
+        Updates request state:
+            - speech_step_in_window: incremented
+            - tts_hidden_state, eos_logits: updated
+            - output_audio: audio chunks are queued
+        
+        Args:
+            request: The Request object containing generation state
+            dummy_token_id: Token ID to use as placeholder for speech steps
+            tts_attn_wrapper: FlashInfer wrapper for TTS LM
+            tts_kv_cache: KV cache for TTS LM
+            cfg_scale: Classifier-free guidance scale for diffusion
+            num_diffusion_steps: Number of diffusion sampling steps
+        """
+        batch_size = 1
+
+        # Prepare TTS inputs for single speech step
+        tts_input_ids = torch.tensor([[dummy_token_id]], dtype=torch.long, device=self.device)
+        tts_position_ids = torch.tensor([[request.next_position_id]], dtype=torch.long, device=self.device)
+
+        # Speech mask: 0 for speech positions
+        tts_text_masks = torch.zeros(batch_size, 1, dtype=torch.long, device=self.device)
+
+        # === NON-GRAPH REGION: Diffusion sampling ===
+        # Sample speech latent from diffusion head
+        speech_latent = self.sample_speech_latent(
+            tts_hidden_state=request.tts_hidden_state,
+            cfg_scale=cfg_scale,
+            num_inference_steps=num_diffusion_steps,
+        )
+
+        # === NON-GRAPH REGION: Acoustic decode ===
+        # Decode latent to audio (if decoder cache available)
+        if request.decoder_cache is not None:
+            audio_chunk, request.decoder_cache = self.decode_speech_latent(
+                speech_latent=speech_latent,
+                decoder_cache=request.decoder_cache,
+            )
+            # Queue audio chunk for output
+            request.output_audio.put(audio_chunk)
+
+        # Bridge latent → acoustic embed for TTS LM injection
+        acoustic_embed = self.compute_acoustic_embed(speech_latent)
+
+        # === GRAPH-CAPTURED REGION: TTS LM forward ===
+        # Run unified forward in speech phase
+        output = self.forward(
+            lm_input_ids=torch.empty(0, device=self.device),  # Not used in speech phase
+            lm_position_ids=torch.empty(0, device=self.device),
+            lm_attn_wrapper=None,
+            lm_kv_cache=torch.empty(0, device=self.device),
+            tts_input_ids=tts_input_ids,
+            tts_position_ids=tts_position_ids,
+            tts_attn_wrapper=tts_attn_wrapper,
+            tts_kv_cache=tts_kv_cache,
+            lm_last_hidden_state=acoustic_embed,
+            tts_text_masks=tts_text_masks,
+            phase="speech",
+        )
+
+        # Update request state
+        request.tts_hidden_state = output.tts_hidden_state
+        request.eos_logits = output.eos_logits
+        request.next_position_id += 1
+
+        # Check EOS
+        if self._check_eos(request, output.eos_logits):
+            request.finished_tags = torch.tensor([True], device=self.device)
+            return "finished", output
+
+        # Update speech step counter
+        request.speech_step_in_window += 1
+
+        # Check if speech window is complete
+        if request.speech_step_in_window >= self.TTS_SPEECH_WINDOW_SIZE:
+            # Reset for next window
+            request.speech_step_in_window = 0
+
+        # Check max tokens limit
+        total_speech_tokens = request.speech_step_in_window + request.text_window_index * self.TTS_SPEECH_WINDOW_SIZE
+        if total_speech_tokens >= request.max_speech_tokens:
+            request.finished_tags = torch.tensor([True], device=self.device)
+            return "finished", output
+
+        return "speech", output
+
+    def _check_eos(self, request: Request, eos_logits: torch.Tensor) -> bool:
+        """
+        Check if EOS has been triggered based on eos_logits.
+
+        Args:
+            request: Request containing eos_threshold
+            eos_logits: [batch, 1] logits from binary classifier
+
+        Returns:
+            True if sigmoid(eos_logits) > eos_threshold
+        """
+        eos_prob = torch.sigmoid(eos_logits)
+        return (eos_prob > request.eos_threshold).any().item()
+
+    def _is_generation_finished(self, request: Request) -> bool:
+        """
+        Check if generation should terminate.
+
+        Termination conditions:
+            1. EOS detected (finished_tags == True)
+            2. Max speech tokens reached
+            3. All text processed and speech window complete
+
+        Returns:
+            True if generation should stop
+        """
+        if request.finished_tags is not None and request.finished_tags.any().item():
+            return True
+
+        total_speech_steps = (
+            request.text_window_index * self.TTS_SPEECH_WINDOW_SIZE + request.speech_step_in_window
+        )
+        if total_speech_steps >= request.max_speech_tokens:
+            return True
+
+        return False
+
+    def init_generation_state(self, request: Request) -> None:
+        """
+        Initialize VibeVoice-specific generation state on a Request.
+
+        This should be called after preprocess() to set up:
+            - text_tokens from tokenized prompt
+            - total_text_windows
+            - finished_tags tensor
+
+        Args:
+            request: Request to initialize
+        """
+        # Tokenize the prompt if not already done
+        if not request.text_tokens and request.prompt:
+            request.text_tokens = self.text_tokenizer.encode(request.prompt, add_special_tokens=False)
+
+        # Calculate total text windows
+        total_tokens = len(request.text_tokens)
+        request.total_text_windows = (total_tokens + self.TTS_TEXT_WINDOW_SIZE - 1) // self.TTS_TEXT_WINDOW_SIZE
+
+        # Initialize finished tags
+        request.finished_tags = torch.tensor([False], device=self.device)
+
+        # Reset window counters
+        request.text_window_index = 0
+        request.speech_step_in_window = 0
+
+    def sample_speech_latent(
+        self,
+        tts_hidden_state: torch.Tensor,
+        cfg_scale: float = 3.0,
+        num_inference_steps: int = 10,
+        generator: Optional[torch.Generator] = None,
+    ) -> torch.Tensor:
+        """
+        NON-GRAPH: Diffusion sampling to generate speech latent.
+        
+        This is the boundary between graph-captured forward and diffusion.
+        Uses DPM-Solver for efficient sampling with classifier-free guidance.
+        
+        Args:
+            tts_hidden_state: Condition from TTS LM. Shape: [batch_size, 1, hidden_size]
+            cfg_scale: Classifier-free guidance scale. Higher values = stronger conditioning.
+            num_inference_steps: Number of diffusion steps (fewer = faster, more = quality).
+            generator: Optional torch.Generator for reproducible sampling.
+        
+        Returns:
+            speech_latent: [batch_size, latent_dim]
+        """
+        batch_size = tts_hidden_state.shape[0]
+        
+        # Squeeze sequence dimension for diffusion head
+        condition = tts_hidden_state.squeeze(1)  # [batch_size, hidden_size]
+        
+        # Initialize random noise
+        latents = torch.randn(
+            batch_size, self._latent_dim,
+            device=self.device, dtype=self.dtype,
+            generator=generator,
+        )
+        
+        # Use DPM-Solver if available, otherwise fallback to simple DDPM
+        if self.scheduler is not None:
+            # Set timesteps
+            self.scheduler.set_timesteps(num_inference_steps)
+            timesteps = self.scheduler.timesteps.to(self.device)
+            
+            # DPM-Solver sampling loop
+            for t in timesteps:
+                # Expand latents for CFG if needed
+                if cfg_scale > 1.0:
+                    latent_model_input = torch.cat([latents, latents], dim=0)
+                    timestep = t.expand(latent_model_input.shape[0])
+                    condition_input = torch.cat([condition, torch.zeros_like(condition)], dim=0)
+                else:
+                    latent_model_input = latents
+                    timestep = t.expand(batch_size)
+                    condition_input = condition
+                
+                # Predict noise
+                noise_pred = self.diffusion_head(
+                    noisy_images=latent_model_input,
+                    timesteps=timestep,
+                    condition=condition_input,
+                )
+                
+                # Apply CFG
+                if cfg_scale > 1.0:
+                    noise_pred_cond, noise_pred_uncond = noise_pred.chunk(2)
+                    noise_pred = noise_pred_uncond + cfg_scale * (noise_pred_cond - noise_pred_uncond)
+                
+                # Compute previous sample
+                latents = self.scheduler.step(noise_pred, t, latents, generator=generator).prev_sample
+        else:
+            # Fallback: Simple DDPM-style sampling
+            for i in range(num_inference_steps):
+                t = torch.tensor(
+                    [1000 - i * (1000 // num_inference_steps)] * batch_size,
+                    device=self.device, dtype=torch.long
+                )
+                
+                # Predict noise
+                noise_pred = self.diffusion_head(
+                    noisy_images=latents,
+                    timesteps=t,
+                    condition=condition,
+                )
+                
+                # Simple denoising step
+                alpha = 1.0 - (i / num_inference_steps)
+                latents = latents - (1 - alpha) * noise_pred
+        
+        return latents
+
+    def decode_speech_latent(
+        self,
+        speech_latent: torch.Tensor,
+        decoder_cache: DecoderCache,
+        sample_indices: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, DecoderCache]:
+        """
+        NON-GRAPH: Acoustic decoder to convert latent → audio.
+        
+        Uses the VibeVoiceDecoder for streaming audio generation with cache.
+        
+        Args:
+            speech_latent: Speech latent from diffusion sampling. Shape: [batch_size, latent_dim]
+            decoder_cache: VibeVoiceDecoderCache for streaming decode state.
+            sample_indices: [batch] indices for cache lookup. Defaults to [0] for batch_size=1.
+        
+        Returns:
+            audio_chunk: [batch_size, n_channels, audio_samples]
+            decoder_cache: Updated cache
+        """
+        from ..tokenizer.vibevoice_acoustic import VibeVoiceDecoderCache, VibeVoiceDecoder
+        
+        batch_size = speech_latent.shape[0]
+        
+        # Default sample indices for batch_size=1
+        if sample_indices is None:
+            sample_indices = torch.arange(batch_size, device=self.device, dtype=torch.long)
+        
+        # Ensure latent has correct shape [B, 1, latent_dim] for decoder
+        if speech_latent.ndim == 2:
+            speech_latent = speech_latent.unsqueeze(1)  # [B, 1, latent_dim]
+        
+        # Decode using the acoustic tokenizer's decoder
+        audio_chunk, decoder_cache = self.audio_decoder.decode_chunk(
+            latents=speech_latent,
+            decoder_cache=decoder_cache,
+        )
+        
+        return audio_chunk, decoder_cache
+
+    def compute_acoustic_embed(
+        self,
+        speech_latent: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Compute acoustic embedding from speech latent for TTS LM injection.
+        
+        This bridges the diffusion output (latent_dim=64) to the TTS LM input
+        space (hidden_size=1536).
+        
+        Args:
+            speech_latent: Speech latent from diffusion sampling. Shape: [batch_size, latent_dim]
+        
+        Returns:
+            acoustic_embed: [batch_size, 1, hidden_size] - ready for TTS LM injection
+        """
+        # Project latent to hidden size
+        acoustic_embed = self.acoustic_connector(speech_latent)  # [batch_size, hidden_size]
+        
+        # Add sequence dimension for TTS LM
+        acoustic_embed = acoustic_embed.unsqueeze(1)  # [batch_size, 1, hidden_size]
+        
+        return acoustic_embed
+
     def diffusion_forward(
         self,
         hidden_states: torch.Tensor,
@@ -618,23 +1373,33 @@ class VibeVoiceModel(BaseLMWithContinuousSpeech):
         """
         Forward pass through diffusion head to generate speech latents.
 
+        This is a convenience method that wraps sample_speech_latent for backward
+        compatibility. Prefer using sample_speech_latent directly for new code.
+
         Args:
             hidden_states: Hidden states from backbone model. Shape: (batch_size, seq_len, hidden_size)
-            **kwargs: Additional model-specific parameters
+            **kwargs: Additional parameters passed to sample_speech_latent
 
         Returns:
             Continuous speech latents. Shape: (batch_size, seq_len, latent_dim)
         """
-        # Placeholder implementation
-        batch_size = hidden_states.size(0)
-        seq_len = hidden_states.size(1)
-
-        # Generate placeholder latents
-        latents = torch.randn(
-            batch_size, seq_len, self._latent_dim,
-            device=self.device, dtype=self.dtype
+        # Extract kwargs with defaults
+        cfg_scale = kwargs.get("cfg_scale", 3.0)
+        num_inference_steps = kwargs.get("num_inference_steps", 10)
+        generator = kwargs.get("generator", None)
+        
+        # Sample latents using diffusion
+        latents = self.sample_speech_latent(
+            tts_hidden_state=hidden_states,
+            cfg_scale=cfg_scale,
+            num_inference_steps=num_inference_steps,
+            generator=generator,
         )
-
+        
+        # Add sequence dimension if needed for compatibility
+        if latents.ndim == 2:
+            latents = latents.unsqueeze(1)
+        
         return latents
 
     def postprocess(
@@ -646,6 +1411,9 @@ class VibeVoiceModel(BaseLMWithContinuousSpeech):
         """
         Convert continuous latents to audio waveform using acoustic decoder.
 
+        This method provides non-streaming audio decode. For streaming decode,
+        use decode_speech_latent() directly which maintains decoder cache state.
+
         Args:
             latents: Continuous speech latents from diffusion head. Shape: (batch_size, seq_len, latent_dim)
             decoder_cache: Optional decoder cache for acoustic decoder
@@ -654,15 +1422,28 @@ class VibeVoiceModel(BaseLMWithContinuousSpeech):
         Returns:
             Audio tensor. Shape: (batch_size, n_channels, audio_length)
         """
-        # Placeholder implementation
         batch_size = latents.size(0)
-
-        # Create dummy audio
-        audio = torch.randn(
-            batch_size, self.n_channels, self._output_audio_length,
-            device=self.audio_decoder_device, dtype=self.dtype
+        
+        # If no cache provided, initialize a new one
+        if decoder_cache is None:
+            decoder_cache = self.audio_decoder_initial_cache(batch_size)
+        
+        # Flatten sequence dimension for chunk-by-chunk decode
+        if latents.ndim == 3:
+            seq_len = latents.size(1)
+            latents_flat = latents.view(batch_size * seq_len, -1)
+            # Expand cache for batch_size * seq_len
+            expanded_cache = self.audio_decoder_initial_cache(batch_size * seq_len)
+        else:
+            latents_flat = latents
+            expanded_cache = decoder_cache
+        
+        # Decode latents to audio
+        audio, _ = self.decode_speech_latent(
+            speech_latent=latents_flat,
+            decoder_cache=expanded_cache,
         )
-
+        
         return audio
 
     def audio_decoder_initial_cache(self, batch_size: int) -> Optional[DecoderCache]:

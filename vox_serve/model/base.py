@@ -26,6 +26,29 @@ class PreprocessOutput:
     decoder_cache: Optional[DecoderCache] = None
 
 
+@dataclass
+class VibeVoiceForwardOutput:
+    """
+    Output data structure for the unified forward pass of VibeVoice models.
+
+    This dataclass captures the outputs from both the LM backbone and TTS LM
+    in a single coherent structure, supporting CUDA graph compatibility.
+
+    Attributes:
+        lm_hidden_state: Hidden states from the LM backbone.
+            Shape: [batch_size, seq_len, hidden_size] for text phase,
+            or None for speech phase (when LM is not invoked).
+        tts_hidden_state: Final hidden states from the TTS backbone.
+            Shape: [batch_size, 1, hidden_size]
+        eos_logits: Binary classification logits for EOS prediction.
+            Shape: [batch_size, 1]
+    """
+
+    lm_hidden_state: Optional[torch.FloatTensor]
+    tts_hidden_state: torch.FloatTensor
+    eos_logits: torch.FloatTensor
+
+
 class BaseLM(ABC):
     """
     Base class for language models used in vox-serve.
@@ -517,7 +540,7 @@ class BaseLMWithContinuousSpeech(BaseLM):
     @abstractmethod
     def forward_tts_lm(
         self,
-        input_ids: torch.Tensor,           # (batch_size, n_codebooks)
+        input_ids: torch.Tensor,           # (batch_size, sequence_length)
         position_ids: torch.Tensor,         # (batch_size,)
         attn_wrapper: FlashInferWrapper,    # FlashInfer wrapper
         kv_cache: torch.Tensor,             # KV cache for TTS backbone

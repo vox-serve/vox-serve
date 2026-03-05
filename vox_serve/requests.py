@@ -75,6 +75,27 @@ class Request:
     chunk_send_timestamps: List[float] = field(default_factory=list)  # when each chunk was sent
     chunk_durations: List[float] = field(default_factory=list)  # duration of each chunk in seconds
 
+    # VibeVoice windowed generation state
+    text_window_index: int = 0  # Current text window index
+    speech_step_in_window: int = 0  # Current speech step within the window
+    finished_tags: torch.Tensor = None  # [batch] bool tensor tracking which samples hit EOS
+    eos_threshold: float = 0.5  # Threshold for EOS detection (sigmoid)
+    max_speech_tokens: int = 1024  # Maximum speech tokens to generate
+
+    # TTS-specific KV cache for VibeVoice (separate from LM KV cache)
+    tts_kv_pages: List[int] = field(default_factory=list)
+    tts_kv_token_len: int = 0
+    tts_kv_last_page_len: int = 0
+
+    # Text tokens for windowed processing (tokenized prompt)
+    text_tokens: List[int] = field(default_factory=list)
+    total_text_windows: int = 0  # Total number of text windows
+
+    # Current hidden states for bridging LM → TTS LM
+    lm_last_hidden_state: torch.Tensor = None
+    tts_hidden_state: torch.Tensor = None
+    eos_logits: torch.Tensor = None
+
 
 class LMInputs(TypedDict):
     """Typed container for scheduler-prepared inputs for LM steps."""
