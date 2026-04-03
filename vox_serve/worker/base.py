@@ -8,6 +8,7 @@ import torchaudio
 from ..flashinfer_utils import FlashInferDecodeWrapper, FlashInferPrefillWrapper
 from ..model import load_model
 from ..requests import LMInputs, Request
+from ..tokenizer.base import DecoderCache
 from ..utils import get_logger
 
 
@@ -62,7 +63,8 @@ class ModelWorker:
         if dp_size > 1:
             # Use LoggerAdapter to add rank prefix
             import logging
-            self.logger = logging.LoggerAdapter(base_logger, {'dp_rank': dp_rank})
+
+            self.logger = logging.LoggerAdapter(base_logger, {"dp_rank": dp_rank})
             # Override the process method to add rank prefix
             self.logger.process = lambda msg, kwargs: (f"[DP {dp_rank}/{dp_size}] {msg}", kwargs)
         else:
@@ -154,7 +156,7 @@ class ModelWorker:
             attn_buffer=self.flashinfer_buffer,
             n_qo_head=self.model.num_attention_heads,
             n_kv_head=self.model.num_key_value_heads,
-            n_state=self.model.hidden_size,
+            n_state=self.model.num_attention_heads * self.model.head_dim,
             page_size=self.page_size,
             use_cuda_graph=False,
         )
@@ -162,7 +164,7 @@ class ModelWorker:
             attn_buffer=self.flashinfer_buffer,
             n_qo_head=self.model.num_attention_heads,
             n_kv_head=self.model.num_key_value_heads,
-            n_state=self.model.hidden_size,
+            n_state=self.model.num_attention_heads * self.model.head_dim,
             page_size=self.page_size,
             use_cuda_graph=False,
         )
@@ -384,13 +386,13 @@ class ModelWorker:
             if req.text_complete and not req.eos_injected:
                 # Text input is complete and queue is drained - inject EOS token ONCE
                 # This signals to the model that all text has been received
-                if hasattr(self.model, 'config') and hasattr(self.model.config, 'tts_eos_token_id'):
+                if hasattr(self.model, "config") and hasattr(self.model.config, "tts_eos_token_id"):
                     req.input_tokens[0, -1] = self.model.config.tts_eos_token_id
                     req.eos_injected = True
-                elif hasattr(self.model, 'config') and hasattr(self.model.config, 'tts_pad_token_id'):
+                elif hasattr(self.model, "config") and hasattr(self.model.config, "tts_pad_token_id"):
                     req.input_tokens[0, -1] = self.model.config.tts_pad_token_id
             # Either waiting for more text, or EOS already injected - use pad token
-            elif hasattr(self.model, 'config') and hasattr(self.model.config, 'tts_pad_token_id'):
+            elif hasattr(self.model, "config") and hasattr(self.model.config, "tts_pad_token_id"):
                 req.input_tokens[0, -1] = self.model.config.tts_pad_token_id
 
     def run_lm_prefill(self, requests: List[Request], lm_inputs: LMInputs) -> Optional[Coroutine]:
@@ -619,6 +621,7 @@ class ModelWorker:
 
         # Prepare token_ids for multiple chunks from each request
         token_ids = []
+        decoder_caches: list[DecoderCache] = []
         request_chunk_mapping = []  # Track which request each chunk belongs to
 
         for req_idx, req in enumerate(requests):
@@ -632,6 +635,8 @@ class ModelWorker:
 
                 token_ids.append(torch.cat(new_tokens, dim=0))
                 request_chunk_mapping.append((req_idx, chunk_idx))
+                if req.decoder_cache is not None:
+                    decoder_caches.append(req.decoder_cache)
 
         if not token_ids:
             return
@@ -643,7 +648,16 @@ class ModelWorker:
             token_ids = token_ids.to(self.detokenizer_device, non_blocking=True)
             torch.cuda.synchronize(device=self.detokenizer_device)
 
-        audio_tensors = self.model.postprocess(token_ids)
+        if decoder_caches:
+            batched_cache = DecoderCache.cat(decoder_caches)
+            audio_tensors = self.model.postprocess(token_ids, decoder_cache=batched_cache)
+            # Copy back updated streaming state to each request's cache
+            for i, (req_idx, _chunk_idx) in enumerate(request_chunk_mapping):
+                req = requests[req_idx]
+                if req.decoder_cache is not None:
+                    req.decoder_cache.copy_from(batched_cache[i : i + 1])
+        else:
+            audio_tensors = self.model.postprocess(token_ids)
         self.logger.debug("Audio tensors: %s", audio_tensors)
 
         if self.needs_watermarking:
@@ -661,11 +675,7 @@ class ModelWorker:
             last_chunk_len = len(req.lm_output_audio_tokens[decode_idx : decode_idx + self.detokenize_interval])
             if last_chunk_len < self.detokenize_interval:
                 # remove the padded audio
-                trim_len = int(
-                    audio_int16.shape[1]
-                    * (last_chunk_len - 0.5)
-                    / self.detokenize_interval
-                )
+                trim_len = int(audio_int16.shape[1] * (last_chunk_len - 0.5) / self.detokenize_interval)
                 audio_int16 = audio_int16[:, :trim_len]
 
             audio_bytes = audio_int16.tobytes()
