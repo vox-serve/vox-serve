@@ -68,12 +68,6 @@ class Qwen3TTSDecoderCache(DecoderCache):
     upsample_work_buffers: Optional[List[torch.Tensor]] = None
     decoder_work_buffers: Optional[List[torch.Tensor]] = None
 
-    # Output buffers for CUDA graph compatibility (avoid conv output allocations)
-    # Each buffer: [batch, out_channels, output_length]
-    pre_conv_output_buffer: Optional[torch.Tensor] = None
-    upsample_output_buffers: Optional[List[torch.Tensor]] = None
-    decoder_output_buffers: Optional[List[torch.Tensor]] = None
-
     # TransConvNet caches for streaming - stores last input sample at each stage
     # Each: [batch, in_channels, 1]
     # 4 caches for decoder TransConvNet stages (rates 8, 5, 4, 3)
@@ -269,14 +263,13 @@ class Qwen3TTSTokenizerV2CausalConvNet(nn.Module):
     def forward(self, hidden_state):
         extra_padding = self._get_extra_padding_for_conv1d(hidden_state)
         hidden_state = F.pad(hidden_state, (self.padding, extra_padding), mode="constant", value=0)
-        return self.conv(hidden_state).contiguous()
+        return self.conv(hidden_state)
 
     def forward_chunk(
         self,
         hidden_state: torch.Tensor,
         conv_cache: Optional[torch.Tensor] = None,
         work_buffer: Optional[torch.Tensor] = None,
-        output_buffer: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Forward with caching for streaming inference.
 
@@ -287,8 +280,6 @@ class Qwen3TTSTokenizerV2CausalConvNet(nn.Module):
             conv_cache: [batch, channels, padding] - pre-allocated buffer
             work_buffer: [batch, channels, padding + max_input_length] - pre-allocated work buffer
                         If None, will create one (not CUDA graph compatible)
-            output_buffer: [batch, out_channels, max_output_length] - pre-allocated output buffer
-                          If None, will allocate new tensor (not CUDA graph compatible)
 
         Returns:
             output: [batch, out_channels, new_length] (same temporal length as input)
@@ -326,15 +317,7 @@ class Qwen3TTSTokenizerV2CausalConvNet(nn.Module):
             hidden_with_cache = hidden_state
 
         # Apply convolution
-        conv_output = self.conv(hidden_with_cache)
-
-        # Copy to output buffer if provided (CUDA graph compatible)
-        if output_buffer is not None:
-            output_len = conv_output.shape[2]
-            output_buffer[:batch_size, :, :output_len].copy_(conv_output)
-            output = output_buffer[:batch_size, :, :output_len]
-        else:
-            output = conv_output
+        output = self.conv(hidden_with_cache)
 
         # Return the same cache buffer (updated in-place)
         return output, conv_cache
@@ -354,7 +337,7 @@ class Qwen3TTSTokenizerV2CausalTransConvNet(nn.Module):
         """Batch forward - trims both left and right padding."""
         hidden_state = self.conv(hidden_state)
         hidden_state = hidden_state[..., self.left_pad : hidden_state.shape[-1] - self.right_pad]
-        return hidden_state.contiguous()
+        return hidden_state
 
     def forward_chunk(
         self,
@@ -394,7 +377,7 @@ class Qwen3TTSTokenizerV2CausalTransConvNet(nn.Module):
         # Output shape: [batch, out_channels, length * stride]
         output = raw_output[:, :, self.stride : self.stride + length * self.stride]
 
-        return output.contiguous()
+        return output
 
 
 class Qwen3TTSTokenizerV2ConvNeXtBlock(nn.Module):
@@ -436,7 +419,6 @@ class Qwen3TTSTokenizerV2ConvNeXtBlock(nn.Module):
         hidden_states: torch.Tensor,
         conv_cache: Optional[torch.Tensor] = None,
         work_buffer: Optional[torch.Tensor] = None,
-        output_buffer: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Forward with caching for streaming inference.
 
@@ -444,7 +426,6 @@ class Qwen3TTSTokenizerV2ConvNeXtBlock(nn.Module):
             hidden_states: [batch, channels, length]
             conv_cache: [batch, channels, padding] for dwconv or None
             work_buffer: [batch, channels, padding + length] for CUDA graph compatibility
-            output_buffer: [batch, channels, length] for dwconv output (CUDA graph compatible)
 
         Returns:
             output: [batch, channels, length]
@@ -452,7 +433,7 @@ class Qwen3TTSTokenizerV2ConvNeXtBlock(nn.Module):
         """
         residual = hidden_states
 
-        hidden_states, _ = self.dwconv.forward_chunk(hidden_states, conv_cache, work_buffer, output_buffer)
+        hidden_states, _ = self.dwconv.forward_chunk(hidden_states, conv_cache, work_buffer)
         hidden_states = hidden_states.permute(0, 2, 1)
         hidden_states = self.norm(hidden_states)
         hidden_states = self.pwconv1(hidden_states)
@@ -1007,15 +988,11 @@ class SnakeBeta(nn.Module):
         Applies the function to the input elementwise.
         SnakeBeta ∶= x + 1/b * sin^2 (xa)
         """
-        alpha = self.alpha.unsqueeze(0).unsqueeze(-1)  # line up with x to [B, C, T]
-        beta = self.beta.unsqueeze(0).unsqueeze(-1)
-        alpha = torch.exp(alpha)
-        beta = torch.exp(beta)
-        hidden_states = hidden_states + (1.0 / (beta + self.no_div_by_zero)) * torch.pow(
-            torch.sin(hidden_states * alpha), 2
-        )
-
-        return hidden_states
+        alpha = torch.exp(self.alpha).unsqueeze(0).unsqueeze(-1)  # [1, C, 1]
+        beta = torch.exp(self.beta).unsqueeze(0).unsqueeze(-1)
+        x = torch.sin(hidden_states * alpha)
+        x.pow_(2).div_(beta + self.no_div_by_zero)
+        return hidden_states + x
 
 
 class Qwen3TTSTokenizerV2DecoderDecoderResidualUnit(nn.Module):
@@ -1041,7 +1018,6 @@ class Qwen3TTSTokenizerV2DecoderDecoderResidualUnit(nn.Module):
         hidden_state: torch.Tensor,
         conv_cache: Optional[torch.Tensor] = None,
         work_buffer: Optional[torch.Tensor] = None,
-        output_buffer: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Forward with caching for streaming inference.
 
@@ -1052,7 +1028,6 @@ class Qwen3TTSTokenizerV2DecoderDecoderResidualUnit(nn.Module):
             hidden_state: [batch, channels, length]
             conv_cache: [batch, channels, padding] for conv1 or None
             work_buffer: [batch, channels, padding + length] for CUDA graph compatibility
-            output_buffer: [batch, channels, length] for conv1 output (CUDA graph compatible)
 
         Returns:
             output: [batch, channels, length]
@@ -1061,7 +1036,7 @@ class Qwen3TTSTokenizerV2DecoderDecoderResidualUnit(nn.Module):
         residual = hidden_state
 
         hidden_state = self.act1(hidden_state)
-        hidden_state, _ = self.conv1.forward_chunk(hidden_state, conv_cache, work_buffer, output_buffer)
+        hidden_state, _ = self.conv1.forward_chunk(hidden_state, conv_cache, work_buffer)
         hidden_state = self.act2(hidden_state)
         hidden_state = self.conv2(hidden_state)  # kernel_size=1, no cache needed
 
@@ -1095,7 +1070,6 @@ class Qwen3TTSTokenizerV2DecoderDecoderBlock(nn.Module):
         hidden: torch.Tensor,
         conv_caches: Optional[List[torch.Tensor]] = None,
         work_buffers: Optional[List[torch.Tensor]] = None,
-        output_buffers: Optional[List[torch.Tensor]] = None,
         transconv_cache: Optional[torch.Tensor] = None,
         transconv_work_buffer: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, List[torch.Tensor]]:
@@ -1105,7 +1079,6 @@ class Qwen3TTSTokenizerV2DecoderDecoderBlock(nn.Module):
             hidden: [batch, channels, length]
             conv_caches: List of 3 conv caches for the 3 ResidualUnits or None
             work_buffers: List of 3 work buffers for CUDA graph compatibility
-            output_buffers: List of 3 output buffers for CUDA graph compatibility
             transconv_cache: [batch, in_channels, 1] - TransConvNet input cache
             transconv_work_buffer: [batch, in_channels, 1 + length] - TransConvNet work buffer
 
@@ -1117,8 +1090,6 @@ class Qwen3TTSTokenizerV2DecoderDecoderBlock(nn.Module):
             conv_caches = [None, None, None]
         if work_buffers is None:
             work_buffers = [None, None, None]
-        if output_buffers is None:
-            output_buffers = [None, None, None]
 
         cache_idx = 0
 
@@ -1128,7 +1099,6 @@ class Qwen3TTSTokenizerV2DecoderDecoderBlock(nn.Module):
                     hidden,
                     conv_caches[cache_idx],
                     work_buffers[cache_idx],
-                    output_buffers[cache_idx],
                 )
                 cache_idx += 1
             elif isinstance(block, Qwen3TTSTokenizerV2CausalTransConvNet):
@@ -1408,15 +1378,10 @@ class Qwen3TTSTokenizerV2Decoder(nn.Module):
             batch_size, self.config.codebook_dim, self.pre_conv.padding + seq_len,
             device=device, dtype=dtype
         )
-        pre_conv_output_buffer = torch.zeros(
-            batch_size, self.pre_conv.conv.out_channels, seq_len,
-            device=device, dtype=dtype
-        )
 
-        # Upsample ConvNeXt caches, work buffers, and output buffers
+        # Upsample ConvNeXt caches and work buffers
         upsample_conv_caches = []
         upsample_work_buffers = []
-        upsample_output_buffers = []
         for blocks in self.upsample:
             for block in blocks:
                 if isinstance(block, Qwen3TTSTokenizerV2CausalTransConvNet):
@@ -1436,18 +1401,10 @@ class Qwen3TTSTokenizerV2Decoder(nn.Module):
                             device=device, dtype=dtype
                         )
                     )
-                    # ConvNeXt output has same shape as input (residual connection)
-                    upsample_output_buffers.append(
-                        torch.zeros(
-                            batch_size, self.config.latent_dim, seq_len,
-                            device=device, dtype=dtype
-                        )
-                    )
 
-        # Decoder conv caches, work buffers, and output buffers
+        # Decoder conv caches and work buffers
         decoder_conv_caches = []
         decoder_work_buffers = []
-        decoder_output_buffers = []
 
         # TransConvNet caches and work buffers (4 stages for rates 8, 5, 4, 3)
         # Each cache stores the last input sample: [batch, in_channels, 1]
@@ -1465,9 +1422,6 @@ class Qwen3TTSTokenizerV2Decoder(nn.Module):
                 )
                 decoder_work_buffers.append(
                     torch.zeros(batch_size, in_channels, block.padding + seq_len, device=device, dtype=dtype)
-                )
-                decoder_output_buffers.append(
-                    torch.zeros(batch_size, out_channels, seq_len, device=device, dtype=dtype)
                 )
             elif isinstance(block, Qwen3TTSTokenizerV2DecoderDecoderBlock):
                 # Each DecoderBlock has ResidualUnits and possibly TransConvNet for upsampling
@@ -1500,10 +1454,6 @@ class Qwen3TTSTokenizerV2Decoder(nn.Module):
                                 dtype=dtype,
                             )
                         )
-                        # ResidualUnit output has same shape as input (residual connection)
-                        decoder_output_buffers.append(
-                            torch.zeros(batch_size, in_channels, seq_len, device=device, dtype=dtype)
-                        )
 
         # Pre-allocate attention cache with zeros
         num_layers = self.config.num_hidden_layers
@@ -1531,9 +1481,6 @@ class Qwen3TTSTokenizerV2Decoder(nn.Module):
             pre_conv_work_buffer=pre_conv_work_buffer,
             upsample_work_buffers=upsample_work_buffers,
             decoder_work_buffers=decoder_work_buffers,
-            pre_conv_output_buffer=pre_conv_output_buffer,
-            upsample_output_buffers=upsample_output_buffers,
-            decoder_output_buffers=decoder_output_buffers,
             transconv_caches=transconv_caches,
             transconv_work_buffers=transconv_work_buffers,
         )
@@ -1566,12 +1513,11 @@ class Qwen3TTSTokenizerV2Decoder(nn.Module):
         # Quantizer decode (no caching needed)
         hidden = self.quantizer.decode(codes)
 
-        # Pre-conv with caching, work buffer, and output buffer
+        # Pre-conv with caching and work buffer
         hidden, _ = self.pre_conv.forward_chunk(
             hidden,
             decoder_cache.pre_conv_cache,
             decoder_cache.pre_conv_work_buffer,
-            decoder_cache.pre_conv_output_buffer,
         )
         hidden = hidden.transpose(1, 2)
 
@@ -1594,9 +1540,7 @@ class Qwen3TTSTokenizerV2Decoder(nn.Module):
                     cache = caches[upsample_cache_idx] if caches else None
                     work_bufs = decoder_cache.upsample_work_buffers
                     work_buf = work_bufs[upsample_cache_idx] if work_bufs else None
-                    out_bufs = decoder_cache.upsample_output_buffers
-                    output_buf = out_bufs[upsample_cache_idx] if out_bufs else None
-                    hidden, _ = block.forward_chunk(hidden, cache, work_buf, output_buf)
+                    hidden, _ = block.forward_chunk(hidden, cache, work_buf)
                     upsample_cache_idx += 1
                 elif isinstance(block, Qwen3TTSTokenizerV2CausalTransConvNet):
                     # Upsample TransConvNet has kernel_size == stride, so no trimming needed
@@ -1618,15 +1562,12 @@ class Qwen3TTSTokenizerV2Decoder(nn.Module):
                 cache = conv_caches[decoder_cache_idx] if conv_caches else None
                 work_bufs = decoder_cache.decoder_work_buffers
                 work_buf = work_bufs[decoder_cache_idx] if work_bufs else None
-                out_bufs = decoder_cache.decoder_output_buffers
-                output_buf = out_bufs[decoder_cache_idx] if out_bufs else None
-                wav, _ = block.forward_chunk(wav, cache, work_buf, output_buf)
+                wav, _ = block.forward_chunk(wav, cache, work_buf)
                 decoder_cache_idx += 1
             elif isinstance(block, Qwen3TTSTokenizerV2DecoderDecoderBlock):
                 # DecoderBlock with 3 ResidualUnit caches + 1 TransConvNet cache
                 block_caches = []
                 block_work_bufs = []
-                block_output_bufs = []
                 for _ in range(3):  # 3 ResidualUnits per block
                     if decoder_cache.decoder_conv_caches and decoder_cache_idx < len(decoder_cache.decoder_conv_caches):
                         block_caches.append(decoder_cache.decoder_conv_caches[decoder_cache_idx])
@@ -1637,11 +1578,6 @@ class Qwen3TTSTokenizerV2Decoder(nn.Module):
                         block_work_bufs.append(work_bufs[decoder_cache_idx])
                     else:
                         block_work_bufs.append(None)
-                    out_bufs = decoder_cache.decoder_output_buffers
-                    if out_bufs and decoder_cache_idx < len(out_bufs):
-                        block_output_bufs.append(out_bufs[decoder_cache_idx])
-                    else:
-                        block_output_bufs.append(None)
                     decoder_cache_idx += 1
 
                 # Get TransConvNet cache and work buffer for this block
@@ -1655,8 +1591,9 @@ class Qwen3TTSTokenizerV2Decoder(nn.Module):
                 transconv_cache_idx += 1
 
                 wav, _ = block.forward_chunk(
-                    wav, block_caches, block_work_bufs, block_output_bufs,
-                    transconv_cache, transconv_work_buf
+                    wav, block_caches, block_work_bufs,
+                    transconv_cache=transconv_cache,
+                    transconv_work_buffer=transconv_work_buf,
                 )
             else:
                 # SnakeBeta or other non-caching blocks
