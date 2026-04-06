@@ -1,8 +1,14 @@
 from dataclasses import dataclass
 from typing import Optional
 
-import flashinfer
 import torch
+
+try:
+    import flashinfer
+
+    HAS_FLASHINFER = True
+except ImportError:
+    HAS_FLASHINFER = False
 
 
 @dataclass
@@ -27,57 +33,71 @@ def greedy_sampling(logits):
     return samples
 
 
+def _pytorch_top_k_filter(logits: torch.Tensor, top_k: int) -> torch.Tensor:
+    """Zero out logits outside the top-k."""
+    if top_k > 0 and top_k < logits.size(-1):
+        indices_to_remove = logits < torch.topk(logits, top_k, dim=-1).values[..., -1:]
+        logits = logits.masked_fill(indices_to_remove, float("-inf"))
+    return logits
+
+
+def _pytorch_top_p_filter(logits: torch.Tensor, top_p: float) -> torch.Tensor:
+    """Zero out logits outside the nucleus (top-p)."""
+    sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)
+    cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
+    sorted_mask = cumulative_probs - torch.softmax(sorted_logits, dim=-1) >= top_p
+    sorted_logits = sorted_logits.masked_fill(sorted_mask, float("-inf"))
+    logits = logits.scatter(-1, sorted_indices, sorted_logits)
+    return logits
+
+
 def top_k_sampling(logits, top_k, temperature):
     logits = logits / temperature
+    if HAS_FLASHINFER and logits.is_cuda:
+        probs = torch.softmax(logits, dim=-1)
+        return flashinfer.sampling.top_k_sampling_from_probs(probs=probs, top_k=top_k, deterministic=True)
+    logits = _pytorch_top_k_filter(logits, top_k)
     probs = torch.softmax(logits, dim=-1)
-
-    samples = flashinfer.sampling.top_k_sampling_from_probs(
-        probs=probs,
-        top_k=top_k,
-        deterministic=True,
-    )
-
-    return samples
+    return torch.multinomial(probs, num_samples=1).squeeze(-1)
 
 
 def top_p_sampling(logits, top_p, temperature):
     logits = logits / temperature
+    if HAS_FLASHINFER and logits.is_cuda:
+        probs = torch.softmax(logits, dim=-1)
+        return flashinfer.sampling.top_p_sampling_from_probs(probs=probs, top_p=top_p, deterministic=True)
+    logits = _pytorch_top_p_filter(logits, top_p)
     probs = torch.softmax(logits, dim=-1)
-
-    samples = flashinfer.sampling.top_p_sampling_from_probs(
-        probs=probs,
-        top_p=top_p,
-        deterministic=True,
-    )
-
-    return samples
+    return torch.multinomial(probs, num_samples=1).squeeze(-1)
 
 
 def top_k_top_p_sampling(logits, top_k, top_p, temperature, filter_apply_order="top_k_first"):
     logits = logits / temperature
-
-    samples = flashinfer.sampling.top_k_top_p_sampling_from_logits(
-        logits=logits,
-        top_k=top_k,
-        top_p=top_p,
-        filter_apply_order=filter_apply_order,
-        deterministic=True,
-    )
-
-    return samples
+    if HAS_FLASHINFER and logits.is_cuda:
+        return flashinfer.sampling.top_k_top_p_sampling_from_logits(
+            logits=logits, top_k=top_k, top_p=top_p, filter_apply_order=filter_apply_order, deterministic=True,
+        )
+    if filter_apply_order == "top_k_first":
+        logits = _pytorch_top_k_filter(logits, top_k)
+        logits = _pytorch_top_p_filter(logits, top_p)
+    else:
+        logits = _pytorch_top_p_filter(logits, top_p)
+        logits = _pytorch_top_k_filter(logits, top_k)
+    probs = torch.softmax(logits, dim=-1)
+    return torch.multinomial(probs, num_samples=1).squeeze(-1)
 
 
 def min_p_sampling(logits, min_p, temperature):
     logits = logits / temperature
+    if HAS_FLASHINFER and logits.is_cuda:
+        probs = torch.softmax(logits, dim=-1)
+        return flashinfer.sampling.min_p_sampling_from_probs(probs=probs, min_p=min_p, deterministic=True)
     probs = torch.softmax(logits, dim=-1)
-
-    samples = flashinfer.sampling.min_p_sampling_from_probs(
-        probs=probs,
-        min_p=min_p,
-        deterministic=True,
-    )
-
-    return samples
+    max_probs = probs.max(dim=-1, keepdim=True).values
+    threshold = min_p * max_probs
+    logits = logits.masked_fill(probs < threshold, float("-inf"))
+    probs = torch.softmax(logits, dim=-1)
+    return torch.multinomial(probs, num_samples=1).squeeze(-1)
 
 
 class Sampler:

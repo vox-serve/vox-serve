@@ -1,9 +1,15 @@
 from typing import Union
 
-import flashinfer
 import torch
 
 from .utils import get_logger
+
+try:
+    import flashinfer
+
+    HAS_FLASHINFER = True
+except ImportError:
+    HAS_FLASHINFER = False
 
 logger = get_logger(__name__)
 
@@ -250,7 +256,7 @@ FlashInferWrapper = Union[FlashInferPrefillWrapper, FlashInferDecodeWrapper]
 
 def rms_norm(hidden_states: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     """
-    Wrapper for FlashInfer RMSNorm operation.
+    RMSNorm operation. Uses FlashInfer when available, otherwise pure PyTorch.
 
     Args:
         hidden_states: Input tensor of shape (..., hidden_size)
@@ -260,11 +266,53 @@ def rms_norm(hidden_states: torch.Tensor, weight: torch.Tensor, eps: float = 1e-
     Returns:
         Normalized tensor of the same shape as hidden_states
     """
-    return flashinfer.norm.rmsnorm(
-        input=hidden_states,
-        weight=weight,
-        eps=eps,
+    if HAS_FLASHINFER and hidden_states.is_cuda:
+        return flashinfer.norm.rmsnorm(
+            input=hidden_states,
+            weight=weight,
+            eps=eps,
+        )
+    input_dtype = hidden_states.dtype
+    hidden_states = hidden_states.to(torch.float32)
+    variance = hidden_states.pow(2).mean(-1, keepdim=True)
+    hidden_states = hidden_states * torch.rsqrt(variance + eps)
+    return (weight * hidden_states).to(input_dtype)
+
+
+def _rotate_half(x: torch.Tensor) -> torch.Tensor:
+    """Rotate the second half of each head dimension."""
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
+
+
+def _apply_rotary_emb(t: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+    """Apply rotary embedding to a tensor. Assumes non-interleaved layout."""
+    return t * cos + _rotate_half(t) * sin
+
+
+def _pytorch_rope_pos_ids(
+    query_states: torch.Tensor,
+    key_states: torch.Tensor,
+    position_ids: torch.Tensor,
+    rope_scale: float,
+    rope_theta: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Pure PyTorch RoPE implementation using position IDs."""
+    head_dim = query_states.shape[-1]
+    inv_freq = 1.0 / (
+        rope_theta ** (torch.arange(0, head_dim, 2, device=query_states.device, dtype=torch.float32) / head_dim)
     )
+    # position_ids: (seq_len,) → freqs: (seq_len, head_dim/2)
+    freqs = (position_ids.float().unsqueeze(-1) / rope_scale) * inv_freq.unsqueeze(0)
+    # Expand to (..., head_dim) by duplicating cos/sin for both halves
+    cos = freqs.cos().unsqueeze(-2)  # (seq_len, 1, head_dim/2)
+    sin = freqs.sin().unsqueeze(-2)  # (seq_len, 1, head_dim/2)
+    cos = torch.cat([cos, cos], dim=-1)  # (seq_len, 1, head_dim)
+    sin = torch.cat([sin, sin], dim=-1)
+    q_out = _apply_rotary_emb(query_states, cos, sin).to(query_states.dtype)
+    k_out = _apply_rotary_emb(key_states, cos, sin).to(key_states.dtype)
+    return q_out, k_out
 
 
 def apply_rope_pos_ids(
@@ -274,15 +322,15 @@ def apply_rope_pos_ids(
     rope_scale: float = 1.0,
     rope_theta: float = 10000.0,
     interleave: bool = False,
-    **kwargs
+    **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    Wrapper for FlashInfer RoPE application with position IDs.
+    RoPE application with position IDs. Uses FlashInfer when available, otherwise pure PyTorch.
 
     Args:
-        query_states: Query states tensor
-        key_states: Key states tensor
-        position_ids: Position IDs tensor
+        query_states: Query states tensor, shape (seq_len, n_heads, head_dim)
+        key_states: Key states tensor, shape (seq_len, n_kv_heads, head_dim)
+        position_ids: Position IDs tensor, shape (seq_len,)
         rope_scale: Rope scaling factor
         rope_theta: Rope theta parameter
         interleave: Whether to interleave the RoPE
@@ -291,34 +339,37 @@ def apply_rope_pos_ids(
     Returns:
         Tuple of (rotated_query_states, rotated_key_states)
     """
-    # Filter out kwargs that are meant for specific RoPE variants
-    llama31_params = {}
-    other_params = {}
+    if HAS_FLASHINFER and query_states.is_cuda:
+        # Filter out kwargs that are meant for specific RoPE variants
+        llama31_params = {}
+        other_params = {}
 
-    for key, value in kwargs.items():
-        if key in ['low_freq_factor', 'high_freq_factor', 'old_context_len']:
-            llama31_params[key] = value
+        for key, value in kwargs.items():
+            if key in ["low_freq_factor", "high_freq_factor", "old_context_len"]:
+                llama31_params[key] = value
+            else:
+                other_params[key] = value
+
+        # Use LLaMA 3.1 variant if specific parameters are provided
+        if llama31_params:
+            return flashinfer.rope.apply_llama31_rope_pos_ids(
+                query_states,
+                key_states,
+                pos_ids=position_ids,
+                rope_scale=rope_scale,
+                rope_theta=rope_theta,
+                interleave=interleave,
+                **llama31_params,
+            )
         else:
-            other_params[key] = value
+            return flashinfer.rope.apply_rope_pos_ids(
+                query_states,
+                key_states,
+                pos_ids=position_ids,
+                rope_scale=rope_scale,
+                rope_theta=rope_theta,
+                interleave=interleave,
+                **other_params,
+            )
 
-    # Use LLaMA 3.1 variant if specific parameters are provided
-    if llama31_params:
-        return flashinfer.rope.apply_llama31_rope_pos_ids(
-            query_states,
-            key_states,
-            pos_ids=position_ids,
-            rope_scale=rope_scale,
-            rope_theta=rope_theta,
-            interleave=interleave,
-            **llama31_params
-        )
-    else:
-        return flashinfer.rope.apply_rope_pos_ids(
-            query_states,
-            key_states,
-            pos_ids=position_ids,
-            rope_scale=rope_scale,
-            rope_theta=rope_theta,
-            interleave=interleave,
-            **other_params
-        )
+    return _pytorch_rope_pos_ids(query_states, key_states, position_ids, rope_scale, rope_theta)

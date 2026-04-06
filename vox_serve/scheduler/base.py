@@ -81,21 +81,28 @@ class Scheduler:
             "detokenize_interval": detokenize_interval,
         }
 
-        # Simplified worker selection logic
-        if enable_disaggregation:
-            worker_kwargs["detokenizer_device"] = "cuda:1"
+        # Worker selection
+        is_tpu = str(device) == "tpu" or str(device).startswith("xla")
+        if is_tpu:
+            from ..worker import TPUWorker
 
-        if enable_cuda_graph:
-            opt_text = " with disaggregation optimization" if enable_disaggregation else " with CUDA graph optimization"
-            self.logger.info(f"Using CudaGraphWorker{opt_text}")
+            if TPUWorker is None:
+                raise ImportError("TPUWorker requires torch_xla and tokamax. Install them first.")
+            self.logger.info("Using TPUWorker for TPU execution")
+            self.model_worker = TPUWorker(**worker_kwargs)
+        elif enable_disaggregation:
+            worker_kwargs["detokenizer_device"] = "cuda:1"
+            if enable_cuda_graph:
+                self.logger.info("Using CudaGraphWorker with disaggregation optimization")
+                self.model_worker = CudaGraphWorker(**worker_kwargs)
+            else:
+                self.logger.info("Using ModelWorker with disaggregation optimization")
+                self.model_worker = ModelWorker(**worker_kwargs)
+        elif enable_cuda_graph:
+            self.logger.info("Using CudaGraphWorker with CUDA graph optimization")
             self.model_worker = CudaGraphWorker(**worker_kwargs)
         else:
-            opt_text = (
-                " with disaggregation optimization"
-                if enable_disaggregation
-                else " without CUDA graph optimization"
-            )
-            self.logger.info(f"Using ModelWorker{opt_text}")
+            self.logger.info("Using ModelWorker without CUDA graph optimization")
             self.model_worker = ModelWorker(**worker_kwargs)
 
         self.active_requests: List[Request] = []
@@ -227,9 +234,11 @@ class Scheduler:
         if self.async_scheduling:
             asyncio.run(self._run_async_loop())
         else:
+            is_tpu = str(self.device) == "tpu" or str(self.device).startswith("xla")
             while True:
                 self._step()
-                torch.cuda.synchronize()
+                if not is_tpu:
+                    torch.cuda.synchronize()
 
     def _select_lm_requests(self):
         """
