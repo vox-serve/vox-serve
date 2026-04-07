@@ -290,48 +290,54 @@ class TPUWorker:
                 self.logger.info(f"  Decode bs={bs} compiled in {time.time() - t0:.1f}s")
 
             # ---- 3. Depth transformer (if present) ----
+            # Warmup the FUSED depth graph: all 15 iterations traced into one XLA graph.
+            # Each iteration uses a different codec_embedding layer, so we must trace
+            # the full loop to compile the combined graph.
             if self.has_depth_transformer:
                 nc = self.model.depth_n_codebooks
                 depth_kv_budget = nc
                 depth_dim = self.model.depth_num_attention_heads * self.model.depth_head_dim
 
                 for bs in self._batch_size_buckets:
-                    # 3a. Depth first iteration (seq_len=2 per request)
-                    d_qo = torch.arange(bs + 1, dtype=torch.int32).to(self.xla_device) * 2
+                    self.depth_kv_cache.k_cache.zero_()
+                    self.depth_kv_cache.v_cache.zero_()
+
                     d_kvi = torch.arange(bs + 1, dtype=torch.int32).to(self.xla_device)
                     d_kvx = torch.arange(bs, dtype=torch.int32).to(self.xla_device)
                     d_lpl = _t([2] * bs)
-
-                    self.depth_attn_wrapper.plan(
-                        d_qo, d_kvi, d_kvx, d_lpl, torch.bfloat16, kv_len_budget=depth_kv_budget,
-                    )
-                    xm.mark_step()
-
-                    t0 = time.time()
-                    self.model.depth_forward(
-                        hidden_states=torch.zeros(bs * 2, depth_dim, dtype=torch.bfloat16, device=self.xla_device),
-                        position_ids=_t([0, 1] * bs),
-                        attn_wrapper=self.depth_attn_wrapper, kv_cache=self.depth_kv_cache,
-                    )
-                    xm.mark_step()
-                    self.logger.info(f"  Depth (i=1, bs={bs}) compiled in {time.time() - t0:.1f}s")
-
-                    # 3b. Depth subsequent iterations (seq_len=1 per request)
-                    d_qo2 = torch.arange(bs + 1, dtype=torch.int32).to(self.xla_device)
-                    d_lpl2 = _t([3] * bs)
-                    self.depth_attn_wrapper.plan(
-                        d_qo2, d_kvi, d_kvx, d_lpl2, torch.bfloat16, kv_len_budget=depth_kv_budget,
-                    )
-                    xm.mark_step()
+                    d_pos = _t([0, 1] * bs)
+                    d_qo = torch.arange(bs + 1, dtype=torch.int32).to(self.xla_device) * 2
+                    hd = torch.zeros(bs * 2, depth_dim, dtype=torch.bfloat16, device=self.xla_device)
+                    dummy_oids = torch.zeros(bs, nc, dtype=torch.long, device=self.xla_device)
 
                     t0 = time.time()
-                    self.model.depth_forward(
-                        hidden_states=torch.zeros(bs, depth_dim, dtype=torch.bfloat16, device=self.xla_device),
-                        position_ids=_t([3] * bs),
-                        attn_wrapper=self.depth_attn_wrapper, kv_cache=self.depth_kv_cache,
-                    )
-                    xm.mark_step()
-                    self.logger.info(f"  Depth (i>1, bs={bs}) compiled in {time.time() - t0:.1f}s")
+                    for i in range(1, nc):
+                        self.depth_attn_wrapper.plan(
+                            d_qo, d_kvi, d_kvx, d_lpl, torch.bfloat16, kv_len_budget=depth_kv_budget,
+                        )
+                        if i == 1:
+                            dl = self.model.depth_forward(
+                                hidden_states=hd, position_ids=d_pos,
+                                attn_wrapper=self.depth_attn_wrapper, kv_cache=self.depth_kv_cache,
+                            )
+                            aqo = torch.arange(bs + 1, dtype=torch.int32).to(self.xla_device) * 2
+                            dl = dl[aqo[1:] - 1]
+                            dummy_oids[:, i], hd = self.model.depth_sampling(
+                                logits=dl, i_iteration=i, requests=[],
+                            )
+                        else:
+                            d_pos_i = _t([i + 1] * bs)
+                            dl = self.model.depth_forward(
+                                hidden_states=hd, position_ids=d_pos_i,
+                                attn_wrapper=self.depth_attn_wrapper, kv_cache=self.depth_kv_cache,
+                            )
+                            dummy_oids[:, i], hd = self.model.depth_sampling(
+                                logits=dl, i_iteration=i, requests=[],
+                            )
+                        d_qo = torch.arange(bs + 1, dtype=torch.int32).to(self.xla_device)
+                        d_lpl = d_lpl + 1
+                    xm.mark_step()  # single flush for entire fused depth graph
+                    self.logger.info(f"  Depth fused (bs={bs}) compiled in {time.time() - t0:.1f}s")
 
                 self.depth_kv_cache.k_cache.zero_()
                 self.depth_kv_cache.v_cache.zero_()
@@ -672,6 +678,17 @@ class TPUWorker:
         # the same bucketed attention shape → XLA reuses cached HLO programs.
         depth_kv_budget = n_codebooks
 
+        # Fuse all 15 depth iterations into ONE XLA graph.
+        # Each iteration uses a different codec_embedding[i] (different nn.Embedding),
+        # so XLA compiles a unique graph per iteration (~1.2s each).  By removing
+        # mark_step() between iterations, all 15 are traced into a single large graph
+        # that compiles once during warmup and is reused thereafter.
+        #
+        # IMPORTANT: pass requests=[] to depth_sampling to avoid .item() calls that
+        # would break the fused graph.  Request state is written back after mark_step.
+        # Accumulate codec embeddings to update req.input_features after the loop
+        ci_embed_sum = torch.zeros(bs, self.model.hidden_size, dtype=torch.bfloat16, device=self.device)
+
         for i in range(1, n_codebooks):
             self.depth_attn_wrapper.plan(
                 qo_indptr=depth_qo_indptr,
@@ -681,7 +698,6 @@ class TPUWorker:
                 dtype=torch.bfloat16,
                 kv_len_budget=depth_kv_budget,
             )
-            xm.mark_step()
 
             if i == 1:
                 hidden_for_depth = hidden_for_depth.view(bs * 2, -1)
@@ -700,8 +716,9 @@ class TPUWorker:
                 output_ids[:, i], hidden_for_depth = self.model.depth_sampling(
                     logits=depth_logits,
                     i_iteration=i,
-                    requests=requests,
+                    requests=[],  # avoid .item() inside the fused graph
                 )
+                ci_embed_sum += hidden_for_depth  # accumulate for input_features
             else:
                 depth_logits = self.model.depth_forward(
                     hidden_states=hidden_for_depth,
@@ -713,12 +730,29 @@ class TPUWorker:
                 output_ids[:, i], hidden_for_depth = self.model.depth_sampling(
                     logits=depth_logits,
                     i_iteration=i,
-                    requests=requests,
+                    requests=[],  # avoid .item() inside the fused graph
                 )
+                ci_embed_sum += hidden_for_depth  # accumulate for input_features
 
             depth_position_ids = self._to_xla([i + 1] * bs)
             depth_qo_indptr = torch.arange(bs + 1, dtype=torch.int32).to(self.xla_device)
             depth_kv_last_page_len += 1
+
+        # Single mark_step for the entire fused depth graph
+        xm.mark_step()
+
+        # Write depth results back to request state (deferred from depth_sampling
+        # to avoid .item() calls inside the fused XLA graph)
+        ci_embed_sum_cpu = ci_embed_sum.cpu()
+        output_ids_cpu = output_ids.cpu()
+        for i_req, req in enumerate(requests):
+            for cb in range(1, n_codebooks):
+                token_id = int(output_ids_cpu[i_req, cb].item())
+                req.lm_output_tokens[-1][0, cb] = token_id
+                if not req.done_lm_generation:
+                    req.lm_output_audio_tokens[-1][0, cb] = token_id
+            # Accumulate codec embeddings into input_features for next backbone step
+            req.input_features[:] += ci_embed_sum_cpu[i_req : i_req + 1].to(req.input_features.device)
 
         return output_ids
 
