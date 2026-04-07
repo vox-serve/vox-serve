@@ -35,6 +35,7 @@ def _run_scheduler_daemon(
     enable_disaggregation: bool,
     enable_nvtx: bool,
     enable_torch_compile: bool,
+    unroll_depth_cuda_graph: bool,
     async_scheduling: bool,
     log_level: str,
     detokenize_interval: int = None,
@@ -96,6 +97,7 @@ def _run_scheduler_daemon(
         enable_disaggregation=enable_disaggregation,
         enable_nvtx=enable_nvtx,
         enable_torch_compile=enable_torch_compile,
+        unroll_depth_cuda_graph=unroll_depth_cuda_graph,
         async_scheduling=async_scheduling,
         dp_rank=dp_rank,
         dp_size=dp_size,
@@ -131,6 +133,7 @@ def main():
     parser.add_argument("--enable-disaggregation", action="store_true")
     parser.add_argument("--enable-nvtx", action="store_true")
     parser.add_argument("--enable-torch-compile", action="store_true")
+    parser.add_argument("--unroll-depth-cuda-graph", action="store_true")
     parser.add_argument("--async-scheduling", action="store_true")
     parser.add_argument("--detokenize-interval", type=int, default=None)
 
@@ -159,6 +162,7 @@ def main():
         enable_disaggregation=args.enable_disaggregation,
         enable_nvtx=args.enable_nvtx,
         enable_torch_compile=args.enable_torch_compile,
+        unroll_depth_cuda_graph=args.unroll_depth_cuda_graph,
         async_scheduling=args.async_scheduling,
         log_level=args.log_level,
         detokenize_interval=args.detokenize_interval,

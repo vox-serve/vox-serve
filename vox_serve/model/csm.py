@@ -1,4 +1,4 @@
-from typing import Any, List, Tuple
+from typing import Any, List, Optional, Tuple
 
 import torch
 import torchaudio
@@ -768,6 +768,28 @@ class CSMModel(BaseLMWithDepth):
             req.lm_output_audio_tokens[-1][0, i_iteration] = token_id
 
         return output_ids, ci_embed
+
+    def depth_sampling_gpu(
+        self,
+        logits: torch.Tensor,
+        i_iteration: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        output_ids = Sampler.run_sampling(logits, config=self.default_sampling_config)
+        ci_embed = self.embed_audio_tokens_single(output_ids, i_iteration)
+        return output_ids, ci_embed
+
+    def depth_update_requests(
+        self,
+        all_output_ids: torch.Tensor,
+        requests: List[Request],
+        embed_accum: Optional[torch.Tensor] = None,
+    ) -> None:
+        for i in range(1, self.depth_n_codebooks):
+            for j, req in enumerate(requests):
+                token_id = int(all_output_ids[j, i].item())
+                req.input_tokens[0, i] = token_id
+                req.lm_output_tokens[-1][0, i] = token_id
+                req.lm_output_audio_tokens[-1][0, i] = token_id
 
     def postprocess(self, token_ids: torch.Tensor) -> torch.Tensor:
         # token_ids: (batch_size, interval, 33)

@@ -53,6 +53,7 @@ class APIServer:
         enable_disaggregation: bool = False,
         enable_nvtx: bool = False,
         enable_torch_compile: bool = False,
+        unroll_depth_cuda_graph: bool = False,
         max_num_pages: int = None,
         page_size: int = 2048,
         async_scheduling: bool = False,
@@ -110,6 +111,7 @@ class APIServer:
         self.enable_disaggregation = enable_disaggregation
         self.enable_nvtx = enable_nvtx
         self.enable_torch_compile = enable_torch_compile
+        self.unroll_depth_cuda_graph = unroll_depth_cuda_graph
         self.max_num_pages = max_num_pages
         self.page_size = page_size
         self.scheduler_type = scheduler_type
@@ -266,6 +268,8 @@ class APIServer:
                         cmd.append("--enable-nvtx")
                     if self.enable_torch_compile:
                         cmd.append("--enable-torch-compile")
+                    if self.unroll_depth_cuda_graph:
+                        cmd.append("--unroll-depth-cuda-graph")
                     if self.async_scheduling:
                         cmd.append("--async-scheduling")
                     if self.detokenize_interval is not None:
@@ -339,6 +343,8 @@ class APIServer:
                     cmd.append("--enable-nvtx")
                 if self.enable_torch_compile:
                     cmd.append("--enable-torch-compile")
+                if self.unroll_depth_cuda_graph:
+                    cmd.append("--unroll-depth-cuda-graph")
                 if self.async_scheduling:
                     cmd.append("--async-scheduling")
                 if self.detokenize_interval is not None:
@@ -1201,6 +1207,11 @@ def main():
         default=None,
         help="Interval for audio detokenization (default: None, model-specific). Only supported by qwen3-tts models.",
     )
+    parser.add_argument(
+        "--unroll-depth-cuda-graph",
+        action="store_true",
+        help="Unroll all depth transformer iterations into a single CUDA graph for reduced overhead (default: False)",
+    )
     args = parser.parse_args()
 
     # Set global log level for the entire application
@@ -1275,6 +1286,7 @@ def main():
         async_scheduling=args.async_scheduling,
         dp_size=args.dp_size,
         detokenize_interval=args.detokenize_interval,
+        unroll_depth_cuda_graph=args.unroll_depth_cuda_graph,
     )
 
     # Register signal handlers for graceful shutdown

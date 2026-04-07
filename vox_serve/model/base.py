@@ -445,3 +445,47 @@ class BaseLMWithDepth(BaseLM):
             input feature for the next iteration. Shape: (batch_size, hidden_size)
         """
         pass
+
+    @abstractmethod
+    def depth_sampling_gpu(
+        self,
+        logits: torch.Tensor,
+        i_iteration: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        GPU-only depth sampling for CUDA graph capture.
+        Performs sampling and embedding lookup without CPU-side request updates.
+
+        Args:
+            logits: Output logits from depth transformer. Shape: (batch_size, depth_vocab_size)
+            i_iteration: Current codebook iteration (1 to depth_n_codebooks-1)
+
+        Returns:
+            sampled token IDs. Shape: (batch_size,)
+            embeddings for next iteration. Shape: (batch_size, hidden_size)
+        """
+        pass
+
+    def depth_update_requests(
+        self,
+        all_output_ids: torch.Tensor,
+        requests: List[Request],
+        embed_accum: Optional[torch.Tensor] = None,
+    ) -> None:
+        """
+        CPU-only request state update after all depth iterations complete.
+        Called after unrolled depth CUDA graph replay.
+
+        Args:
+            all_output_ids: All sampled token IDs. Shape: (batch_size, depth_n_codebooks)
+            requests: List of Request objects to update
+            embed_accum: Accumulated embeddings across depth iterations.
+                Shape: (batch_size, hidden_size). Only used by models that accumulate
+                depth embeddings (e.g. qwen3-tts).
+        """
+        for i in range(1, self.depth_n_codebooks):
+            for j, req in enumerate(requests):
+                token_id = int(all_output_ids[j, i].item())
+                req.lm_output_tokens[-1][0, i] = token_id
+                if not req.done_lm_generation:
+                    req.lm_output_audio_tokens[-1][0, i] = token_id

@@ -2003,6 +2003,26 @@ class Qwen3TTSModel(BaseLMWithDepth):
 
         return output_ids, ci_embed
 
+    def depth_sampling_gpu(
+        self,
+        logits: torch.Tensor,
+        i_iteration: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        output_ids = Sampler.run_sampling(logits, config=self.default_sampling_config)
+        ci_embed = self.model.talker.code_predictor.model.codec_embedding[i_iteration - 1](output_ids)
+        return output_ids, ci_embed
+
+    def depth_update_requests(
+        self,
+        all_output_ids: torch.Tensor,
+        requests: List[Request],
+        embed_accum: Optional[torch.Tensor] = None,
+    ) -> None:
+        super().depth_update_requests(all_output_ids, requests, embed_accum)
+        if embed_accum is not None:
+            for j, req in enumerate(requests):
+                req.input_features[:] += embed_accum[j : j + 1]
+
     def postprocess(
         self,
         token_ids: torch.Tensor,
