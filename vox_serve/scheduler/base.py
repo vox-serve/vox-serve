@@ -235,9 +235,17 @@ class Scheduler:
             asyncio.run(self._run_async_loop())
         else:
             is_tpu = str(self.device) == "tpu" or str(self.device).startswith("xla")
+            self.logger.debug("Entering run_forever loop")
             while True:
                 self._step()
-                if not is_tpu:
+                if is_tpu:
+                    # Yield to XLA background threads (compilation, TPU execution).
+                    # XLA uses async dispatch — the main thread must yield for
+                    # compiled programs to execute and results to transfer back.
+                    import time
+
+                    time.sleep(0.001)
+                else:
                     torch.cuda.synchronize()
 
     def _select_lm_requests(self):

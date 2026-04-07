@@ -44,7 +44,29 @@ def _run_scheduler_daemon(
 
     if device_type == "tpu":
         # TPU path: import torch_xla, no CUDA setup needed
+        # Prevent JAX (imported transitively via transformers) from claiming TPU memory
+        os.environ["JAX_PLATFORMS"] = "cpu"
+        # Disable torch.compile / Inductor — incompatible with XLA backend.
+        # Inductor compile workers consume ~11GB host RAM and can block XLA compilation.
+        os.environ["TORCHDYNAMO_DISABLE"] = "1"
+        os.environ["TORCH_COMPILE_THREADS"] = "0"
+        os.environ["INDUCTOR_COMPILE_THREADS"] = "0"
         import torch  # noqa: F401
+
+        # Prevent Inductor from spawning compile workers
+        try:
+            import torch._inductor.config as _inductor_cfg
+
+            _inductor_cfg.compile_threads = 0
+            _inductor_cfg.worker_start = False
+        except Exception:
+            pass
+
+        # IMPORTANT: import torch_xla BEFORE anything that creates ZMQ sockets
+        # (e.g. load_scheduler → Scheduler.__init__). XLA's TPU runtime init
+        # must happen before ZMQ I/O threads are created, otherwise XLA
+        # compilation hangs on futex_wait (PyTorch/XLA 2.8 + libzmq interaction).
+        import torch_xla  # noqa: F401
 
         print(f"[TPU ENTRY] Rank {dp_rank}: Starting on TPU", flush=True)
 

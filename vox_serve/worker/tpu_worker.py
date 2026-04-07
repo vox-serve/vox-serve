@@ -108,6 +108,8 @@ class TPUWorker:
         )
         # Move model parameters to TPU (audio decoder stays on its device)
         self.model.model.to(self.xla_device)
+        # Update the model's device attribute so sampling creates tensors on XLA
+        self.model.device = str(self.xla_device)
         self.logger.info("Model loaded and moved to TPU")
 
         # Offsets tensor for client tracking
@@ -132,6 +134,17 @@ class TPUWorker:
     # ------------------------------------------------------------------
     # Properties (mirror ModelWorker)
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _pad_to_pow2(lst: list) -> list:
+        """Pad a list with zeros to the next power-of-2 length for stable XLA shapes."""
+        n = len(lst)
+        if n == 0:
+            return [0]
+        bucketed = 1 << (n - 1).bit_length()
+        if bucketed > n:
+            return lst + [0] * (bucketed - n)
+        return lst
 
     @property
     def detokenize_interval(self) -> int:
@@ -185,11 +198,13 @@ class TPUWorker:
         self.has_depth_transformer = self.model.has_depth_transformer
         if self.has_depth_transformer:
             depth_state_size = self.model.depth_num_attention_heads * self.model.depth_head_dim
+            # Depth cache "page_size" = depth_n_codebooks (not backbone page_size)
+            self._depth_page_size = self.model.depth_n_codebooks
             depth_wrapper_kwargs = dict(
                 n_qo_head=self.model.depth_num_attention_heads,
                 n_kv_head=self.model.depth_num_key_value_heads,
                 n_state=depth_state_size,
-                page_size=self.page_size,
+                page_size=self._depth_page_size,
                 device=self.xla_device,
             )
             self.depth_attn_wrapper = TokmaxPrefillWrapper(**depth_wrapper_kwargs)
@@ -209,55 +224,123 @@ class TPUWorker:
             self.depth_attn_wrapper = None
             self.depth_kv_cache = None
 
-        # Skip warmup — XLA will JIT-compile on first real request.
-        # Warmup in a subprocess hangs due to XLA compilation behavior.
-        # TODO: investigate XLA compilation in subprocess and re-enable warmup.
-        self.logger.info("TPUWorker ready (XLA will compile on first request)")
+        self._warmup_xla_compilation()
 
     def _warmup_xla_compilation(self):
-        """Trigger XLA trace compilation for batch_size=1 decode (most common path).
+        """Trigger XLA compilation for all graph shapes used during inference.
 
         XLA compiles lazily on first execution of each unique graph shape.
-        We warmup the decode path for bs=1 since that's the critical latency path.
-        Other shapes will be JIT-compiled on first use.
+        Pre-compiling during startup avoids latency spikes on the first request.
+        Warms up: decode backbone, depth transformer (both first-iter and rest),
+        and prefill with a short dummy sequence.
         """
         import time
 
-        self.logger.info("Starting XLA compilation warmup (bs=1 decode)...")
-
+        self.logger.info("Starting XLA compilation warmup...")
+        t_total = time.time()
         n_codebooks = self.model.n_codebooks
-        bs = 1
 
-        dummy_ids = torch.zeros(bs, n_codebooks, dtype=torch.long, device=self.xla_device)
-        dummy_pos = torch.zeros(bs, dtype=torch.int32, device=self.xla_device)
-        dummy_indptr = torch.arange(bs + 1, dtype=torch.int32, device=self.xla_device)
-        dummy_indices = torch.arange(bs, dtype=torch.int32, device=self.xla_device)
-        dummy_last_page_len = torch.ones(bs, dtype=torch.int32, device=self.xla_device)
+        # Helper: create tensors on CPU then transfer (avoids XLA constants)
+        def _t(data, dtype=torch.int32):
+            return torch.tensor(data, dtype=dtype).to(self.xla_device)
 
-        self.decode_wrapper.plan(dummy_indptr, dummy_indices, dummy_last_page_len, torch.bfloat16)
+        # Common forward kwargs
+        def _fwd_kwargs(input_ids, position_ids, wrapper, cache):
+            kw = dict(input_ids=input_ids, position_ids=position_ids, attn_wrapper=wrapper, kv_cache=cache)
+            if self.model.needs_input_features:
+                kw["input_features"] = torch.zeros(
+                    input_ids.shape[0], self.model.hidden_size, dtype=torch.bfloat16, device=self.xla_device,
+                )
+            if self.model.needs_input_masks:
+                kw["input_masks"] = torch.zeros(
+                    input_ids.shape[0], n_codebooks, dtype=torch.bool, device=self.xla_device,
+                )
+            return kw
 
-        forward_kwargs = dict(
-            input_ids=dummy_ids,
-            position_ids=dummy_pos,
-            attn_wrapper=self.decode_wrapper,
-            kv_cache=self.kv_cache,
-        )
-        if self.model.needs_input_features:
-            forward_kwargs["input_features"] = torch.zeros(
-                bs, self.model.hidden_size, dtype=torch.bfloat16, device=self.xla_device
+        with torch.no_grad():
+            # ---- 1. Prefill (short dummy sequence) ----
+            seq_len = 16
+            dummy_ids = torch.zeros(seq_len, n_codebooks, dtype=torch.long, device=self.xla_device)
+            dummy_pos = torch.arange(seq_len, dtype=torch.int32).to(self.xla_device)
+
+            self.prefill_wrapper.plan(
+                _t([0, seq_len]), _t([0, 1]), _t([0]), _t([seq_len]), torch.bfloat16,
             )
-        if self.model.needs_input_masks:
-            forward_kwargs["input_masks"] = torch.zeros(bs, n_codebooks, dtype=torch.bool, device=self.xla_device)
-
-        try:
-            t0 = time.time()
-            self.model.forward(**forward_kwargs)
             xm.mark_step()
-            self.logger.info(f"XLA warmup forward compiled in {time.time() - t0:.1f}s")
-        except Exception as e:
-            self.logger.warning(f"Warmup forward failed (will compile on first request): {e}")
 
-        self.logger.info("XLA compilation warmup complete")
+            t0 = time.time()
+            self.model.forward(**_fwd_kwargs(dummy_ids, dummy_pos, self.prefill_wrapper, self.kv_cache))
+            xm.mark_step()
+            self.logger.info(f"  Prefill graph compiled in {time.time() - t0:.1f}s")
+
+            # ---- 2. Decode for each batch size bucket ----
+            for bs in self._batch_size_buckets:
+                dec_ids = torch.zeros(bs, n_codebooks, dtype=torch.long, device=self.xla_device)
+                dec_pos = _t([seq_len + 1] * bs)
+                indptr = _t(list(range(bs + 1)))
+                indices = _t(list(range(bs)))
+                lpl = _t([seq_len + 1] * bs)
+
+                self.decode_wrapper.plan(indptr, indices, lpl, torch.bfloat16)
+                xm.mark_step()
+
+                t0 = time.time()
+                self.model.forward(**_fwd_kwargs(dec_ids, dec_pos, self.decode_wrapper, self.kv_cache))
+                xm.mark_step()
+                self.logger.info(f"  Decode bs={bs} compiled in {time.time() - t0:.1f}s")
+
+            # ---- 3. Depth transformer (if present) ----
+            if self.has_depth_transformer:
+                nc = self.model.depth_n_codebooks
+                depth_kv_budget = nc
+                depth_dim = self.model.depth_num_attention_heads * self.model.depth_head_dim
+
+                for bs in self._batch_size_buckets:
+                    # 3a. Depth first iteration (seq_len=2 per request)
+                    d_qo = torch.arange(bs + 1, dtype=torch.int32).to(self.xla_device) * 2
+                    d_kvi = torch.arange(bs + 1, dtype=torch.int32).to(self.xla_device)
+                    d_kvx = torch.arange(bs, dtype=torch.int32).to(self.xla_device)
+                    d_lpl = _t([2] * bs)
+
+                    self.depth_attn_wrapper.plan(
+                        d_qo, d_kvi, d_kvx, d_lpl, torch.bfloat16, kv_len_budget=depth_kv_budget,
+                    )
+                    xm.mark_step()
+
+                    t0 = time.time()
+                    self.model.depth_forward(
+                        hidden_states=torch.zeros(bs * 2, depth_dim, dtype=torch.bfloat16, device=self.xla_device),
+                        position_ids=_t([0, 1] * bs),
+                        attn_wrapper=self.depth_attn_wrapper, kv_cache=self.depth_kv_cache,
+                    )
+                    xm.mark_step()
+                    self.logger.info(f"  Depth (i=1, bs={bs}) compiled in {time.time() - t0:.1f}s")
+
+                    # 3b. Depth subsequent iterations (seq_len=1 per request)
+                    d_qo2 = torch.arange(bs + 1, dtype=torch.int32).to(self.xla_device)
+                    d_lpl2 = _t([3] * bs)
+                    self.depth_attn_wrapper.plan(
+                        d_qo2, d_kvi, d_kvx, d_lpl2, torch.bfloat16, kv_len_budget=depth_kv_budget,
+                    )
+                    xm.mark_step()
+
+                    t0 = time.time()
+                    self.model.depth_forward(
+                        hidden_states=torch.zeros(bs, depth_dim, dtype=torch.bfloat16, device=self.xla_device),
+                        position_ids=_t([3] * bs),
+                        attn_wrapper=self.depth_attn_wrapper, kv_cache=self.depth_kv_cache,
+                    )
+                    xm.mark_step()
+                    self.logger.info(f"  Depth (i>1, bs={bs}) compiled in {time.time() - t0:.1f}s")
+
+                self.depth_kv_cache.k_cache.zero_()
+                self.depth_kv_cache.v_cache.zero_()
+
+            self.kv_cache.k_cache.zero_()
+            self.kv_cache.v_cache.zero_()
+            xm.mark_step()
+
+        self.logger.info(f"XLA warmup complete in {time.time() - t_total:.1f}s")
 
     # ------------------------------------------------------------------
     # prepare_lm_inputs  (identical to ModelWorker — operates on CPU lists)
@@ -364,17 +447,17 @@ class TPUWorker:
         position_ids = torch.tensor(position_ids_list, device=self.device, dtype=torch.int32)
 
         if self.model.needs_input_masks and input_masks_list:
-            input_masks = torch.cat([m for m in input_masks_list if m is not None], dim=0)
+            input_masks = torch.cat([m for m in input_masks_list if m is not None], dim=0).to(self.device)
         else:
             input_masks = None
 
         if self.model.needs_input_features and input_features_list:
-            input_features = torch.cat([f for f in input_features_list if f is not None], dim=0)
+            input_features = torch.cat([f for f in input_features_list if f is not None], dim=0).to(self.device)
         else:
             input_features = None
 
         if self.model.use_repetition_penalty and repetition_cache_list:
-            repetition_cache = torch.stack([c for c in repetition_cache_list if c is not None], dim=0)
+            repetition_cache = torch.stack([c for c in repetition_cache_list if c is not None], dim=0).to(self.device)
         else:
             repetition_cache = None
 
@@ -411,6 +494,10 @@ class TPUWorker:
     # LM prefill
     # ------------------------------------------------------------------
 
+    def _to_xla(self, data, dtype=torch.int32):
+        """Create tensor on CPU, transfer to XLA device as runtime input (not a compile-time constant)."""
+        return torch.tensor(data, dtype=dtype).to(self.xla_device)
+
     def run_lm_prefill(self, requests: List[Request], lm_inputs: LMInputs) -> Optional[Coroutine]:
         if len(requests) == 0:
             return None
@@ -429,10 +516,10 @@ class TPUWorker:
         if input_features is not None and input_features.is_floating_point() and input_features.dtype != model_dtype:
             input_features = input_features.to(model_dtype)
 
-        qo_indptr_tensor = torch.tensor(qo_indptr, dtype=torch.int32, device=self.xla_device)
-        paged_kv_indptr_tensor = torch.tensor(paged_kv_indptr, dtype=torch.int32, device=self.xla_device)
-        paged_kv_indices_tensor = torch.tensor(paged_kv_indices, dtype=torch.int32, device=self.xla_device)
-        paged_kv_last_page_len_tensor = torch.tensor(paged_kv_last_page_len, dtype=torch.int32, device=self.xla_device)
+        qo_indptr_tensor = self._to_xla(qo_indptr)
+        paged_kv_indptr_tensor = self._to_xla(paged_kv_indptr)
+        paged_kv_indices_tensor = self._to_xla(self._pad_to_pow2(paged_kv_indices))
+        paged_kv_last_page_len_tensor = self._to_xla(paged_kv_last_page_len)
 
         self.prefill_wrapper.plan(
             qo_indptr_tensor,
@@ -443,47 +530,49 @@ class TPUWorker:
         )
         xm.mark_step()
 
-        if self.has_depth_transformer:
-            logits, backbone_hidden_states = self.model.forward(
-                input_ids=input_ids,
-                position_ids=position_ids,
-                attn_wrapper=self.prefill_wrapper,
-                kv_cache=self.kv_cache,
-                input_features=input_features,
-                input_masks=input_masks,
-            )
+        with torch.no_grad():
+            if self.has_depth_transformer:
+                logits, backbone_hidden_states = self.model.forward(
+                    input_ids=input_ids,
+                    position_ids=position_ids,
+                    attn_wrapper=self.prefill_wrapper,
+                    kv_cache=self.kv_cache,
+                    input_features=input_features,
+                    input_masks=input_masks,
+                )
+                xm.mark_step()
 
-            if getattr(self.prefill_wrapper, "qo_indptr", None) is not None:
-                logits = logits[self.prefill_wrapper.qo_indptr[:-1] - 1]
-                backbone_hidden_states = backbone_hidden_states[self.prefill_wrapper.qo_indptr[:-1] - 1]
+                if getattr(self.prefill_wrapper, "qo_indptr", None) is not None:
+                    logits = logits[self.prefill_wrapper.qo_indptr[:-1] - 1]
+                    backbone_hidden_states = backbone_hidden_states[self.prefill_wrapper.qo_indptr[:-1] - 1]
 
-            output_ids, hidden_for_depth = self.model.sampling(
-                logits=logits,
-                hidden_states=backbone_hidden_states,
-                requests=requests,
-                repetition_cache=repetition_cache,
-            )
+                output_ids, hidden_for_depth = self.model.sampling(
+                    logits=logits,
+                    hidden_states=backbone_hidden_states,
+                    requests=requests,
+                    repetition_cache=repetition_cache,
+                )
 
-            output_ids = self.run_lm_depth(output_ids, hidden_for_depth, requests)
-        else:
-            logits = self.model.forward(
-                input_ids=input_ids,
-                position_ids=position_ids,
-                attn_wrapper=self.prefill_wrapper,
-                kv_cache=self.kv_cache,
-                input_features=input_features,
-                input_masks=input_masks,
-            )
+                output_ids = self.run_lm_depth(output_ids, hidden_for_depth, requests)
+            else:
+                logits = self.model.forward(
+                    input_ids=input_ids,
+                    position_ids=position_ids,
+                    attn_wrapper=self.prefill_wrapper,
+                    kv_cache=self.kv_cache,
+                    input_features=input_features,
+                    input_masks=input_masks,
+                )
 
-            if getattr(self.prefill_wrapper, "qo_indptr", None) is not None:
-                logits = logits[self.prefill_wrapper.qo_indptr[:-1] - 1]
+                if getattr(self.prefill_wrapper, "qo_indptr", None) is not None:
+                    logits = logits[self.prefill_wrapper.qo_indptr[:-1] - 1]
 
-            output_ids, task = self.model.sampling(
-                logits=logits,
-                requests=requests,
-                repetition_cache=repetition_cache,
-            )
-            return task
+                output_ids, task = self.model.sampling(
+                    logits=logits,
+                    requests=requests,
+                    repetition_cache=repetition_cache,
+                )
+                return task
 
     # ------------------------------------------------------------------
     # LM decode
@@ -506,9 +595,9 @@ class TPUWorker:
         if input_features is not None and input_features.is_floating_point() and input_features.dtype != model_dtype:
             input_features = input_features.to(model_dtype)
 
-        paged_kv_indptr_tensor = torch.tensor(paged_kv_indptr, dtype=torch.int32, device=self.xla_device)
-        paged_kv_indices_tensor = torch.tensor(paged_kv_indices, dtype=torch.int32, device=self.xla_device)
-        paged_kv_last_page_len_tensor = torch.tensor(paged_kv_last_page_len, dtype=torch.int32, device=self.xla_device)
+        paged_kv_indptr_tensor = self._to_xla(paged_kv_indptr)
+        paged_kv_indices_tensor = self._to_xla(self._pad_to_pow2(paged_kv_indices))
+        paged_kv_last_page_len_tensor = self._to_xla(paged_kv_last_page_len)
 
         self.decode_wrapper.plan(
             paged_kv_indptr_tensor,
@@ -518,73 +607,83 @@ class TPUWorker:
         )
         xm.mark_step()
 
-        if self.has_depth_transformer:
-            logits, backbone_hidden_states = self.model.forward(
-                input_ids=input_ids,
-                position_ids=position_ids,
-                attn_wrapper=self.decode_wrapper,
-                kv_cache=self.kv_cache,
-                input_features=input_features,
-                input_masks=input_masks,
-            )
+        with torch.no_grad():
+            if self.has_depth_transformer:
+                logits, backbone_hidden_states = self.model.forward(
+                    input_ids=input_ids,
+                    position_ids=position_ids,
+                    attn_wrapper=self.decode_wrapper,
+                    kv_cache=self.kv_cache,
+                    input_features=input_features,
+                    input_masks=input_masks,
+                )
 
-            output_ids, hidden_for_depth = self.model.sampling(
-                logits=logits,
-                hidden_states=backbone_hidden_states,
-                requests=requests,
-                repetition_cache=repetition_cache,
-            )
+                output_ids, hidden_for_depth = self.model.sampling(
+                    logits=logits,
+                    hidden_states=backbone_hidden_states,
+                    requests=requests,
+                    repetition_cache=repetition_cache,
+                )
 
-            output_ids = self.run_lm_depth(output_ids, hidden_for_depth, requests)
-        else:
-            logits = self.model.forward(
-                input_ids=input_ids,
-                position_ids=position_ids,
-                attn_wrapper=self.decode_wrapper,
-                kv_cache=self.kv_cache,
-                input_features=input_features,
-                input_masks=input_masks,
-            )
+                output_ids = self.run_lm_depth(output_ids, hidden_for_depth, requests)
+            else:
+                logits = self.model.forward(
+                    input_ids=input_ids,
+                    position_ids=position_ids,
+                    attn_wrapper=self.decode_wrapper,
+                    kv_cache=self.kv_cache,
+                    input_features=input_features,
+                    input_masks=input_masks,
+                )
 
-            output_ids, task = self.model.sampling(
-                logits=logits,
-                requests=requests,
-                repetition_cache=repetition_cache,
-            )
-            return task
+                output_ids, task = self.model.sampling(
+                    logits=logits,
+                    requests=requests,
+                    repetition_cache=repetition_cache,
+                )
+                return task
 
     # ------------------------------------------------------------------
     # Depth transformer
     # ------------------------------------------------------------------
 
+    @torch.no_grad()
     def run_lm_depth(
         self,
         output_ids: torch.Tensor,
         hidden_for_depth: torch.Tensor,
         requests: List[Request],
     ) -> torch.Tensor:
-        depth_position_ids = torch.tensor([0, 1] * output_ids.shape[0], device=self.device, dtype=torch.int32)
-        depth_qo_indptr = torch.arange(output_ids.shape[0] + 1, dtype=torch.int32, device=self.xla_device) * 2
-        depth_kv_indptr = torch.arange(output_ids.shape[0] + 1, dtype=torch.int32, device=self.xla_device)
-        depth_kv_indices = torch.arange(output_ids.shape[0], dtype=torch.int32, device=self.xla_device)
-        depth_kv_last_page_len = torch.tensor(
-            [2] * output_ids.shape[0], dtype=torch.int32, device=self.xla_device
-        )
+        # Flush pending XLA ops to free HBM before depth transformer iterations
+        xm.mark_step()
+
+        bs = output_ids.shape[0]
+        n_codebooks = self.model.depth_n_codebooks
+
+        depth_position_ids = self._to_xla([0, 1] * bs)
+        depth_qo_indptr = torch.arange(bs + 1, dtype=torch.int32).to(self.xla_device) * 2
+        depth_kv_indptr = torch.arange(bs + 1, dtype=torch.int32).to(self.xla_device)
+        depth_kv_indices = torch.arange(bs, dtype=torch.int32).to(self.xla_device)
+        depth_kv_last_page_len = self._to_xla([2] * bs)
         self.depth_kv_cache.k_cache.zero_()
         self.depth_kv_cache.v_cache.zero_()
 
-        for i in range(1, self.model.depth_n_codebooks):
+        # Fixed KV length budget = depth_n_codebooks so all iterations share
+        # the same bucketed attention shape → XLA reuses cached HLO programs.
+        depth_kv_budget = n_codebooks
+
+        for i in range(1, n_codebooks):
             self.depth_attn_wrapper.plan(
                 qo_indptr=depth_qo_indptr,
                 paged_kv_indptr=depth_kv_indptr,
                 paged_kv_indices=depth_kv_indices,
                 paged_kv_last_page_len=depth_kv_last_page_len,
                 dtype=torch.bfloat16,
+                kv_len_budget=depth_kv_budget,
             )
             xm.mark_step()
 
             if i == 1:
-                bs = output_ids.shape[0]
                 hidden_for_depth = hidden_for_depth.view(bs * 2, -1)
                 depth_position_ids = depth_position_ids.view(bs * 2)
 
@@ -595,7 +694,7 @@ class TPUWorker:
                     kv_cache=self.depth_kv_cache,
                 )
 
-                actual_qo_indptr = torch.arange(bs + 1, device=self.device, dtype=torch.int32) * 2
+                actual_qo_indptr = torch.arange(bs + 1, dtype=torch.int32).to(self.device) * 2
                 depth_logits = depth_logits[actual_qo_indptr[1:] - 1]
 
                 output_ids[:, i], hidden_for_depth = self.model.depth_sampling(
@@ -617,8 +716,8 @@ class TPUWorker:
                     requests=requests,
                 )
 
-            depth_position_ids = torch.tensor([i + 1] * output_ids.shape[0], device=self.device, dtype=torch.int32)
-            depth_qo_indptr = torch.arange(output_ids.shape[0] + 1, dtype=torch.int32, device=self.xla_device)
+            depth_position_ids = self._to_xla([i + 1] * bs)
+            depth_qo_indptr = torch.arange(bs + 1, dtype=torch.int32).to(self.xla_device)
             depth_kv_last_page_len += 1
 
         return output_ids
@@ -632,6 +731,7 @@ class TPUWorker:
             return
 
         token_ids = []
+        decoder_caches = []
         request_chunk_mapping = []
 
         for req_idx, req in enumerate(requests):
@@ -643,6 +743,8 @@ class TPUWorker:
                     new_tokens.extend([new_tokens[-1]] * (self.detokenize_interval - len(new_tokens)))
 
                 token_ids.append(torch.cat(new_tokens, dim=0))
+                if req.decoder_cache is not None:
+                    decoder_caches.append(req.decoder_cache)
                 request_chunk_mapping.append((req_idx, chunk_idx))
 
         if not token_ids:
@@ -650,17 +752,28 @@ class TPUWorker:
 
         token_ids = torch.stack(token_ids, dim=0)
 
-        # Transfer to CPU for audio decoding
-        token_ids = token_ids.to("cpu")
+        # Transfer to CPU for audio decoding (ensure integer dtype for codec)
+        token_ids = token_ids.to(device="cpu", dtype=torch.long)
 
-        audio_tensors = self.model.postprocess(token_ids)
+        # Use streaming decode_chunk() when decoder_cache is available (much faster
+        # than the non-streaming chunked_decode() fallback, especially for small intervals)
+        from vox_serve.tokenizer.base import DecoderCache
+
+        if decoder_caches:
+            batched_cache = DecoderCache.cat(decoder_caches)
+            audio_tensors = self.model.postprocess(token_ids, decoder_cache=batched_cache)
+            # Copy updated cache state back to each request
+            for i, (req_idx, _) in enumerate(request_chunk_mapping):
+                requests[req_idx].decoder_cache.copy_from(batched_cache[i : i + 1])
+        else:
+            audio_tensors = self.model.postprocess(token_ids)
         self.logger.debug("Audio tensors: %s", audio_tensors)
 
         for i, (req_idx, chunk_idx) in enumerate(request_chunk_mapping):
             req = requests[req_idx]
             decode_idx = req.audio_decode_idx[chunk_idx]
 
-            audio = audio_tensors[i].detach().cpu().numpy()
+            audio = audio_tensors[i].detach().cpu().float().numpy()
             audio_int16 = (audio * 32767).astype(np.int16)
 
             last_chunk_len = len(req.lm_output_audio_tokens[decode_idx : decode_idx + self.detokenize_interval])
@@ -672,7 +785,7 @@ class TPUWorker:
             req.output_audio.put(audio_bytes)
 
         for req in requests:
-            if req.done_lm_generation and (
+            if req.done_lm_generation and req.audio_decode_idx and (
                 req.audio_decode_idx[-1] + self.detokenize_interval >= len(req.lm_output_audio_tokens)
             ):
                 req.done_all = True

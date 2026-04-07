@@ -138,7 +138,6 @@ class Sampler:
             return greedy_sampling(logits)
 
     @classmethod
-    @torch.compile(mode="default")
     def apply_repetition_penalty(
         cls, logits: torch.Tensor, repetition_cache: torch.Tensor, penalty: float
     ) -> torch.Tensor:
@@ -166,7 +165,6 @@ class Sampler:
         return logits
 
     @classmethod
-    @torch.compile(mode="default")
     def update_repetition_penalty_cache(
         cls, repetition_cache: torch.Tensor, output_ids: torch.Tensor, window_size: int
     ) -> None:

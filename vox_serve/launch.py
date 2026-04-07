@@ -5,6 +5,7 @@ import atexit
 import collections
 import io
 import json
+import os
 import queue
 import signal
 import subprocess
@@ -16,7 +17,6 @@ import wave
 from pathlib import Path
 from typing import Dict, Optional
 
-import torch
 import zmq
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -188,8 +188,6 @@ class APIServer:
                 self.scheduler_processes = []
 
                 # Parse existing CUDA_VISIBLE_DEVICES mask if present
-                import os
-
                 existing_cuda_mask = os.environ.get("CUDA_VISIBLE_DEVICES", None)
                 if existing_cuda_mask is not None:
                     # User has pre-set a GPU mask, respect it
@@ -349,7 +347,19 @@ class APIServer:
                     cmd.extend(["--detokenize-interval", str(self.detokenize_interval)])
                 cmd.extend(["--device-type", self.device_type])
 
-                process = subprocess.Popen(cmd)
+                # For TPU: set env vars to disable Inductor, prevent JAX from claiming TPU.
+                # Use os.fork + os.execvpe to cleanly isolate the child from the parent
+                # process. subprocess.Popen causes XLA compilation to hang in the child
+                # (PyTorch/XLA 2.8 runtime issue with subprocess inheritance).
+                if self.device_type == "tpu":
+                    env = os.environ.copy()
+                    env["TORCHDYNAMO_DISABLE"] = "1"
+                    env["TORCH_COMPILE_THREADS"] = "0"
+                    env["JAX_PLATFORMS"] = "cpu"
+                    env.pop("PJRT_DEVICE", None)
+                    process = subprocess.Popen(cmd, env=env)
+                else:
+                    process = subprocess.Popen(cmd)
                 self.scheduler_process = process
                 self.logger.info(f"Started scheduler process with PID: {process.pid}")
 
@@ -1254,6 +1264,8 @@ def main():
 
     # Check GPU availability for data parallel (CUDA only)
     if args.dp_size > 1 and args.device == "cuda":
+        import torch
+
         available_gpus = torch.cuda.device_count()
         if args.dp_size > available_gpus:
             logger.error(f"--dp-size {args.dp_size} exceeds available GPU count {available_gpus}")
@@ -1272,6 +1284,10 @@ def main():
     request_socket_path = f"/tmp/vox_serve_request{args.socket_suffix}.ipc"
     result_socket_path = f"/tmp/vox_serve_result{args.socket_suffix}.ipc"
 
+    # ---- TPU mode: flip process architecture ----
+    # PyTorch/XLA 2.8 XLA compilation hangs in subprocess (child) processes.
+    # Workaround: run the scheduler (which needs XLA) in the MAIN process,
+    # and the API server (HTTP + ZMQ only, no torch) in a subprocess.
     # Initialize API server instance with specified model
     global api_server
     api_server = APIServer(
