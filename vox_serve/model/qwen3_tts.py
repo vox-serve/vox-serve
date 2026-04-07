@@ -1,4 +1,5 @@
 import json
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -1056,7 +1057,12 @@ class Qwen3TTSModel(BaseLMWithDepth):
         tokenizer_path = model_name
         self.text_tokenizer = self._load_tokenizer(tokenizer_path)
 
-        with torch.cuda.device(self.audio_decoder_device):
+        _decoder_ctx = (
+            torch.cuda.device(self.audio_decoder_device)
+            if str(self.audio_decoder_device).startswith("cuda")
+            else nullcontext()
+        )
+        with _decoder_ctx:
             if config.tokenizer_type == "qwen3_tts_tokenizer_12hz":
                 self.audio_decoder = Qwen3TTSDecoder(
                     device=self.audio_decoder_device,

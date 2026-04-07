@@ -5,6 +5,7 @@ import atexit
 import collections
 import io
 import json
+import os
 import queue
 import signal
 import subprocess
@@ -16,7 +17,6 @@ import wave
 from pathlib import Path
 from typing import Dict, Optional
 
-import torch
 import zmq
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -58,6 +58,7 @@ class APIServer:
         async_scheduling: bool = False,
         dp_size: int = 1,
         detokenize_interval: int = None,
+        device_type: str = "cuda",
     ):
         """Initialize the API server and start scheduler process(es).
 
@@ -87,6 +88,7 @@ class APIServer:
             async_scheduling: Enable async scheduling mode.
             dp_size: Data parallel replica count.
             detokenize_interval: Interval for audio detokenization (model-specific).
+            device_type: Device type for execution ('cuda' or 'tpu').
         """
         self.model_name = model_name
         self.request_socket_path = request_socket_path
@@ -116,6 +118,7 @@ class APIServer:
         self.async_scheduling = async_scheduling
         self.dp_size = dp_size
         self.detokenize_interval = detokenize_interval
+        self.device_type = device_type
         self.scheduler_processes = None  # Will be a list for DP mode
         self.logger = get_logger(__name__)
 
@@ -185,8 +188,6 @@ class APIServer:
                 self.scheduler_processes = []
 
                 # Parse existing CUDA_VISIBLE_DEVICES mask if present
-                import os
-
                 existing_cuda_mask = os.environ.get("CUDA_VISIBLE_DEVICES", None)
                 if existing_cuda_mask is not None:
                     # User has pre-set a GPU mask, respect it
@@ -270,6 +271,7 @@ class APIServer:
                         cmd.append("--async-scheduling")
                     if self.detokenize_interval is not None:
                         cmd.extend(["--detokenize-interval", str(self.detokenize_interval)])
+                    cmd.extend(["--device-type", self.device_type])
 
                     self.logger.info(f"Starting DP rank {rank} with CUDA_VISIBLE_DEVICES={gpu_mapping[rank]}")
                     process = subprocess.Popen(cmd, env=env)
@@ -343,8 +345,21 @@ class APIServer:
                     cmd.append("--async-scheduling")
                 if self.detokenize_interval is not None:
                     cmd.extend(["--detokenize-interval", str(self.detokenize_interval)])
+                cmd.extend(["--device-type", self.device_type])
 
-                process = subprocess.Popen(cmd)
+                # For TPU: set env vars to disable Inductor, prevent JAX from claiming TPU.
+                # Use os.fork + os.execvpe to cleanly isolate the child from the parent
+                # process. subprocess.Popen causes XLA compilation to hang in the child
+                # (PyTorch/XLA 2.8 runtime issue with subprocess inheritance).
+                if self.device_type == "tpu":
+                    env = os.environ.copy()
+                    env["TORCHDYNAMO_DISABLE"] = "1"
+                    env["TORCH_COMPILE_THREADS"] = "0"
+                    env["JAX_PLATFORMS"] = "cpu"
+                    env.pop("PJRT_DEVICE", None)
+                    process = subprocess.Popen(cmd, env=env)
+                else:
+                    process = subprocess.Popen(cmd)
                 self.scheduler_process = process
                 self.logger.info(f"Started scheduler process with PID: {process.pid}")
 
@@ -1201,6 +1216,13 @@ def main():
         default=None,
         help="Interval for audio detokenization (default: None, model-specific). Only supported by qwen3-tts models.",
     )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cuda",
+        choices=["cuda", "tpu"],
+        help="Device type for model execution (default: cuda). Use 'tpu' for Google Cloud TPU.",
+    )
     args = parser.parse_args()
 
     # Set global log level for the entire application
@@ -1216,6 +1238,17 @@ def main():
     # Determine final CUDA graph setting
     enable_cuda_graph = args.enable_cuda_graph and not args.disable_cuda_graph
 
+    # TPU mode validation and overrides
+    if args.device == "tpu":
+        if args.enable_disaggregation:
+            logger.error("Disaggregation is not supported on TPU")
+            sys.exit(1)
+        if args.dp_size > 1:
+            logger.error("Data parallelism is not yet supported on TPU")
+            sys.exit(1)
+        enable_cuda_graph = False
+        logger.info("TPU mode: CUDA graphs disabled, using XLA compilation")
+
     # Validate data parallel mode
     if args.dp_size < 1:
         logger.error("--dp-size must be >= 1")
@@ -1229,8 +1262,10 @@ def main():
         logger.error("Please use one or the other")
         sys.exit(1)
 
-    # Check GPU availability for data parallel
-    if args.dp_size > 1:
+    # Check GPU availability for data parallel (CUDA only)
+    if args.dp_size > 1 and args.device == "cuda":
+        import torch
+
         available_gpus = torch.cuda.device_count()
         if args.dp_size > available_gpus:
             logger.error(f"--dp-size {args.dp_size} exceeds available GPU count {available_gpus}")
@@ -1249,6 +1284,10 @@ def main():
     request_socket_path = f"/tmp/vox_serve_request{args.socket_suffix}.ipc"
     result_socket_path = f"/tmp/vox_serve_result{args.socket_suffix}.ipc"
 
+    # ---- TPU mode: flip process architecture ----
+    # PyTorch/XLA 2.8 XLA compilation hangs in subprocess (child) processes.
+    # Workaround: run the scheduler (which needs XLA) in the MAIN process,
+    # and the API server (HTTP + ZMQ only, no torch) in a subprocess.
     # Initialize API server instance with specified model
     global api_server
     api_server = APIServer(
@@ -1275,6 +1314,7 @@ def main():
         async_scheduling=args.async_scheduling,
         dp_size=args.dp_size,
         detokenize_interval=args.detokenize_interval,
+        device_type=args.device,
     )
 
     # Register signal handlers for graceful shutdown

@@ -38,8 +38,78 @@ def _run_scheduler_daemon(
     async_scheduling: bool,
     log_level: str,
     detokenize_interval: int = None,
+    device_type: str = "cuda",
 ) -> None:
     """Entry point for scheduler daemon that sets CUDA_VISIBLE_DEVICES before importing torch."""
+
+    if device_type == "tpu":
+        # TPU path: import torch_xla, no CUDA setup needed
+        # Prevent JAX (imported transitively via transformers) from claiming TPU memory
+        os.environ["JAX_PLATFORMS"] = "cpu"
+        # Disable torch.compile / Inductor — incompatible with XLA backend.
+        # Inductor compile workers consume ~11GB host RAM and can block XLA compilation.
+        os.environ["TORCHDYNAMO_DISABLE"] = "1"
+        os.environ["TORCH_COMPILE_THREADS"] = "0"
+        os.environ["INDUCTOR_COMPILE_THREADS"] = "0"
+        import torch  # noqa: F401
+
+        # Prevent Inductor from spawning compile workers
+        try:
+            import torch._inductor.config as _inductor_cfg
+
+            _inductor_cfg.compile_threads = 0
+            _inductor_cfg.worker_start = False
+        except Exception:
+            pass
+
+        # IMPORTANT: import torch_xla BEFORE anything that creates ZMQ sockets
+        # (e.g. load_scheduler → Scheduler.__init__). XLA's TPU runtime init
+        # must happen before ZMQ I/O threads are created, otherwise XLA
+        # compilation hangs on futex_wait (PyTorch/XLA 2.8 + libzmq interaction).
+        import torch_xla  # noqa: F401
+
+        print(f"[TPU ENTRY] Rank {dp_rank}: Starting on TPU", flush=True)
+
+        from vox_serve.scheduler import load_scheduler
+        from vox_serve.utils import get_logger, set_global_log_level
+
+        set_global_log_level(log_level)
+        logger = get_logger(__name__)
+
+        device = "tpu"
+
+        scheduler = load_scheduler(
+            scheduler_type=scheduler_type,
+            model_name_or_path=model_name,
+            device=device,
+            max_batch_size=max_batch_size,
+            max_num_pages=max_num_pages,
+            page_size=page_size,
+            request_socket_path=request_socket_path,
+            result_socket_path=result_socket_path,
+            top_p=top_p,
+            top_k=top_k,
+            min_p=min_p,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            repetition_penalty=repetition_penalty,
+            repetition_window=repetition_window,
+            cfg_scale=cfg_scale,
+            greedy=greedy,
+            enable_cuda_graph=False,
+            enable_disaggregation=False,
+            enable_nvtx=False,
+            enable_torch_compile=False,
+            async_scheduling=async_scheduling,
+            dp_rank=dp_rank,
+            dp_size=dp_size,
+            detokenize_interval=detokenize_interval,
+        )
+        logger.info(f"Scheduler (DP rank {dp_rank}/{dp_size}) started on TPU with model: {model_name}")
+        scheduler.run_forever()
+        return
+
+    # CUDA path (original logic)
     # DEBUG: Check if torch is already imported (should NOT be!)
     torch_already_imported = "torch" in sys.modules
     print(f"[DP ENTRY] Rank {dp_rank}: Starting, torch already imported: {torch_already_imported}", flush=True)
@@ -133,6 +203,7 @@ def main():
     parser.add_argument("--enable-torch-compile", action="store_true")
     parser.add_argument("--async-scheduling", action="store_true")
     parser.add_argument("--detokenize-interval", type=int, default=None)
+    parser.add_argument("--device-type", type=str, default="cuda", choices=["cuda", "tpu"])
 
     args = parser.parse_args()
 
@@ -162,6 +233,7 @@ def main():
         async_scheduling=args.async_scheduling,
         log_level=args.log_level,
         detokenize_interval=args.detokenize_interval,
+        device_type=args.device_type,
     )
 
 

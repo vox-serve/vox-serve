@@ -1,4 +1,9 @@
 from .base import ModelWorker
 from .cuda_graph_worker import CudaGraphWorker
 
-__all__ = ["ModelWorker", "CudaGraphWorker"]
+try:
+    from .tpu_worker import TPUWorker
+except ImportError:
+    TPUWorker = None
+
+__all__ = ["ModelWorker", "CudaGraphWorker", "TPUWorker"]
