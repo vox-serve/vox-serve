@@ -418,6 +418,30 @@ class BaseLMWithDepth(BaseLM):
         assert self.has_depth_transformer, "This model does not support depth transformer."
         pass
 
+    def depth_forward_unrolled(
+        self,
+        hidden_states: torch.Tensor,
+        position_ids: torch.Tensor,
+        kv_cache: torch.Tensor,
+        cache_pos: int,
+        **kwargs,
+    ) -> torch.Tensor:
+        """Forward pass through the depth transformer using SDPA (for unrolled CUDA graph).
+
+        Uses torch.nn.functional.scaled_dot_product_attention with a dense KV cache
+        instead of FlashInfer, avoiding workspace buffer conflicts in multi-step graphs.
+
+        Args:
+            hidden_states: (bs, seq_len, hidden_size) batched input embeddings
+            position_ids: (bs, seq_len) position IDs
+            kv_cache: (n_layers, bs, 2, max_seq_len, n_kv_heads, head_dim) dense KV cache
+            cache_pos: write position in the cache
+
+        Returns:
+            Output logits tensor. Shape: (bs, seq_len, vocab_size)
+        """
+        raise NotImplementedError("depth_forward_unrolled not implemented for this model")
+
     @abstractmethod
     def depth_sampling(
         self,
