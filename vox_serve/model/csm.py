@@ -378,7 +378,8 @@ class CsmForConditionalGeneration(CsmPreTrainedModel):
             hidden_states = residual + attn.o_proj(attn_out)
 
             residual = hidden_states
-            hidden_states = layer.post_attention_layernorm(hidden_states.view(-1, hidden_states.shape[-1])).view(bs, seq_len, -1)
+            hs_flat = hidden_states.view(-1, hidden_states.shape[-1])
+            hidden_states = layer.post_attention_layernorm(hs_flat).view(bs, seq_len, -1)
             hidden_states = layer.mlp(hidden_states)
             hidden_states = residual + hidden_states
 
