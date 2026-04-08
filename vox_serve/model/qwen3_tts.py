@@ -943,6 +943,95 @@ class Qwen3TTSForCausalLM(nn.Module):
 
         return logits
 
+    def forward_depth_unrolled(
+        self,
+        inputs_embeds: torch.Tensor,
+        position_ids: torch.LongTensor,
+        kv_cache: torch.Tensor,
+        cache_pos: int,
+    ):
+        """Depth forward using torch SDPA instead of FlashInfer.
+
+        This avoids FlashInfer workspace buffers entirely, making it safe for
+        multi-step CUDA graph capture without plan()/workspace interference.
+
+        Args:
+            inputs_embeds: (bs, seq_len, hidden_size) batched input embeddings
+            position_ids: (bs, seq_len) position IDs
+            kv_cache: (n_layers, bs, 2, max_seq_len, n_kv_heads, head_dim) dense KV cache
+            cache_pos: write position in the cache (seq_len tokens starting here)
+
+        Returns:
+            logits: (bs, seq_len, vocab_size) — caller should extract last token if needed
+        """
+        cp = self.talker.code_predictor
+        hidden_states = cp.small_to_mtp_projection(inputs_embeds)
+        bs, seq_len, _ = hidden_states.shape
+        n_kv_heads = cp.model.layers[0].self_attn.num_key_value_heads
+        n_q_heads = cp.model.layers[0].self_attn.num_attention_heads
+        head_dim = cp.model.layers[0].self_attn.head_dim
+        n_groups = n_q_heads // n_kv_heads
+
+        # Flatten position_ids for RoPE: (bs * seq_len,)
+        flat_pos = position_ids.reshape(-1)
+
+        for layer_idx, layer in enumerate(cp.model.layers):
+            attn = layer.self_attn
+            residual = hidden_states
+            # RMS norm expects 2D (tokens, hidden), so flatten and restore
+            hidden_states = layer.input_layernorm(hidden_states.view(-1, hidden_states.shape[-1])).view(bs, seq_len, -1)
+
+            total_tokens = bs * seq_len
+            q = attn.q_norm(attn.q_proj(hidden_states).view(-1, head_dim)).view(total_tokens, n_q_heads, head_dim)
+            k = attn.k_norm(attn.k_proj(hidden_states).view(-1, head_dim)).view(total_tokens, n_kv_heads, head_dim)
+            v = attn.v_proj(hidden_states).view(total_tokens, n_kv_heads, head_dim)
+
+            q, k = apply_rope_pos_ids(q, k, flat_pos, rope_theta=attn.rope_theta, interleave=False)
+
+            # Reshape to batched: (bs, seq_len, heads, head_dim)
+            q = q.view(bs, seq_len, n_q_heads, head_dim)
+            k = k.view(bs, seq_len, n_kv_heads, head_dim)
+            v = v.view(bs, seq_len, n_kv_heads, head_dim)
+
+            # Write K,V into cache
+            kv_cache[layer_idx, :bs, 0, cache_pos:cache_pos + seq_len] = k
+            kv_cache[layer_idx, :bs, 1, cache_pos:cache_pos + seq_len] = v
+
+            # Read full K,V up to current position
+            valid_len = cache_pos + seq_len
+            k_full = kv_cache[layer_idx, :bs, 0, :valid_len]  # (bs, valid_len, n_kv_heads, head_dim)
+            v_full = kv_cache[layer_idx, :bs, 1, :valid_len]
+
+            # SDPA expects (bs, n_heads, seq_len, head_dim)
+            q_sdpa = q.transpose(1, 2)      # (bs, n_q_heads, seq_len, head_dim)
+            k_sdpa = k_full.transpose(1, 2)  # (bs, n_kv_heads, valid_len, head_dim)
+            v_sdpa = v_full.transpose(1, 2)
+
+            # GQA: expand KV heads to match Q heads
+            if n_groups > 1:
+                k_sdpa = k_sdpa.repeat_interleave(n_groups, dim=1)
+                v_sdpa = v_sdpa.repeat_interleave(n_groups, dim=1)
+
+            attn_out = F.scaled_dot_product_attention(q_sdpa, k_sdpa, v_sdpa, is_causal=(seq_len > 1))
+            # (bs, n_q_heads, seq_len, head_dim) -> (bs, seq_len, hidden_size)
+            attn_out = attn_out.transpose(1, 2).reshape(bs, seq_len, -1).contiguous()
+            hidden_states = residual + attn.o_proj(attn_out)
+
+            residual = hidden_states
+            hidden_states = layer.post_attention_layernorm(hidden_states.view(-1, hidden_states.shape[-1])).view(bs, seq_len, -1)
+            hidden_states = layer.mlp(hidden_states)
+            hidden_states = residual + hidden_states
+
+        hidden_states = cp.model.norm(hidden_states.view(-1, hidden_states.shape[-1])).view(bs, seq_len, -1)
+
+        # Head selection based on max position ID
+        num_heads = cp.lm_head_weight.shape[0]
+        head_idx = position_ids.max().clamp(min=1, max=num_heads).sub(1).to(torch.long).view(1)
+        head_weight = cp.lm_head_weight.index_select(0, head_idx).squeeze(0)
+        logits = hidden_states @ head_weight.t()
+
+        return logits
+
 
 class Qwen3TTSModel(BaseLMWithDepth):
     """
@@ -1977,6 +2066,21 @@ class Qwen3TTSModel(BaseLMWithDepth):
         )
 
         return depth_logits
+
+    def depth_forward_unrolled(
+        self,
+        hidden_states: torch.Tensor,
+        position_ids: torch.Tensor,
+        kv_cache: torch.Tensor,
+        cache_pos: int,
+        **kwargs,
+    ) -> torch.Tensor:
+        return self.model.forward_depth_unrolled(
+            inputs_embeds=hidden_states,
+            position_ids=position_ids,
+            kv_cache=kv_cache,
+            cache_pos=cache_pos,
+        )
 
     def depth_sampling(
         self,

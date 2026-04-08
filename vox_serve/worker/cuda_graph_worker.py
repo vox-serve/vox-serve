@@ -776,175 +776,87 @@ class CudaGraphWorker(ModelWorker):
         """Initialize unrolled multi-step CUDA graphs for depth transformer.
 
         Captures ALL depth iterations (prefill + decode) into a single CUDA graph
-        per batch size, eliminating per-iteration plan() calls and synchronizations.
+        per batch size. Uses torch SDPA for attention instead of FlashInfer to
+        avoid workspace buffer interference between CUDA graphs.
         """
         n_codebooks = self.model.depth_n_codebooks
+        model = self.model
 
-        # Force clean allocator state.
-        torch.cuda.synchronize()
-        torch.cuda.empty_cache()
+        # Per-batch-size buffers. Each graph gets its own buffers to avoid
+        # the CUDA allocator recycling graph pool addresses across graphs.
+        self._depth_unrolled_bufs = {}
 
-        # ── Buffers ──────────────────────────────────────────────────────
-        depth_hidden_states_buffer = torch.zeros(
-            2 * self.max_batch_size, self.model.hidden_size,
-            dtype=torch.bfloat16, device=self.device,
-        )
-        depth_position_ids_buffer = torch.zeros(
-            2 * self.max_batch_size, dtype=torch.int32, device=self.device,
-        )
-        depth_logits_buffer = torch.zeros(
-            2 * self.max_batch_size, self.model.depth_vocab_size,
-            dtype=torch.bfloat16, device=self.device,
-        )
-        depth_output_ids_buffer = torch.zeros(
-            self.max_batch_size, n_codebooks, dtype=torch.int64, device=self.device,
-        )
-        depth_embed_accum_buffer = torch.zeros(
-            self.max_batch_size, self.model.hidden_size,
-            dtype=torch.bfloat16, device=self.device,
-        )
+        for batch_size in self.cuda_graph_batch_sizes:
+            if batch_size > self.max_batch_size:
+                continue
 
-        self.cuda_graph_buffers.update({
-            "depth_hidden_states": depth_hidden_states_buffer,
-            "depth_position_ids": depth_position_ids_buffer,
-            "depth_logits": depth_logits_buffer,
-            "depth_output_ids": depth_output_ids_buffer,
-            "depth_embed_accum": depth_embed_accum_buffer,
-        })
-
-        # Pre-compute position ID tensors (fixed across all replays)
-        pos_ids_prefill = torch.tensor(
-            [0, 1] * self.max_batch_size, dtype=torch.int32, device=self.device,
-        )
-        pos_ids_decode = {}
-        for i in range(2, n_codebooks):
-            pos_ids_decode[i] = torch.full(
-                (self.max_batch_size,), i, dtype=torch.int32, device=self.device,
-            )
-
-        # Capture only for max_batch_size. Smaller batches are padded to this size.
-        for batch_size in [self.max_batch_size]:
-            self.logger.info(
-                f"Capturing unrolled depth CUDA graph for batch size {batch_size} ({n_codebooks - 1} iterations)"
-            )
-
-            # ── Plan wrappers ────────────────────────────────────────────
-            depth_kv_indptr = torch.arange(batch_size + 1, dtype=torch.int32)
-            depth_kv_indices = torch.arange(batch_size, dtype=torch.int32)
-            depth_qo_indptr = torch.arange(batch_size + 1, dtype=torch.int32) * 2
-            depth_kv_last_page_len = torch.ones(batch_size, dtype=torch.int32) * 2
-            self.depth_prefill_wrappers[batch_size].plan(
-                depth_qo_indptr, depth_kv_indptr, depth_kv_indices,
-                depth_kv_last_page_len, torch.bfloat16,
-            )
-            depth_kv_last_page_len_decode = torch.ones(batch_size, dtype=torch.int32) * 3
-            self.depth_decode_wrappers[batch_size].plan(
-                paged_kv_indptr=depth_kv_indptr, paged_kv_indices=depth_kv_indices,
-                paged_kv_last_page_len=depth_kv_last_page_len_decode, dtype=torch.bfloat16,
-            )
-            torch.cuda.synchronize()
-
-            # ── Warmup ───────────────────────────────────────────────────
             bs = batch_size
-            hidden_buf = self.cuda_graph_buffers["depth_hidden_states"]
-            output_buf = self.cuda_graph_buffers["depth_output_ids"]
-            embed_accum_buf = self.cuda_graph_buffers["depth_embed_accum"]
-            last_page_len_buf = self.depth_paged_kv_last_page_len_buffer
-
-            with torch.no_grad():
-                for _ in range(3):
-                    self.depth_kv_cache.zero_()
-                    output_buf[:bs].zero_()
-                    embed_accum_buf[:bs].zero_()
-                    last_page_len_buf[:bs].fill_(2)
-
-                    logits = self.model.depth_forward(
-                        hidden_states=hidden_buf[: 2 * bs],
-                        position_ids=pos_ids_prefill[: 2 * bs],
-                        attn_wrapper=self.depth_prefill_wrappers[bs],
-                        kv_cache=self.depth_kv_cache,
-                    )
-                    logits = logits[1::2][:bs]
-                    tokens, embed = self.model.depth_sampling_gpu(logits, 1)
-                    output_buf[:bs, 1].copy_(tokens[:bs])
-                    embed_accum_buf[:bs].add_(embed[:bs])
-
-                    last_page_len_buf[:bs].fill_(3)
-                    self.depth_decode_wrappers[bs].kv_cache_locations[:bs, 1].fill_(2)
-
-                    for i in range(2, n_codebooks):
-                        logits = self.model.depth_forward(
-                            hidden_states=embed[:bs],
-                            position_ids=pos_ids_decode[i][:bs],
-                            attn_wrapper=self.depth_decode_wrappers[bs],
-                            kv_cache=self.depth_kv_cache,
-                        )
-                        tokens, embed = self.model.depth_sampling_gpu(logits, i)
-                        output_buf[:bs, i].copy_(tokens[:bs])
-                        embed_accum_buf[:bs].add_(embed[:bs])
-                        if i < n_codebooks - 1:
-                            last_page_len_buf[:bs].fill_(i + 2)
-                            self.depth_decode_wrappers[bs].kv_cache_locations[:bs, 1].fill_(i + 1)
-
-            torch.cuda.synchronize()
-
-            # Re-plan wrappers to reset state before capture
-            depth_kv_last_page_len = torch.ones(batch_size, dtype=torch.int32) * 2
-            self.depth_prefill_wrappers[batch_size].plan(
-                depth_qo_indptr, depth_kv_indptr, depth_kv_indices,
-                depth_kv_last_page_len, torch.bfloat16,
+            hidden_buf = torch.zeros(bs, 2, model.hidden_size, dtype=torch.bfloat16, device=self.device)
+            output_buf = torch.zeros(bs, n_codebooks, dtype=torch.int64, device=self.device)
+            embed_accum_buf = torch.zeros(bs, model.hidden_size, dtype=torch.bfloat16, device=self.device)
+            kv_cache = torch.zeros(
+                model.depth_num_hidden_layers, bs, 2, n_codebooks,
+                model.depth_num_key_value_heads, model.depth_head_dim,
+                dtype=torch.bfloat16, device=self.device,
             )
-            depth_kv_last_page_len_decode = torch.ones(batch_size, dtype=torch.int32) * 3
-            self.depth_decode_wrappers[batch_size].plan(
-                paged_kv_indptr=depth_kv_indptr, paged_kv_indices=depth_kv_indices,
-                paged_kv_last_page_len=depth_kv_last_page_len_decode, dtype=torch.bfloat16,
+            # Staging buffers for safe output copy (outside graph pool)
+            output_staging = torch.zeros_like(output_buf)
+            embed_accum_staging = torch.zeros_like(embed_accum_buf)
+
+            self._depth_unrolled_bufs[bs] = {
+                "hidden": hidden_buf,
+                "output": output_buf,
+                "embed_accum": embed_accum_buf,
+                "output_staging": output_staging,
+                "embed_accum_staging": embed_accum_staging,
+            }
+
+            pos_pf = torch.tensor([0, 1], dtype=torch.int32, device=self.device).unsqueeze(0).expand(bs, -1)
+            pos_dec = {}
+            for i in range(2, n_codebooks):
+                pos_dec[i] = torch.full((bs, 1), i, dtype=torch.int32, device=self.device)
+
+            self.logger.info(
+                f"Capturing unrolled depth CUDA graph (SDPA) for batch size {bs} ({n_codebooks - 1} iterations)"
             )
-            torch.cuda.synchronize()
 
-            # ── Capture graph ────────────────────────────────────────────
-            depth_graph = torch.cuda.CUDAGraph()
-
-            with torch.cuda.graph(depth_graph):
-                self.depth_kv_cache.zero_()
-                output_buf[:bs].zero_()
-                embed_accum_buf[:bs].zero_()
-                last_page_len_buf[:bs].fill_(2)
-
-                logits = self.model.depth_forward(
-                    hidden_states=hidden_buf[: 2 * bs],
-                    position_ids=pos_ids_prefill[: 2 * bs],
-                    attn_wrapper=self.depth_prefill_wrappers[bs],
-                    kv_cache=self.depth_kv_cache,
-                )
-                logits = logits[1::2][:bs]
-                tokens, embed = self.model.depth_sampling_gpu(logits, 1)
-                output_buf[:bs, 1].copy_(tokens[:bs])
-                embed_accum_buf[:bs].add_(embed[:bs])
-
-                last_page_len_buf[:bs].fill_(3)
-                self.depth_decode_wrappers[bs].kv_cache_locations[:bs, 1].fill_(2)
-
+            # ── Warmup ───────────────────────────────────────────────
+            for _ in range(3):
+                kv_cache.zero_()
+                output_buf.zero_()
+                embed_accum_buf.zero_()
+                logits = model.depth_forward_unrolled(hidden_buf, pos_pf, kv_cache, 0)[:, -1, :]
+                tokens, embed = model.depth_sampling_gpu(logits, 1)
+                output_buf[:, 1] = tokens
+                embed_accum_buf += embed
                 for i in range(2, n_codebooks):
-                    logits = self.model.depth_forward(
-                        hidden_states=embed[:bs],
-                        position_ids=pos_ids_decode[i][:bs],
-                        attn_wrapper=self.depth_decode_wrappers[bs],
-                        kv_cache=self.depth_kv_cache,
-                    )
-                    tokens, embed = self.model.depth_sampling_gpu(logits, i)
-                    output_buf[:bs, i].copy_(tokens[:bs])
-                    embed_accum_buf[:bs].add_(embed[:bs])
-                    if i < n_codebooks - 1:
-                        last_page_len_buf[:bs].fill_(i + 2)
-                        self.depth_decode_wrappers[bs].kv_cache_locations[:bs, 1].fill_(i + 1)
-
-            self.cuda_graphs_depth_all[batch_size] = depth_graph
-
-            # Warmup replay after capture
-            depth_graph.replay()
+                    logits = model.depth_forward_unrolled(embed.unsqueeze(1), pos_dec[i], kv_cache, i)[:, 0, :]
+                    tokens, embed = model.depth_sampling_gpu(logits, i)
+                    output_buf[:, i] = tokens
+                    embed_accum_buf += embed
             torch.cuda.synchronize()
 
-        self.logger.info("Unrolled multi-step CUDA graphs for depth transformer initialized.")
+            # ── Capture ──────────────────────────────────────────────
+            g = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(g):
+                kv_cache.zero_()
+                output_buf.zero_()
+                embed_accum_buf.zero_()
+                logits = model.depth_forward_unrolled(hidden_buf, pos_pf, kv_cache, 0)[:, -1, :]
+                tokens, embed = model.depth_sampling_gpu(logits, 1)
+                output_buf[:, 1] = tokens
+                embed_accum_buf += embed
+                for i in range(2, n_codebooks):
+                    logits = model.depth_forward_unrolled(embed.unsqueeze(1), pos_dec[i], kv_cache, i)[:, 0, :]
+                    tokens, embed = model.depth_sampling_gpu(logits, i)
+                    output_buf[:, i] = tokens
+                    embed_accum_buf += embed
+
+            self.cuda_graphs_depth_all[bs] = g
+            g.replay()
+            torch.cuda.synchronize()
+
+        self.logger.info("Unrolled depth CUDA graphs (SDPA) initialized.")
 
     def _get_cuda_graph_batch_size(self, actual_batch_size: int) -> int:
         """
@@ -1276,17 +1188,14 @@ class CudaGraphWorker(ModelWorker):
         """Run all depth iterations via a single unrolled CUDA graph replay."""
         self.nvtx_range_push(f"depth_unrolled_bs{actual_batch_size}")
 
-        # Always use max_batch_size graph (only one captured)
-        bs = self.max_batch_size
-        hidden_buf = self.cuda_graph_buffers["depth_hidden_states"]
+        bs = padded_batch_size
+        bufs = self._depth_unrolled_bufs[bs]
+        hidden_buf = bufs["hidden"]
 
-        # Copy and pad hidden_for_depth into prefill input buffer: [bs, 2, hidden] -> [2*bs, hidden]
-        hidden_buf[: 2 * actual_batch_size].copy_(hidden_for_depth.view(2 * actual_batch_size, -1))
+        # Copy input: hidden_for_depth is (actual_bs, 2, hidden), buf is (bs, 2, hidden)
+        hidden_buf[:actual_batch_size].copy_(hidden_for_depth)
         if actual_batch_size < bs:
-            # Pad by repeating last request's pair
-            src = hidden_buf[2 * (actual_batch_size - 1) : 2 * actual_batch_size]
-            for idx in range(actual_batch_size, bs):
-                hidden_buf[2 * idx : 2 * idx + 2].copy_(src)
+            hidden_buf[actual_batch_size:bs] = hidden_for_depth[-1:]
 
         # Single graph replay covers all depth iterations
         self.nvtx_range_push("depth_unrolled_replay")
@@ -1294,14 +1203,16 @@ class CudaGraphWorker(ModelWorker):
         torch.cuda.synchronize()
         self.nvtx_range_pop()
 
-        # Copy sampled tokens from graph output buffer to output_ids
+        # Copy results to pre-allocated staging buffers (not graph pool memory).
+        # Using .clone() would allocate from the default allocator, which can recycle
+        # addresses that overlap with the graph's private pool, corrupting future replays.
         n_codebooks = self.model.depth_n_codebooks
-        depth_out = self.cuda_graph_buffers["depth_output_ids"][:actual_batch_size]
-        output_ids[:, 1:n_codebooks].copy_(depth_out[:, 1:n_codebooks])
-
-        # CPU-side request state updates
-        embed_accum = self.cuda_graph_buffers["depth_embed_accum"][:actual_batch_size]
-        self.model.depth_update_requests(depth_out, requests, embed_accum)
+        out_staging = bufs["output_staging"]
+        accum_staging = bufs["embed_accum_staging"]
+        out_staging[:actual_batch_size].copy_(bufs["output"][:actual_batch_size])
+        accum_staging[:actual_batch_size].copy_(bufs["embed_accum"][:actual_batch_size])
+        output_ids[:, 1:n_codebooks].copy_(out_staging[:actual_batch_size, 1:n_codebooks])
+        self.model.depth_update_requests(out_staging[:actual_batch_size], requests, accum_staging[:actual_batch_size])
 
         self.nvtx_range_pop()  # depth_unrolled
         return output_ids
