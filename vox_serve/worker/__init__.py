@@ -6,4 +6,9 @@ try:
 except ImportError:
     TPUWorker = None
 
-__all__ = ["ModelWorker", "CudaGraphWorker", "TPUWorker"]
+try:
+    from .jax_tpu_worker import JaxTPUWorker
+except ImportError:
+    JaxTPUWorker = None
+
+__all__ = ["ModelWorker", "CudaGraphWorker", "TPUWorker", "JaxTPUWorker"]

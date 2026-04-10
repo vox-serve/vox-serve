@@ -18,6 +18,7 @@ from ..tokamax_utils import (
     TokmaxDecodeWrapper,
     TokmaxPrefillWrapper,
     TPUKVCache,
+    _bucket_pages,
 )
 from ..utils import get_logger
 
@@ -123,13 +124,13 @@ class TPUWorker:
         # Watermarking (not supported on TPU for now)
         self.needs_watermarking = False
 
-        # Batch size buckets for XLA compilation (powers of 2)
-        self._batch_size_buckets = sorted(
-            [2**i for i in range(int(np.log2(max(max_batch_size, 1))) + 1)],
-            reverse=True,
-        )
+        # Single batch size — always pad to max. XLA sees exactly one graph
+        # variant for decode, eliminating all recompilation after warmup.
+        self._batch_size_buckets = [max(max_batch_size, 1)]
 
         self._prepare_attention_wrappers()
+        # NOTE: _allocate_decode_buffers is called inside _prepare_attention_wrappers
+        # BEFORE _warmup_xla_compilation, so buffers exist when warmup uses them.
 
     # ------------------------------------------------------------------
     # Properties (mirror ModelWorker)
@@ -224,127 +225,152 @@ class TPUWorker:
             self.depth_attn_wrapper = None
             self.depth_kv_cache = None
 
+        self._allocate_decode_buffers()
         self._warmup_xla_compilation()
 
-    def _warmup_xla_compilation(self):
-        """Trigger XLA compilation for all graph shapes used during inference.
+    def _allocate_decode_buffers(self):
+        """Pre-allocate fixed-size decode buffers for each batch-size bucket.
 
-        XLA compiles lazily on first execution of each unique graph shape.
-        Pre-compiling during startup avoids latency spikes on the first request.
-        Warms up: decode backbone, depth transformer (both first-iter and rest),
-        and prefill with a short dummy sequence.
+        XLA traces tensor identity — by always passing the SAME buffer objects
+        to the model, we guarantee the traced graph matches the warmed-up graph.
+        Actual data is copied into the first ``actual_bs`` slots before each step.
+        """
+        n_cb = self.model.n_codebooks
+        hidden_sz = self.model.hidden_size
+        dev = self.xla_device
+        dtype = torch.bfloat16
+
+        # Repetition cache shape: (bs, window_size, n_codebooks, vocab_size)
+        # window_size = 1 for global window (repetition_window=-1)
+        rep_window = (
+            abs(self.model.default_sampling_config.repetition_window) if self.model.use_repetition_penalty else 0
+        )
+        if rep_window == 0 and self.model.use_repetition_penalty:
+            rep_window = 1  # global window uses window_size=1
+        rep_cache_shape = (rep_window, n_cb, self.model.vocab_size) if self.model.use_repetition_penalty else None
+
+        # Max pages any single request can use (for plan buffer sizing)
+        max_pages_per_req = (self.max_num_pages + self.max_batch_size - 1) // max(self.max_batch_size, 1)
+
+        self._decode_bufs = {}
+        for bs in self._batch_size_buckets:
+            # Pad paged_kv_indices to next power of 2
+            max_total_pages = bs * max_pages_per_req
+            padded_total_pages = 1 << max(0, (max_total_pages - 1).bit_length()) if max_total_pages > 0 else 1
+
+            d = {
+                # Model inputs
+                "input_ids": torch.zeros(bs, n_cb, dtype=torch.long, device=dev),
+                "position_ids": torch.zeros(bs, dtype=torch.int32, device=dev),
+                "input_features": torch.zeros(bs, hidden_sz, dtype=dtype, device=dev),
+                "input_masks": torch.zeros(bs, n_cb, dtype=torch.bool, device=dev),
+                # Plan inputs (paged KV metadata)
+                "paged_kv_indptr": torch.zeros(bs + 1, dtype=torch.int32, device=dev),
+                "paged_kv_indices": torch.zeros(padded_total_pages, dtype=torch.int32, device=dev),
+                "paged_kv_last_page_len": torch.zeros(bs, dtype=torch.int32, device=dev),
+            }
+            if rep_cache_shape is not None:
+                d["repetition_cache"] = torch.zeros(bs, *rep_cache_shape, dtype=torch.bool, device=dev)
+            self._decode_bufs[bs] = d
+
+            # Pre-allocate plan output buffers so plan() writes into fixed
+            # tensor objects → XLA always sees the same graph.
+            max_pages_bucket = _bucket_pages(max_pages_per_req)
+            self.decode_wrapper.allocate_buffers(bs, max_pages_bucket)
+        self.logger.info(f"Decode buffers allocated for batch sizes {self._batch_size_buckets}")
+
+    def _warmup_xla_compilation(self):
+        """Pre-warm the XLA cache with a full decode pipeline (forward+sampling+depth).
+
+        Uses the same pre-allocated buffers and code path as run_lm_decode
+        so that XLA caches the exact graph shapes used in real inference.
         """
         import time
 
-        self.logger.info("Starting XLA compilation warmup...")
+        self.logger.info("Starting XLA warmup...")
         t_total = time.time()
-        n_codebooks = self.model.n_codebooks
 
-        # Helper: create tensors on CPU then transfer (avoids XLA constants)
-        def _t(data, dtype=torch.int32):
-            return torch.tensor(data, dtype=dtype).to(self.xla_device)
+        bs = self.max_batch_size
+        bufs = self._decode_bufs[bs]
+        nc = self.model.depth_n_codebooks if self.has_depth_transformer else 0
 
-        # Common forward kwargs
-        def _fwd_kwargs(input_ids, position_ids, wrapper, cache):
-            kw = dict(input_ids=input_ids, position_ids=position_ids, attn_wrapper=wrapper, kv_cache=cache)
-            if self.model.needs_input_features:
-                kw["input_features"] = torch.zeros(
-                    input_ids.shape[0], self.model.hidden_size, dtype=torch.bfloat16, device=self.xla_device,
-                )
-            if self.model.needs_input_masks:
-                kw["input_masks"] = torch.zeros(
-                    input_ids.shape[0], n_codebooks, dtype=torch.bool, device=self.xla_device,
-                )
-            return kw
+        bufs["paged_kv_indptr"].copy_(torch.tensor(list(range(bs + 1)), dtype=torch.int32))
+        bufs["paged_kv_indices"][:bs].copy_(torch.tensor(list(range(bs)), dtype=torch.int32))
+        bufs["paged_kv_last_page_len"].copy_(torch.tensor([17] * bs, dtype=torch.int32))
 
         with torch.no_grad():
-            # ---- 1. Prefill (short dummy sequence) ----
-            seq_len = 16
-            dummy_ids = torch.zeros(seq_len, n_codebooks, dtype=torch.long, device=self.xla_device)
-            dummy_pos = torch.arange(seq_len, dtype=torch.int32).to(self.xla_device)
-
-            self.prefill_wrapper.plan(
-                _t([0, seq_len]), _t([0, 1]), _t([0]), _t([seq_len]), torch.bfloat16,
+            # ---- Plan + backbone forward ----
+            t0 = time.time()
+            self.decode_wrapper.plan(
+                bufs["paged_kv_indptr"], bufs["paged_kv_indices"],
+                bufs["paged_kv_last_page_len"], torch.bfloat16,
             )
             xm.mark_step()
-
-            t0 = time.time()
-            self.model.forward(**_fwd_kwargs(dummy_ids, dummy_pos, self.prefill_wrapper, self.kv_cache))
+            logits_w, hidden_w = self.model.forward(
+                input_ids=bufs["input_ids"], position_ids=bufs["position_ids"],
+                attn_wrapper=self.decode_wrapper, kv_cache=self.kv_cache,
+                input_features=bufs["input_features"], input_masks=bufs["input_masks"],
+            )
             xm.mark_step()
-            self.logger.info(f"  Prefill graph compiled in {time.time() - t0:.1f}s")
+            self.logger.info(f"  Backbone forward compiled in {time.time() - t0:.1f}s")
 
-            # ---- 2. Decode for each batch size bucket ----
-            for bs in self._batch_size_buckets:
-                dec_ids = torch.zeros(bs, n_codebooks, dtype=torch.long, device=self.xla_device)
-                dec_pos = _t([seq_len + 1] * bs)
-                indptr = _t(list(range(bs + 1)))
-                indices = _t(list(range(bs)))
-                lpl = _t([seq_len + 1] * bs)
-
-                self.decode_wrapper.plan(indptr, indices, lpl, torch.bfloat16)
-                xm.mark_step()
-
-                t0 = time.time()
-                self.model.forward(**_fwd_kwargs(dec_ids, dec_pos, self.decode_wrapper, self.kv_cache))
-                xm.mark_step()
-                self.logger.info(f"  Decode bs={bs} compiled in {time.time() - t0:.1f}s")
-
-            # ---- 3. Depth transformer (if present) ----
-            # Warmup the FUSED depth graph: all 15 iterations traced into one XLA graph.
-            # Each iteration uses a different codec_embedding layer, so we must trace
-            # the full loop to compile the combined graph.
+            # ---- Sampling + fused depth ----
             if self.has_depth_transformer:
-                nc = self.model.depth_n_codebooks
-                depth_kv_budget = nc
-                depth_dim = self.model.depth_num_attention_heads * self.model.depth_head_dim
-
-                for bs in self._batch_size_buckets:
-                    self.depth_kv_cache.k_cache.zero_()
-                    self.depth_kv_cache.v_cache.zero_()
-
-                    d_kvi = torch.arange(bs + 1, dtype=torch.int32).to(self.xla_device)
-                    d_kvx = torch.arange(bs, dtype=torch.int32).to(self.xla_device)
-                    d_lpl = _t([2] * bs)
-                    d_pos = _t([0, 1] * bs)
-                    d_qo = torch.arange(bs + 1, dtype=torch.int32).to(self.xla_device) * 2
-                    hd = torch.zeros(bs * 2, depth_dim, dtype=torch.bfloat16, device=self.xla_device)
-                    dummy_oids = torch.zeros(bs, nc, dtype=torch.long, device=self.xla_device)
-
-                    t0 = time.time()
-                    for i in range(1, nc):
-                        self.depth_attn_wrapper.plan(
-                            d_qo, d_kvi, d_kvx, d_lpl, torch.bfloat16, kv_len_budget=depth_kv_budget,
-                        )
-                        if i == 1:
-                            dl = self.model.depth_forward(
-                                hidden_states=hd, position_ids=d_pos,
-                                attn_wrapper=self.depth_attn_wrapper, kv_cache=self.depth_kv_cache,
-                            )
-                            aqo = torch.arange(bs + 1, dtype=torch.int32).to(self.xla_device) * 2
-                            dl = dl[aqo[1:] - 1]
-                            dummy_oids[:, i], hd = self.model.depth_sampling(
-                                logits=dl, i_iteration=i, requests=[],
-                            )
-                        else:
-                            d_pos_i = _t([i + 1] * bs)
-                            dl = self.model.depth_forward(
-                                hidden_states=hd, position_ids=d_pos_i,
-                                attn_wrapper=self.depth_attn_wrapper, kv_cache=self.depth_kv_cache,
-                            )
-                            dummy_oids[:, i], hd = self.model.depth_sampling(
-                                logits=dl, i_iteration=i, requests=[],
-                            )
-                        d_qo = torch.arange(bs + 1, dtype=torch.int32).to(self.xla_device)
-                        d_lpl = d_lpl + 1
-                    xm.mark_step()  # single flush for entire fused depth graph
-                    self.logger.info(f"  Depth fused (bs={bs}) compiled in {time.time() - t0:.1f}s")
+                t0 = time.time()
+                output_ids_w, hidden_d_w = self.model.sampling(
+                    logits=logits_w, hidden_states=hidden_w, requests=[],
+                    repetition_cache=bufs.get("repetition_cache"),
+                )
+                xm.mark_step()
+                self.logger.info(f"  Sampling compiled in {time.time() - t0:.1f}s")
 
                 self.depth_kv_cache.k_cache.zero_()
                 self.depth_kv_cache.v_cache.zero_()
+                ci_sum_w = torch.zeros(bs, self.model.hidden_size, dtype=torch.bfloat16, device=self.xla_device)
+                d_kvi = torch.arange(bs + 1, dtype=torch.int32).to(self.xla_device)
+                d_kvx = torch.arange(bs, dtype=torch.int32).to(self.xla_device)
+                d_lpl = torch.tensor([2] * bs, dtype=torch.int32).to(self.xla_device)
+                d_qo = torch.arange(bs + 1, dtype=torch.int32).to(self.xla_device) * 2
 
-            self.kv_cache.k_cache.zero_()
-            self.kv_cache.v_cache.zero_()
-            xm.mark_step()
+                t0 = time.time()
+                for i in range(1, nc):
+                    self.depth_attn_wrapper.plan(
+                        d_qo, d_kvi, d_kvx, d_lpl, torch.bfloat16, kv_len_budget=nc,
+                    )
+                    if i == 1:
+                        dl = self.model.depth_forward(
+                            hidden_states=hidden_d_w.view(bs * 2, -1),
+                            position_ids=torch.tensor([0, 1] * bs, dtype=torch.int32).to(self.xla_device),
+                            attn_wrapper=self.depth_attn_wrapper, kv_cache=self.depth_kv_cache,
+                        )
+                        aqo = torch.arange(bs + 1, dtype=torch.int32).to(self.xla_device) * 2
+                        dl = dl[aqo[1:] - 1]
+                        output_ids_w[:, i], hidden_d_w = self.model.depth_sampling(
+                            logits=dl, i_iteration=i, requests=[],
+                        )
+                        ci_sum_w += hidden_d_w
+                    else:
+                        dl = self.model.depth_forward(
+                            hidden_states=hidden_d_w,
+                            position_ids=torch.tensor([i + 1] * bs, dtype=torch.int32).to(self.xla_device),
+                            attn_wrapper=self.depth_attn_wrapper, kv_cache=self.depth_kv_cache,
+                        )
+                        output_ids_w[:, i], hidden_d_w = self.model.depth_sampling(
+                            logits=dl, i_iteration=i, requests=[],
+                        )
+                        ci_sum_w += hidden_d_w
+                    d_qo = torch.arange(bs + 1, dtype=torch.int32).to(self.xla_device)
+                    d_lpl = d_lpl + 1
+                xm.mark_step()
+                self.logger.info(f"  Fused depth compiled in {time.time() - t0:.1f}s")
+
+        # Reset caches
+        if self.has_depth_transformer:
+            self.depth_kv_cache.k_cache.zero_()
+            self.depth_kv_cache.v_cache.zero_()
+        self.kv_cache.k_cache.zero_()
+        self.kv_cache.v_cache.zero_()
+        xm.mark_step()
 
         self.logger.info(f"XLA warmup complete in {time.time() - t_total:.1f}s")
 
@@ -450,7 +476,8 @@ class TPUWorker:
                 req.next_position_id += 1
 
         input_ids = torch.cat(input_ids_list, dim=0)
-        position_ids = torch.tensor(position_ids_list, device=self.device, dtype=torch.int32)
+        # Create on CPU first, transfer to XLA as runtime input (not compile-time constant)
+        position_ids = torch.tensor(position_ids_list, dtype=torch.int32).to(self.device)
 
         if self.model.needs_input_masks and input_masks_list:
             input_masks = torch.cat([m for m in input_masks_list if m is not None], dim=0).to(self.device)
@@ -522,44 +549,64 @@ class TPUWorker:
         if input_features is not None and input_features.is_floating_point() and input_features.dtype != model_dtype:
             input_features = input_features.to(model_dtype)
 
-        qo_indptr_tensor = self._to_xla(qo_indptr)
-        paged_kv_indptr_tensor = self._to_xla(paged_kv_indptr)
-        paged_kv_indices_tensor = self._to_xla(self._pad_to_pow2(paged_kv_indices))
-        paged_kv_last_page_len_tensor = self._to_xla(paged_kv_last_page_len)
-
-        self.prefill_wrapper.plan(
-            qo_indptr_tensor,
-            paged_kv_indptr_tensor,
-            paged_kv_indices_tensor,
-            paged_kv_last_page_len_tensor,
-            torch.bfloat16,
-        )
-        xm.mark_step()
-
         with torch.no_grad():
             if self.has_depth_transformer:
-                logits, backbone_hidden_states = self.model.forward(
-                    input_ids=input_ids,
-                    position_ids=position_ids,
-                    attn_wrapper=self.prefill_wrapper,
-                    kv_cache=self.kv_cache,
-                    input_features=input_features,
-                    input_masks=input_masks,
+                # Prefill uses lazy mode (XLA compiles on first call, caches for reuse).
+                # First prefill per seq_len bucket takes ~8s, subsequent ones are instant.
+                qo_indptr_tensor = self._to_xla(qo_indptr)
+                paged_kv_indptr_tensor = self._to_xla(paged_kv_indptr)
+                paged_kv_indices_tensor = self._to_xla(self._pad_to_pow2(paged_kv_indices))
+                paged_kv_last_page_len_tensor = self._to_xla(paged_kv_last_page_len)
+                self.prefill_wrapper.plan(
+                    qo_indptr_tensor, paged_kv_indptr_tensor,
+                    paged_kv_indices_tensor, paged_kv_last_page_len_tensor,
+                    torch.bfloat16,
                 )
                 xm.mark_step()
-
+                logits, backbone_hidden_states = self.model.forward(
+                    input_ids=input_ids, position_ids=position_ids,
+                    attn_wrapper=self.prefill_wrapper, kv_cache=self.kv_cache,
+                    input_features=input_features, input_masks=input_masks,
+                )
+                xm.mark_step()
                 if getattr(self.prefill_wrapper, "qo_indptr", None) is not None:
                     logits = logits[self.prefill_wrapper.qo_indptr[:-1] - 1]
                     backbone_hidden_states = backbone_hidden_states[self.prefill_wrapper.qo_indptr[:-1] - 1]
-
                 output_ids, hidden_for_depth = self.model.sampling(
                     logits=logits,
                     hidden_states=backbone_hidden_states,
-                    requests=requests,
+                    requests=[],
                     repetition_cache=repetition_cache,
                 )
 
-                output_ids = self.run_lm_depth(output_ids, hidden_for_depth, requests)
+                output_ids, ci_embed_sum = self.run_lm_depth(output_ids, hidden_for_depth, requests)
+
+                # Deferred: write backbone+depth results to request state
+                output_ids_cpu = output_ids.cpu()
+                ci_embed_cpu = ci_embed_sum.cpu()
+                mdl_dev = self.model.device
+                mdl_dtype = getattr(self.model, "dtype", torch.bfloat16)
+                n_cb = self.model.n_codebooks
+                for i, req in enumerate(requests):
+                    req.input_tokens = torch.zeros(1, n_cb, dtype=torch.long, device=mdl_dev)
+                    req.input_tokens[0, 0] = int(output_ids_cpu[i, 0].item())
+                    if not getattr(req, "is_input_streaming", False):
+                        req.input_tokens[0, -1] = self.model.config.tts_pad_token_id
+                    req.input_masks = torch.ones(n_cb, dtype=torch.bool, device=mdl_dev)[None, :]
+                    req.input_features = torch.zeros(
+                        1, self.model.hidden_size, device=mdl_dev, dtype=mdl_dtype,
+                    )
+                    req.input_features[:] += ci_embed_cpu[i : i + 1].to(mdl_dev)
+                    req.lm_output_tokens.append(output_ids[i : i + 1])
+                    if not self.model.is_stop_id(output_ids_cpu[i][0]):
+                        req.lm_output_audio_tokens.append(output_ids[i : i + 1])
+                    else:
+                        req.done_lm_generation = True
+                        req.finish_reason = "stop_id_encountered"
+                for req in requests:
+                    if req.next_position_id > self.model.max_tokens:
+                        req.done_lm_generation = True
+                        req.finish_reason = "max_tokens_reached"
             else:
                 logits = self.model.forward(
                     input_ids=input_ids,
@@ -584,6 +631,10 @@ class TPUWorker:
     # LM decode
     # ------------------------------------------------------------------
 
+    def _get_padded_batch_size(self, actual_bs: int) -> int:
+        """Always pad to max_batch_size so XLA sees exactly ONE graph variant."""
+        return self.max_batch_size
+
     def run_lm_decode(self, requests: List[Request], lm_inputs: LMInputs) -> Optional[Coroutine]:
         if len(requests) == 0:
             return None
@@ -597,41 +648,91 @@ class TPUWorker:
         input_masks = lm_inputs["input_masks"]
         repetition_cache = lm_inputs["repetition_cache"]
 
-        model_dtype = getattr(self.model, "dtype", torch.bfloat16)
-        if input_features is not None and input_features.is_floating_point() and input_features.dtype != model_dtype:
-            input_features = input_features.to(model_dtype)
+        actual_bs = len(requests)
+        padded_bs = self._get_padded_batch_size(actual_bs)
 
-        paged_kv_indptr_tensor = self._to_xla(paged_kv_indptr)
-        paged_kv_indices_tensor = self._to_xla(self._pad_to_pow2(paged_kv_indices))
-        paged_kv_last_page_len_tensor = self._to_xla(paged_kv_last_page_len)
+        # Pad page tables to bucketed batch size
+        if padded_bs > actual_bs:
+            pad_n = padded_bs - actual_bs
+            paged_kv_indptr = paged_kv_indptr + [paged_kv_indptr[-1] + 1] * pad_n
+            paged_kv_indices = paged_kv_indices + [0] * pad_n
+            paged_kv_last_page_len = paged_kv_last_page_len + [1] * pad_n
 
-        self.decode_wrapper.plan(
-            paged_kv_indptr_tensor,
-            paged_kv_indices_tensor,
-            paged_kv_last_page_len_tensor,
-            torch.bfloat16,
-        )
-        xm.mark_step()
+        # ---- Copy data into pre-allocated buffers (CPU side) ----
+        bufs = self._decode_bufs[padded_bs]
+        bufs["input_ids"][:actual_bs].copy_(input_ids)
+        bufs["position_ids"][:actual_bs].copy_(position_ids)
+        if input_features is not None:
+            model_dtype = getattr(self.model, "dtype", torch.bfloat16)
+            if input_features.dtype != model_dtype:
+                input_features = input_features.to(model_dtype)
+            bufs["input_features"][:actual_bs].copy_(input_features)
+        if input_masks is not None:
+            bufs["input_masks"][:actual_bs].copy_(input_masks)
+
+        bufs["paged_kv_indptr"].copy_(torch.tensor(paged_kv_indptr, dtype=torch.int32))
+        bufs["paged_kv_last_page_len"].copy_(torch.tensor(paged_kv_last_page_len, dtype=torch.int32))
+        padded_indices = self._pad_to_pow2(paged_kv_indices)
+        idx_len = len(padded_indices)
+        if idx_len <= bufs["paged_kv_indices"].shape[0]:
+            bufs["paged_kv_indices"][:idx_len].copy_(torch.tensor(padded_indices, dtype=torch.int32))
+
+        rep_buf = bufs.get("repetition_cache")
+        if rep_buf is not None and repetition_cache is not None:
+            rep_buf[:actual_bs].copy_(repetition_cache)
 
         with torch.no_grad():
             if self.has_depth_transformer:
-                logits, backbone_hidden_states = self.model.forward(
-                    input_ids=input_ids,
-                    position_ids=position_ids,
-                    attn_wrapper=self.decode_wrapper,
-                    kv_cache=self.kv_cache,
-                    input_features=input_features,
-                    input_masks=input_masks,
+                # Plan (uses pre-allocated output buffers for graph reuse)
+                self.decode_wrapper.plan(
+                    bufs["paged_kv_indptr"], bufs["paged_kv_indices"],
+                    bufs["paged_kv_last_page_len"], torch.bfloat16,
                 )
+                xm.mark_step()
+
+                logits, backbone_hidden_states = self.model.forward(
+                    input_ids=bufs["input_ids"], position_ids=bufs["position_ids"],
+                    attn_wrapper=self.decode_wrapper, kv_cache=self.kv_cache,
+                    input_features=bufs["input_features"], input_masks=bufs["input_masks"],
+                )
+
+                rep_buf = bufs.get("repetition_cache")
+                if rep_buf is not None and repetition_cache is not None:
+                    rep_buf[:actual_bs].copy_(repetition_cache)
 
                 output_ids, hidden_for_depth = self.model.sampling(
-                    logits=logits,
-                    hidden_states=backbone_hidden_states,
-                    requests=requests,
-                    repetition_cache=repetition_cache,
+                    logits=logits, hidden_states=backbone_hidden_states,
+                    requests=[], repetition_cache=rep_buf,
                 )
 
-                output_ids = self.run_lm_depth(output_ids, hidden_for_depth, requests)
+                output_ids, ci_embed_sum = self.run_lm_depth(output_ids, hidden_for_depth, requests)
+
+                # Deferred: write backbone+depth results to request state
+                output_ids_cpu = output_ids.cpu()
+                ci_embed_cpu = ci_embed_sum.cpu()
+                mdl_dev = self.model.device
+                mdl_dtype = getattr(self.model, "dtype", torch.bfloat16)
+                n_cb = self.model.n_codebooks
+                for i, req in enumerate(requests):
+                    req.input_tokens = torch.zeros(1, n_cb, dtype=torch.long, device=mdl_dev)
+                    req.input_tokens[0, 0] = int(output_ids_cpu[i, 0].item())
+                    if not getattr(req, "is_input_streaming", False):
+                        req.input_tokens[0, -1] = self.model.config.tts_pad_token_id
+                    req.input_masks = torch.ones(n_cb, dtype=torch.bool, device=mdl_dev)[None, :]
+                    req.input_features = torch.zeros(
+                        1, self.model.hidden_size, device=mdl_dev, dtype=mdl_dtype,
+                    )
+                    req.input_features[:] += ci_embed_cpu[i : i + 1].to(mdl_dev)
+                    req.lm_output_tokens.append(output_ids[i : i + 1])
+                    if not self.model.is_stop_id(output_ids_cpu[i][0]):
+                        req.lm_output_audio_tokens.append(output_ids[i : i + 1])
+                    else:
+                        req.done_lm_generation = True
+                        req.finish_reason = "stop_id_encountered"
+                for req in requests:
+                    if req.next_position_id > self.model.max_tokens:
+                        req.done_lm_generation = True
+                        req.finish_reason = "max_tokens_reached"
             else:
                 logits = self.model.forward(
                     input_ids=input_ids,
@@ -741,20 +842,10 @@ class TPUWorker:
         # Single mark_step for the entire fused depth graph
         xm.mark_step()
 
-        # Write depth results back to request state (deferred from depth_sampling
-        # to avoid .item() calls inside the fused XLA graph)
-        ci_embed_sum_cpu = ci_embed_sum.cpu()
-        output_ids_cpu = output_ids.cpu()
-        for i_req, req in enumerate(requests):
-            for cb in range(1, n_codebooks):
-                token_id = int(output_ids_cpu[i_req, cb].item())
-                req.lm_output_tokens[-1][0, cb] = token_id
-                if not req.done_lm_generation:
-                    req.lm_output_audio_tokens[-1][0, cb] = token_id
-            # Accumulate codec embeddings into input_features for next backbone step
-            req.input_features[:] += ci_embed_sum_cpu[i_req : i_req + 1].to(req.input_features.device)
-
-        return output_ids
+        # Depth token IDs are already in output_ids[:, i]. The caller's deferred
+        # writeback appends the full output_ids to req.lm_output_tokens.
+        # Return ci_embed_sum so caller can add it to input_features after init.
+        return output_ids, ci_embed_sum
 
     # ------------------------------------------------------------------
     # Detokenization  (audio decoding on CPU)

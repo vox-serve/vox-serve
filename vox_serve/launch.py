@@ -59,6 +59,7 @@ class APIServer:
         dp_size: int = 1,
         detokenize_interval: int = None,
         device_type: str = "cuda",
+        tpu_backend: str = None,
     ):
         """Initialize the API server and start scheduler process(es).
 
@@ -89,6 +90,7 @@ class APIServer:
             dp_size: Data parallel replica count.
             detokenize_interval: Interval for audio detokenization (model-specific).
             device_type: Device type for execution ('cuda' or 'tpu').
+            tpu_backend: TPU backend ('pytorch_xla' or 'jax'). Only used when device_type='tpu'.
         """
         self.model_name = model_name
         self.request_socket_path = request_socket_path
@@ -119,6 +121,7 @@ class APIServer:
         self.dp_size = dp_size
         self.detokenize_interval = detokenize_interval
         self.device_type = device_type
+        self.tpu_backend = tpu_backend
         self.scheduler_processes = None  # Will be a list for DP mode
         self.logger = get_logger(__name__)
 
@@ -272,6 +275,8 @@ class APIServer:
                     if self.detokenize_interval is not None:
                         cmd.extend(["--detokenize-interval", str(self.detokenize_interval)])
                     cmd.extend(["--device-type", self.device_type])
+                    if self.tpu_backend is not None:
+                        cmd.extend(["--tpu-backend", self.tpu_backend])
 
                     self.logger.info(f"Starting DP rank {rank} with CUDA_VISIBLE_DEVICES={gpu_mapping[rank]}")
                     process = subprocess.Popen(cmd, env=env)
@@ -346,12 +351,14 @@ class APIServer:
                 if self.detokenize_interval is not None:
                     cmd.extend(["--detokenize-interval", str(self.detokenize_interval)])
                 cmd.extend(["--device-type", self.device_type])
+                if self.tpu_backend is not None:
+                    cmd.extend(["--tpu-backend", self.tpu_backend])
 
                 # For TPU: set env vars to disable Inductor, prevent JAX from claiming TPU.
                 # Use os.fork + os.execvpe to cleanly isolate the child from the parent
                 # process. subprocess.Popen causes XLA compilation to hang in the child
                 # (PyTorch/XLA 2.8 runtime issue with subprocess inheritance).
-                if self.device_type == "tpu":
+                if self.device_type == "tpu" and self.tpu_backend != "jax":
                     env = os.environ.copy()
                     env["TORCHDYNAMO_DISABLE"] = "1"
                     env["TORCH_COMPILE_THREADS"] = "0"
@@ -1223,6 +1230,13 @@ def main():
         choices=["cuda", "tpu"],
         help="Device type for model execution (default: cuda). Use 'tpu' for Google Cloud TPU.",
     )
+    parser.add_argument(
+        "--tpu-backend",
+        type=str,
+        default=None,
+        choices=["pytorch_xla", "jax"],
+        help="TPU backend to use (default: pytorch_xla). Use 'jax' for pure JAX inference.",
+    )
     args = parser.parse_args()
 
     # Set global log level for the entire application
@@ -1315,6 +1329,7 @@ def main():
         dp_size=args.dp_size,
         detokenize_interval=args.detokenize_interval,
         device_type=args.device,
+        tpu_backend=getattr(args, "tpu_backend", None),
     )
 
     # Register signal handlers for graceful shutdown
