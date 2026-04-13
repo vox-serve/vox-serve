@@ -65,18 +65,46 @@ class OrpheusAttention(nn.Module):
         self.high_freq_factor = config.rope_scaling.get("high_freq_factor", 4.0)
         self.old_context_len = config.rope_scaling.get("original_max_position_embeddings", 8192)
 
-        self.q_proj = nn.Linear(
-            config.hidden_size, config.num_attention_heads * self.head_dim, bias=config.attention_bias
-        )
-        self.k_proj = nn.Linear(
-            config.hidden_size, config.num_key_value_heads * self.head_dim, bias=config.attention_bias
-        )
-        self.v_proj = nn.Linear(
-            config.hidden_size, config.num_key_value_heads * self.head_dim, bias=config.attention_bias
-        )
+        self.q_size = config.num_attention_heads * self.head_dim
+        self.kv_size = config.num_key_value_heads * self.head_dim
+
+        # Separate q/k/v projections exist only so HF's from_pretrained can load the
+        # checkpoint cleanly; fuse_qkv() replaces them with a single qkv_proj after
+        # weights are loaded.
+        self.q_proj = nn.Linear(config.hidden_size, self.q_size, bias=config.attention_bias)
+        self.k_proj = nn.Linear(config.hidden_size, self.kv_size, bias=config.attention_bias)
+        self.v_proj = nn.Linear(config.hidden_size, self.kv_size, bias=config.attention_bias)
+
         self.o_proj = nn.Linear(
             config.num_attention_heads * self.head_dim, config.hidden_size, bias=config.attention_bias
         )
+
+    def fuse_qkv(self) -> None:
+        """Replace separate q/k/v Linears with a single fused qkv_proj (idempotent)."""
+        if not hasattr(self, "q_proj"):
+            return
+
+        has_bias = self.q_proj.bias is not None
+        fused = nn.Linear(
+            self.q_proj.in_features,
+            self.q_size + 2 * self.kv_size,
+            bias=has_bias,
+            device=self.q_proj.weight.device,
+            dtype=self.q_proj.weight.dtype,
+        )
+        with torch.no_grad():
+            fused.weight.copy_(
+                torch.cat([self.q_proj.weight, self.k_proj.weight, self.v_proj.weight], dim=0)
+            )
+            if has_bias:
+                fused.bias.copy_(
+                    torch.cat([self.q_proj.bias, self.k_proj.bias, self.v_proj.bias], dim=0)
+                )
+
+        self.qkv_proj = fused
+        del self.q_proj
+        del self.k_proj
+        del self.v_proj
 
     def forward(
         self,
@@ -88,9 +116,13 @@ class OrpheusAttention(nn.Module):
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
 
-        query_states = self.q_proj(hidden_states).view(hidden_shape)  # .transpose(0, 1)
-        key_states = self.k_proj(hidden_states).view(hidden_shape)  # .transpose(0, 1)
-        value_states = self.v_proj(hidden_states).view(hidden_shape)  # .transpose(0, 1)
+        qkv = self.qkv_proj(hidden_states)
+        query_states, key_states, value_states = qkv.split(
+            [self.q_size, self.kv_size, self.kv_size], dim=-1
+        )
+        query_states = query_states.view(hidden_shape)
+        key_states = key_states.view(hidden_shape)
+        value_states = value_states.view(hidden_shape)
 
         query_states, key_states = apply_rope_pos_ids(
             query_states=query_states,
@@ -237,6 +269,10 @@ class OrpheusModel(BaseLM):
         self.model_name = model_name
         self.model = OrpheusForCausalLM.from_pretrained(model_name)
         self.model.to(dtype).to(device)
+
+        # Fuse per-layer Q/K/V into a single qkv_proj to turn 3 small GEMMs into 1 large one.
+        for layer in self.model.model.layers:
+            layer.self_attn.fuse_qkv()
 
         self.available_voices = ["tara", "leah", "jess", "leo", "dan", "mia", "zac", "zoe"]
 
