@@ -776,9 +776,45 @@ class CudaGraphWorker(ModelWorker):
         Captures ALL depth iterations (prefill + decode) into a single CUDA graph
         per batch size. Uses torch SDPA for attention to avoid FlashInfer workspace
         issues. Uses the shared cuda_graph_pool so the allocator avoids address overlap.
+
+        To keep memory usage constant regardless of how many batch-size buckets
+        exist, all buffers are allocated once at max_batch_size and smaller graphs
+        use slices of the same tensors.
         """
         n_codebooks = self.model.depth_n_codebooks
         model = self.model
+        max_bs = self.max_batch_size
+
+        # ── Allocate shared buffers once at max_batch_size ───────────
+        hidden_buf_full = torch.zeros(max_bs, 2, model.hidden_size, dtype=torch.bfloat16, device=self.device)
+        output_buf_full = torch.zeros(max_bs, n_codebooks, dtype=torch.int64, device=self.device)
+        embed_accum_buf_full = torch.zeros(max_bs, model.hidden_size, dtype=torch.bfloat16, device=self.device)
+        kv_cache_full = torch.zeros(
+            model.depth_num_hidden_layers, max_bs, 2, n_codebooks,
+            model.depth_num_key_value_heads, model.depth_head_dim,
+            dtype=torch.bfloat16, device=self.device,
+        )
+        output_staging_full = torch.zeros_like(output_buf_full)
+        embed_accum_staging_full = torch.zeros_like(embed_accum_buf_full)
+
+        pos_pf_full = torch.tensor(
+            [0, 1], dtype=torch.int32, device=self.device,
+        ).unsqueeze(0).expand(max_bs, -1)
+        pos_dec_full = {}
+        for i in range(2, n_codebooks):
+            pos_dec_full[i] = torch.full((max_bs, 1), i, dtype=torch.int32, device=self.device)
+
+        # Keep a reference to the full buffers so they stay alive
+        self._depth_unrolled_shared_bufs = {
+            "hidden": hidden_buf_full,
+            "output": output_buf_full,
+            "embed_accum": embed_accum_buf_full,
+            "kv_cache": kv_cache_full,
+            "output_staging": output_staging_full,
+            "embed_accum_staging": embed_accum_staging_full,
+            "pos_pf": pos_pf_full,
+            "pos_dec": pos_dec_full,
+        }
 
         self._depth_unrolled_bufs = {}
 
@@ -787,23 +823,15 @@ class CudaGraphWorker(ModelWorker):
                 continue
 
             bs = batch_size
-            hidden_buf = torch.zeros(bs, 2, model.hidden_size, dtype=torch.bfloat16, device=self.device)
-            output_buf = torch.zeros(bs, n_codebooks, dtype=torch.int64, device=self.device)
-            embed_accum_buf = torch.zeros(bs, model.hidden_size, dtype=torch.bfloat16, device=self.device)
-            kv_cache = torch.zeros(
-                model.depth_num_hidden_layers, bs, 2, n_codebooks,
-                model.depth_num_key_value_heads, model.depth_head_dim,
-                dtype=torch.bfloat16, device=self.device,
-            )
-            output_staging = torch.zeros_like(output_buf)
-            embed_accum_staging = torch.zeros_like(embed_accum_buf)
-
-            pos_pf = torch.tensor(
-                [0, 1], dtype=torch.int32, device=self.device,
-            ).unsqueeze(0).expand(bs, -1)
-            pos_dec = {}
-            for i in range(2, n_codebooks):
-                pos_dec[i] = torch.full((bs, 1), i, dtype=torch.int32, device=self.device)
+            # Slice shared buffers — same underlying storage, no extra memory
+            hidden_buf = hidden_buf_full[:bs]
+            output_buf = output_buf_full[:bs]
+            embed_accum_buf = embed_accum_buf_full[:bs]
+            kv_cache = kv_cache_full[:, :bs]
+            output_staging = output_staging_full[:bs]
+            embed_accum_staging = embed_accum_staging_full[:bs]
+            pos_pf = pos_pf_full[:bs]
+            pos_dec = {i: pos_dec_full[i][:bs] for i in pos_dec_full}
 
             self._depth_unrolled_bufs[bs] = {
                 "hidden": hidden_buf,
