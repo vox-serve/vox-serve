@@ -39,8 +39,60 @@ def _run_scheduler_daemon(
     log_level: str,
     detokenize_interval: int = None,
     device_type: str = "cuda",
+    tpu_backend: str = None,
 ) -> None:
     """Entry point for scheduler daemon that sets CUDA_VISIBLE_DEVICES before importing torch."""
+
+    if device_type == "tpu" and tpu_backend == "jax":
+        # JAX TPU path: don't need torch_xla
+        # Tell absl.flags to ignore unknown flags (our argparse flags like --dp-rank
+        # conflict with absl's flag parser used inside tokamax).
+        from absl import flags
+        flags.FLAGS(sys.argv, known_only=True)
+
+        import torch  # noqa: F401
+
+        print(f"[JAX TPU ENTRY] Rank {dp_rank}: Starting on TPU with JAX backend", flush=True)
+
+        from vox_serve.scheduler import load_scheduler
+        from vox_serve.utils import get_logger, set_global_log_level
+
+        set_global_log_level(log_level)
+        logger = get_logger(__name__)
+
+        device = "tpu"
+
+        scheduler = load_scheduler(
+            scheduler_type=scheduler_type,
+            model_name_or_path=model_name,
+            device=device,
+            max_batch_size=max_batch_size,
+            max_num_pages=max_num_pages,
+            page_size=page_size,
+            request_socket_path=request_socket_path,
+            result_socket_path=result_socket_path,
+            top_p=top_p,
+            top_k=top_k,
+            min_p=min_p,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            repetition_penalty=repetition_penalty,
+            repetition_window=repetition_window,
+            cfg_scale=cfg_scale,
+            greedy=greedy,
+            enable_cuda_graph=False,
+            enable_disaggregation=False,
+            enable_nvtx=False,
+            enable_torch_compile=False,
+            async_scheduling=async_scheduling,
+            dp_rank=dp_rank,
+            dp_size=dp_size,
+            detokenize_interval=detokenize_interval,
+            tpu_backend="jax",
+        )
+        logger.info(f"Scheduler (DP rank {dp_rank}/{dp_size}) started on TPU (JAX) with model: {model_name}")
+        scheduler.run_forever()
+        return
 
     if device_type == "tpu":
         # TPU path: import torch_xla, no CUDA setup needed
@@ -204,6 +256,7 @@ def main():
     parser.add_argument("--async-scheduling", action="store_true")
     parser.add_argument("--detokenize-interval", type=int, default=None)
     parser.add_argument("--device-type", type=str, default="cuda", choices=["cuda", "tpu"])
+    parser.add_argument("--tpu-backend", type=str, default=None, choices=["pytorch_xla", "jax"])
 
     args = parser.parse_args()
 
@@ -234,6 +287,7 @@ def main():
         log_level=args.log_level,
         detokenize_interval=args.detokenize_interval,
         device_type=args.device_type,
+        tpu_backend=args.tpu_backend,
     )
 
 

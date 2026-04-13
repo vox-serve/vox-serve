@@ -189,6 +189,69 @@ class TokmaxPrefillWrapper:
         self._paged_kv_indices = paged_kv_indices
         self._paged_kv_last_page_len = paged_kv_last_page_len
 
+    def plan_compiled(
+        self,
+        qo_indptr: torch.Tensor,
+        paged_kv_indptr: torch.Tensor,
+        paged_kv_indices: torch.Tensor,
+        paged_kv_last_page_len: torch.Tensor,
+        total_tokens: int,
+        max_seq_len: int,
+        max_pages: int,
+        kv_len_budget: int,
+    ) -> None:
+        """Plan without .item() — safe inside torch_xla.compile.
+
+        All shape parameters are passed explicitly instead of derived from
+        tensor values at trace time.
+        """
+        self.qo_indptr = qo_indptr
+        n_req = qo_indptr.shape[0] - 1
+        self._n_req = n_req
+
+        starts = qo_indptr[:-1].to(torch.int32)
+        lens = (qo_indptr[1:] - qo_indptr[:-1]).to(torch.int32)
+        self._total_tokens = total_tokens
+
+        num_pages_per_req = (paged_kv_indptr[1:] - paged_kv_indptr[:-1]).to(torch.int32)
+        kv_lens = (num_pages_per_req - 1) * self.page_size + paged_kv_last_page_len
+
+        seg = torch.repeat_interleave(torch.arange(n_req, dtype=torch.int32, device=self.device), lens)
+        intra = torch.arange(total_tokens, dtype=torch.int32, device=self.device) - torch.repeat_interleave(
+            starts, lens
+        )
+
+        start_new = kv_lens[seg] - lens[seg]
+        g = start_new + intra
+
+        page_off = torch.div(g, self.page_size, rounding_mode="floor").to(torch.int32)
+        off_in_page = (g - page_off * self.page_size).to(torch.int32)
+        abs_page_ptr = paged_kv_indptr[:-1][seg] + page_off
+
+        self.token_to_page = paged_kv_indices[abs_page_ptr].to(self.device)
+        self.token_to_cache = off_in_page.to(self.device)
+
+        # Vectorised run() precomputation
+        self._max_seq_len = max_seq_len
+        self._max_kv_len = kv_len_budget
+        self._bucketed_max_pages = max_pages
+        self._seq_lens = lens
+        self._kv_lens = kv_lens
+
+        page_offsets = torch.arange(max_pages, device=self.device, dtype=torch.int32)
+        abs_indices = paged_kv_indptr[:-1].unsqueeze(1) + page_offsets.unsqueeze(0)
+        valid_mask = page_offsets.unsqueeze(0) < num_pages_per_req.unsqueeze(1)
+        abs_indices = abs_indices.clamp(max=paged_kv_indices.shape[0] - 1)
+        self._page_ids = torch.where(
+            valid_mask,
+            paged_kv_indices[abs_indices.long()],
+            torch.zeros(1, dtype=paged_kv_indices.dtype, device=self.device),
+        )
+
+        self._paged_kv_indptr = paged_kv_indptr
+        self._paged_kv_indices = paged_kv_indices
+        self._paged_kv_last_page_len = paged_kv_last_page_len
+
     # ---- set_kv_cache -------------------------------------------------------
 
     def set_kv_cache(self, kv_cache: TPUKVCacheLayer, k: torch.Tensor, v: torch.Tensor) -> None:
@@ -303,6 +366,10 @@ class TokmaxDecodeWrapper:
     ``plan()`` precomputes page-id and mask tensors with bucketed shapes.
     ``run()`` uses only these precomputed tensors — no ``.item()`` calls —
     so XLA reuses cached HLO programs across decode steps.
+
+    For XLA graph reuse, call ``allocate_buffers()`` once per batch-size
+    bucket during warmup. ``plan()`` will then write into those fixed
+    tensor objects via ``copy_()`` instead of creating new ones.
     """
 
     def __init__(
@@ -325,6 +392,24 @@ class TokmaxDecodeWrapper:
         self.kv_cache_locations: torch.Tensor | None = None
         self.batch_size: int = 0
 
+        # Pre-allocated output buffers keyed by (bs, bucketed_max_pages).
+        # When set, plan() writes into these via copy_() so XLA always
+        # sees the same tensor objects → guaranteed graph cache hit.
+        self._output_bufs: dict | None = None
+
+    def allocate_buffers(self, bs: int, max_pages_bucket: int) -> None:
+        """Pre-allocate plan output buffers for a specific batch-size bucket."""
+        if self._output_bufs is None:
+            self._output_bufs = {}
+        max_kv_len = max_pages_bucket * self.page_size
+        self._output_bufs[bs] = {
+            "kv_cache_locations": torch.zeros(bs, 2, dtype=torch.int32, device=self.device),
+            "page_ids": torch.zeros(bs, max_pages_bucket, dtype=torch.int32, device=self.device),
+            "attn_mask": torch.zeros(bs, max_kv_len, dtype=torch.bool, device=self.device),
+            "max_kv_len": max_kv_len,
+            "bucketed_max_pages": max_pages_bucket,
+        }
+
     # ---- plan ---------------------------------------------------------------
 
     def plan(
@@ -334,42 +419,72 @@ class TokmaxDecodeWrapper:
         paged_kv_last_page_len: torch.Tensor,
         dtype: torch.dtype = torch.bfloat16,
     ) -> None:
+        """Plan with dynamic bucketing (uses .item() — NOT safe inside torch_xla.compile)."""
         bs = paged_kv_indptr.shape[0] - 1
         self.batch_size = bs
 
-        # KV cache write locations (for set_kv_cache)
-        page_idx = paged_kv_indices[paged_kv_indptr[1:] - 1]
-        pos_idx = paged_kv_last_page_len - 1
-        self.kv_cache_locations = torch.stack([page_idx, pos_idx], dim=1).to(self.device)
-
-        # Precompute for vectorised run()
-        num_pages_per_req = (paged_kv_indptr[1:] - paged_kv_indptr[:-1])  # (bs,)
-        kv_lens = (num_pages_per_req - 1) * self.page_size + paged_kv_last_page_len
-
+        num_pages_per_req = paged_kv_indptr[1:] - paged_kv_indptr[:-1]
         raw_max_pages = int(num_pages_per_req.max().item()) if bs > 0 else 0
         bucketed_max_pages = _bucket_pages(raw_max_pages)
-        max_kv_len = bucketed_max_pages * self.page_size
 
-        # Build padded page-id tensor: (bs, bucketed_max_pages)
-        if bs > 0 and bucketed_max_pages > 0:
-            page_offsets = torch.arange(bucketed_max_pages, device=self.device, dtype=torch.int32)
-            abs_indices = paged_kv_indptr[:-1].unsqueeze(1) + page_offsets.unsqueeze(0)
-            valid_mask = page_offsets.unsqueeze(0) < num_pages_per_req.unsqueeze(1)
-            safe_max = max(paged_kv_indices.shape[0] - 1, 0)
-            abs_indices = abs_indices.clamp(max=safe_max)
-            self._page_ids = torch.where(
-                valid_mask,
-                paged_kv_indices[abs_indices.long()],
-                torch.zeros(1, dtype=paged_kv_indices.dtype, device=self.device),
-            )
-        else:
-            self._page_ids = torch.zeros(max(bs, 1), max(bucketed_max_pages, 1), dtype=torch.int32, device=self.device)
+        self.plan_compiled(paged_kv_indptr, paged_kv_indices, paged_kv_last_page_len, bucketed_max_pages)
 
-        self._max_kv_len = max_kv_len
+    def plan_compiled(
+        self,
+        paged_kv_indptr: torch.Tensor,
+        paged_kv_indices: torch.Tensor,
+        paged_kv_last_page_len: torch.Tensor,
+        max_pages: int,
+    ) -> None:
+        """Plan with fixed max_pages — no .item(), safe inside torch_xla.compile.
 
-        # Build attention mask: (bs, max_kv_len)
+        All outputs are written into pre-allocated buffers (if ``allocate_buffers``
+        was called) so the compiled graph always operates on the same tensor objects.
+        """
+        bs = paged_kv_indptr.shape[0] - 1
+        self.batch_size = bs
+
+        # KV cache write locations
+        page_idx = paged_kv_indices[paged_kv_indptr[1:] - 1]
+        pos_idx = paged_kv_last_page_len - 1
+        kv_locs = torch.stack([page_idx, pos_idx], dim=1)
+
+        # KV lengths
+        num_pages_per_req = paged_kv_indptr[1:] - paged_kv_indptr[:-1]
+        kv_lens = (num_pages_per_req - 1) * self.page_size + paged_kv_last_page_len
+
+        max_kv_len = max_pages * self.page_size
+
+        # Build page_ids: (bs, max_pages)
+        page_offsets = torch.arange(max_pages, device=self.device, dtype=torch.int32)
+        abs_indices = paged_kv_indptr[:-1].unsqueeze(1) + page_offsets.unsqueeze(0)
+        valid_mask = page_offsets.unsqueeze(0) < num_pages_per_req.unsqueeze(1)
+        abs_indices = abs_indices.clamp(max=paged_kv_indices.shape[0] - 1)
+        page_ids = torch.where(
+            valid_mask,
+            paged_kv_indices[abs_indices.long()],
+            torch.zeros(1, dtype=paged_kv_indices.dtype, device=self.device),
+        )
+
+        # Build attn_mask: (bs, max_kv_len)
         pos_range = torch.arange(max_kv_len, device=self.device, dtype=torch.int32)
-        self._attn_mask = pos_range.unsqueeze(0) < kv_lens.unsqueeze(1)  # (bs, max_kv_len)
+        attn_mask = pos_range.unsqueeze(0) < kv_lens.unsqueeze(1)
+
+        # Write into pre-allocated buffers if available
+        buf = self._output_bufs.get(bs) if self._output_bufs else None
+        if buf is not None and buf["bucketed_max_pages"] >= max_pages:
+            buf["kv_cache_locations"].copy_(kv_locs)
+            buf["page_ids"][:, :max_pages].copy_(page_ids)
+            buf["attn_mask"][:, :max_kv_len].copy_(attn_mask)
+            self.kv_cache_locations = buf["kv_cache_locations"]
+            self._page_ids = buf["page_ids"]
+            self._attn_mask = buf["attn_mask"]
+            self._max_kv_len = buf["max_kv_len"]
+        else:
+            self.kv_cache_locations = kv_locs.to(self.device)
+            self._page_ids = page_ids
+            self._attn_mask = attn_mask
+            self._max_kv_len = max_kv_len
 
     # ---- set_kv_cache -------------------------------------------------------
 

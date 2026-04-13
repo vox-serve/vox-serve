@@ -39,6 +39,7 @@ class Scheduler:
         dp_rank: int = 0,
         dp_size: int = 1,
         detokenize_interval: int = None,
+        tpu_backend: str = None,
     ):
         self.device = device
         self.max_batch_size = max_batch_size
@@ -79,11 +80,20 @@ class Scheduler:
             "dp_rank": dp_rank,
             "dp_size": dp_size,
             "detokenize_interval": detokenize_interval,
+            "tpu_backend": tpu_backend,
         }
 
         # Worker selection
         is_tpu = str(device) == "tpu" or str(device).startswith("xla")
-        if is_tpu:
+        tpu_backend = worker_kwargs.pop("tpu_backend", None)
+        if is_tpu and tpu_backend == "jax":
+            from ..worker import JaxTPUWorker
+
+            if JaxTPUWorker is None:
+                raise ImportError("JaxTPUWorker requires jax[tpu]. Install it first.")
+            self.logger.info("Using JaxTPUWorker for TPU execution (JAX backend)")
+            self.model_worker = JaxTPUWorker(**worker_kwargs)
+        elif is_tpu:
             from ..worker import TPUWorker
 
             if TPUWorker is None:
