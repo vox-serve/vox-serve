@@ -418,6 +418,30 @@ class BaseLMWithDepth(BaseLM):
         assert self.has_depth_transformer, "This model does not support depth transformer."
         pass
 
+    def depth_forward_unrolled(
+        self,
+        hidden_states: torch.Tensor,
+        position_ids: torch.Tensor,
+        kv_cache: torch.Tensor,
+        cache_pos: int,
+        **kwargs,
+    ) -> torch.Tensor:
+        """Forward pass through the depth transformer using SDPA (for unrolled CUDA graph).
+
+        Uses torch.nn.functional.scaled_dot_product_attention with a dense KV cache
+        instead of FlashInfer, avoiding workspace buffer conflicts in multi-step graphs.
+
+        Args:
+            hidden_states: (bs, seq_len, hidden_size) batched input embeddings
+            position_ids: (bs, seq_len) position IDs
+            kv_cache: (n_layers, bs, 2, max_seq_len, n_kv_heads, head_dim) dense KV cache
+            cache_pos: write position in the cache
+
+        Returns:
+            Output logits tensor. Shape: (bs, seq_len, vocab_size)
+        """
+        raise NotImplementedError("depth_forward_unrolled not implemented for this model")
+
     @abstractmethod
     def depth_sampling(
         self,
@@ -445,3 +469,47 @@ class BaseLMWithDepth(BaseLM):
             input feature for the next iteration. Shape: (batch_size, hidden_size)
         """
         pass
+
+    @abstractmethod
+    def depth_sampling_gpu(
+        self,
+        logits: torch.Tensor,
+        i_iteration: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        GPU-only depth sampling for CUDA graph capture.
+        Performs sampling and embedding lookup without CPU-side request updates.
+
+        Args:
+            logits: Output logits from depth transformer. Shape: (batch_size, depth_vocab_size)
+            i_iteration: Current codebook iteration (1 to depth_n_codebooks-1)
+
+        Returns:
+            sampled token IDs. Shape: (batch_size,)
+            embeddings for next iteration. Shape: (batch_size, hidden_size)
+        """
+        pass
+
+    def depth_update_requests(
+        self,
+        all_output_ids: torch.Tensor,
+        requests: List[Request],
+        embed_accum: Optional[torch.Tensor] = None,
+    ) -> None:
+        """
+        CPU-only request state update after all depth iterations complete.
+        Called after unrolled depth CUDA graph replay.
+
+        Args:
+            all_output_ids: All sampled token IDs. Shape: (batch_size, depth_n_codebooks)
+            requests: List of Request objects to update
+            embed_accum: Accumulated embeddings across depth iterations.
+                Shape: (batch_size, hidden_size). Only used by models that accumulate
+                depth embeddings (e.g. qwen3-tts).
+        """
+        for i in range(1, self.depth_n_codebooks):
+            for j, req in enumerate(requests):
+                token_id = int(all_output_ids[j, i].item())
+                req.lm_output_tokens[-1][0, i] = token_id
+                if not req.done_lm_generation:
+                    req.lm_output_audio_tokens[-1][0, i] = token_id

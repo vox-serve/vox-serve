@@ -29,6 +29,7 @@ class ModelWorker:
         greedy: bool = False,
         enable_nvtx: bool = False,
         enable_torch_compile: bool = False,
+        unroll_depth_cuda_graph: bool = False,
         detokenizer_device: Optional[str] = None,
         dp_rank: int = 0,
         dp_size: int = 1,
@@ -54,6 +55,7 @@ class ModelWorker:
         self.device = "cuda:0"
         self.detokenizer_device = detokenizer_device or self.device
         self.max_batch_size = max_batch_size
+        self.unroll_depth_cuda_graph = unroll_depth_cuda_graph
         self.dp_rank = dp_rank
         self.dp_size = dp_size
 
@@ -62,7 +64,8 @@ class ModelWorker:
         if dp_size > 1:
             # Use LoggerAdapter to add rank prefix
             import logging
-            self.logger = logging.LoggerAdapter(base_logger, {'dp_rank': dp_rank})
+
+            self.logger = logging.LoggerAdapter(base_logger, {"dp_rank": dp_rank})
             # Override the process method to add rank prefix
             self.logger.process = lambda msg, kwargs: (f"[DP {dp_rank}/{dp_size}] {msg}", kwargs)
         else:
@@ -384,13 +387,13 @@ class ModelWorker:
             if req.text_complete and not req.eos_injected:
                 # Text input is complete and queue is drained - inject EOS token ONCE
                 # This signals to the model that all text has been received
-                if hasattr(self.model, 'config') and hasattr(self.model.config, 'tts_eos_token_id'):
+                if hasattr(self.model, "config") and hasattr(self.model.config, "tts_eos_token_id"):
                     req.input_tokens[0, -1] = self.model.config.tts_eos_token_id
                     req.eos_injected = True
-                elif hasattr(self.model, 'config') and hasattr(self.model.config, 'tts_pad_token_id'):
+                elif hasattr(self.model, "config") and hasattr(self.model.config, "tts_pad_token_id"):
                     req.input_tokens[0, -1] = self.model.config.tts_pad_token_id
             # Either waiting for more text, or EOS already injected - use pad token
-            elif hasattr(self.model, 'config') and hasattr(self.model.config, 'tts_pad_token_id'):
+            elif hasattr(self.model, "config") and hasattr(self.model.config, "tts_pad_token_id"):
                 req.input_tokens[0, -1] = self.model.config.tts_pad_token_id
 
     def run_lm_prefill(self, requests: List[Request], lm_inputs: LMInputs) -> Optional[Coroutine]:
@@ -661,11 +664,7 @@ class ModelWorker:
             last_chunk_len = len(req.lm_output_audio_tokens[decode_idx : decode_idx + self.detokenize_interval])
             if last_chunk_len < self.detokenize_interval:
                 # remove the padded audio
-                trim_len = int(
-                    audio_int16.shape[1]
-                    * (last_chunk_len - 0.5)
-                    / self.detokenize_interval
-                )
+                trim_len = int(audio_int16.shape[1] * (last_chunk_len - 0.5) / self.detokenize_interval)
                 audio_int16 = audio_int16[:, :trim_len]
 
             audio_bytes = audio_int16.tobytes()

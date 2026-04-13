@@ -1,6 +1,7 @@
-from typing import Any, List, Tuple
+from typing import Any, List, Optional, Tuple
 
 import torch
+import torch.nn.functional as F
 import torchaudio
 from huggingface_hub import hf_hub_download
 from tokenizers.processors import TemplateProcessing
@@ -310,6 +311,95 @@ class CsmForConditionalGeneration(CsmPreTrainedModel):
 
         logits = self.depth_decoder.codebooks_head(outputs, cache_position=position_ids)
         return logits
+
+    def forward_depth_unrolled(
+        self,
+        inputs_embeds: torch.Tensor,
+        position_ids: torch.LongTensor,
+        kv_cache: torch.Tensor,
+        cache_pos: int,
+    ):
+        """Depth forward using torch SDPA instead of FlashInfer.
+
+        Args:
+            inputs_embeds: (bs, seq_len, hidden_size) batched input embeddings
+            position_ids: (bs, seq_len) position IDs
+            kv_cache: (n_layers, bs, 2, max_seq_len, n_kv_heads, head_dim) dense KV cache
+            cache_pos: write position in the cache
+        """
+        dd = self.depth_decoder
+        hidden_states = dd.model.inputs_embeds_projector(inputs_embeds)
+        bs, seq_len, _ = hidden_states.shape
+
+        n_kv_heads = dd.model.layers[0].self_attn.config.num_key_value_heads
+        n_q_heads = dd.model.layers[0].self_attn.config.num_attention_heads
+        head_dim = dd.model.layers[0].self_attn.head_dim
+        n_groups = n_q_heads // n_kv_heads
+
+        flat_pos = position_ids.reshape(-1)
+
+        for layer_idx, layer in enumerate(dd.model.layers):
+            attn = layer.self_attn
+            residual = hidden_states
+            hidden_states = layer.input_layernorm(hidden_states.view(-1, hidden_states.shape[-1])).view(bs, seq_len, -1)
+
+            total_tokens = bs * seq_len
+            q = attn.q_proj(hidden_states).view(total_tokens, n_q_heads, head_dim)
+            k = attn.k_proj(hidden_states).view(total_tokens, n_kv_heads, head_dim)
+            v = attn.v_proj(hidden_states).view(total_tokens, n_kv_heads, head_dim)
+
+            q, k = apply_rope_pos_ids(
+                q, k, flat_pos,
+                rope_scale=attn.rope_scale, rope_theta=attn.rope_theta,
+                low_freq_factor=attn.low_freq_factor, high_freq_factor=attn.high_freq_factor,
+                old_context_len=attn.old_context_len,
+            )
+
+            q = q.view(bs, seq_len, n_q_heads, head_dim)
+            k = k.view(bs, seq_len, n_kv_heads, head_dim)
+            v = v.view(bs, seq_len, n_kv_heads, head_dim)
+
+            kv_cache[layer_idx, :bs, 0, cache_pos:cache_pos + seq_len] = k
+            kv_cache[layer_idx, :bs, 1, cache_pos:cache_pos + seq_len] = v
+
+            valid_len = cache_pos + seq_len
+            k_full = kv_cache[layer_idx, :bs, 0, :valid_len]
+            v_full = kv_cache[layer_idx, :bs, 1, :valid_len]
+
+            q_sdpa = q.transpose(1, 2)
+            k_sdpa = k_full.transpose(1, 2)
+            v_sdpa = v_full.transpose(1, 2)
+            if n_groups > 1:
+                k_sdpa = k_sdpa.repeat_interleave(n_groups, dim=1)
+                v_sdpa = v_sdpa.repeat_interleave(n_groups, dim=1)
+
+            attn_out = F.scaled_dot_product_attention(q_sdpa, k_sdpa, v_sdpa, is_causal=(seq_len > 1))
+            attn_out = attn_out.transpose(1, 2).reshape(bs, seq_len, -1).contiguous()
+            hidden_states = residual + attn.o_proj(attn_out)
+
+            residual = hidden_states
+            hs_flat = hidden_states.view(-1, hidden_states.shape[-1])
+            hidden_states = layer.post_attention_layernorm(hs_flat).view(bs, seq_len, -1)
+            hidden_states = layer.mlp(hidden_states)
+            hidden_states = residual + hidden_states
+
+        hidden_states = dd.model.norm(hidden_states.view(-1, hidden_states.shape[-1])).view(bs, seq_len, -1)
+
+        # codebooks_head: position-dependent head selection
+        codebook_idxs = position_ids[:, -1:] - 1  # (bs, 1)
+        codebook_weight = dd.codebooks_head.weight[codebook_idxs.squeeze(-1)]  # (bs, hidden, vocab)
+        # For seq_len>1 (prefill), take last token
+        last_hidden = hidden_states[:, -1:, :]  # (bs, 1, hidden)
+        logits = torch.bmm(last_hidden, codebook_weight).squeeze(1)  # (bs, vocab)
+
+        if seq_len == 1:
+            return logits.unsqueeze(1)  # (bs, 1, vocab)
+        else:
+            # Return full logits but only last token matters
+            full_logits = torch.zeros(bs, seq_len, codebook_weight.shape[-1],
+                                      dtype=hidden_states.dtype, device=hidden_states.device)
+            full_logits[:, -1, :] = logits
+            return full_logits
 
 
 class CSMModel(BaseLMWithDepth):
@@ -746,6 +836,21 @@ class CSMModel(BaseLMWithDepth):
 
         return depth_logits
 
+    def depth_forward_unrolled(
+        self,
+        hidden_states: torch.Tensor,
+        position_ids: torch.Tensor,
+        kv_cache: torch.Tensor,
+        cache_pos: int,
+        **kwargs,
+    ) -> torch.Tensor:
+        return self.model.forward_depth_unrolled(
+            inputs_embeds=hidden_states,
+            position_ids=position_ids,
+            kv_cache=kv_cache,
+            cache_pos=cache_pos,
+        )
+
     def depth_sampling(
         self,
         logits: torch.Tensor,
@@ -768,6 +873,28 @@ class CSMModel(BaseLMWithDepth):
             req.lm_output_audio_tokens[-1][0, i_iteration] = token_id
 
         return output_ids, ci_embed
+
+    def depth_sampling_gpu(
+        self,
+        logits: torch.Tensor,
+        i_iteration: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        output_ids = Sampler.run_sampling(logits, config=self.default_sampling_config)
+        ci_embed = self.embed_audio_tokens_single(output_ids, i_iteration)
+        return output_ids, ci_embed
+
+    def depth_update_requests(
+        self,
+        all_output_ids: torch.Tensor,
+        requests: List[Request],
+        embed_accum: Optional[torch.Tensor] = None,
+    ) -> None:
+        for i in range(1, self.depth_n_codebooks):
+            for j, req in enumerate(requests):
+                token_id = int(all_output_ids[j, i].item())
+                req.input_tokens[0, i] = token_id
+                req.lm_output_tokens[-1][0, i] = token_id
+                req.lm_output_audio_tokens[-1][0, i] = token_id
 
     def postprocess(self, token_ids: torch.Tensor) -> torch.Tensor:
         # token_ids: (batch_size, interval, 33)
