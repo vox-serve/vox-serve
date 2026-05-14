@@ -522,34 +522,16 @@ class VoxtralTTSModel(BaseLM):
     def _load_tokenizer(self, model_name: str):
         """Load the Mistral tokenizer (tekken.json) via mistral-common.
 
-        The Voxtral-TTS ``tekken.json`` carries a ``voice_num_audio_tokens`` key
-        inside its ``audio`` block that ``mistral_common==1.8.6``'s ``AudioConfig``
-        does not understand. We capture that mapping for ``preprocess`` (it tells
-        how many ``audio_token_id`` placeholders to insert per voice), strip it,
-        and load the tokenizer from a sanitized copy.
+        mistral-common >= 1.11 parses the Voxtral-TTS ``tekken.json`` natively
+        (including the ``voice_num_audio_tokens`` audio-block field) and exposes
+        ``encode_speech_request``, which produces the authoritative TTS prompt
+        token layout used by ``preprocess``.
         """
-        import json  # noqa: PLC0415
-        import tempfile  # noqa: PLC0415
-
         from huggingface_hub import hf_hub_download  # noqa: PLC0415
         from mistral_common.tokens.tokenizers.mistral import MistralTokenizer  # noqa: PLC0415
 
         tekken_path = hf_hub_download(repo_id=model_name, filename="tekken.json")
-        with open(tekken_path) as f:
-            tekken = json.load(f)
-
-        self.voice_num_audio_tokens: dict[str, int] = {}
-        audio_block = tekken.get("audio")
-        if isinstance(audio_block, dict) and "voice_num_audio_tokens" in audio_block:
-            self.voice_num_audio_tokens = dict(audio_block.pop("voice_num_audio_tokens"))
-
-        # ``MistralTokenizer.from_file`` sniffs the *filename* for "tekken", so the
-        # sanitized copy must keep that name.
-        sanitized_dir = tempfile.mkdtemp(prefix="voxtral_tekken_")
-        sanitized_path = f"{sanitized_dir}/tekken.json"
-        with open(sanitized_path, "w") as tf:
-            json.dump(tekken, tf)
-        return MistralTokenizer.from_file(sanitized_path)
+        return MistralTokenizer.from_file(tekken_path)
 
     def _load_voice_registry(self, model_name: str) -> None:
         """Download the 20 voice-embedding presets into ``self.voice_to_embedding``."""
@@ -712,28 +694,17 @@ class VoxtralTTSModel(BaseLM):
         voice_emb = voice_emb.to(self.device, dtype=self.dtype)
         if voice_emb.dim() == 1:
             voice_emb = voice_emb.unsqueeze(0)  # (1, hidden)
-        num_audio_tokens = voice_emb.shape[0]
 
-        # mistral-common tokenization -> flat list of text token ids (no BOS;
-        # we prepend <s> ourselves as part of the TTS prompt layout).
-        text_ids = list(
-            self.text_tokenizer.instruct_tokenizer.tokenizer.encode(prompt, bos=False, eos=False)
-        )
+        # Authoritative TTS prompt layout via mistral-common's encode_speech_request
+        # (matches vllm-omni's examples/.../voxtral_tts/end2end.py). Produces:
+        #   [BOS] [BEGIN_AUDIO] [AUDIO]*N [NEXT_AUDIO_TEXT] <text> [REPEAT_AUDIO_TEXT] [BEGIN_AUDIO]
+        # where N == voice_num_audio_tokens for the chosen voice (== voice_emb.shape[0]).
+        from mistral_common.protocol.speech.request import SpeechRequest  # noqa: PLC0415
 
-        # Voxtral-TTS prompt layout (mirrors vllm-omni's dummy builder):
-        #   <s> [BEGIN_AUDIO] [AUDIO]*N [REPEAT_AUDIO_TEXT] <text> [NEXT_AUDIO_TEXT] [BEGIN_AUDIO]
-        # The run of N [AUDIO] placeholders carries the voice reference; the
-        # trailing [BEGIN_AUDIO] triggers audio generation.
-        bos_token_id = 1
-        repeat_audio_text_id = 35
-        next_audio_text_id = 36
-        token_ids = (
-            [bos_token_id, self.begin_audio_token_id]
-            + [self.audio_token_id] * num_audio_tokens
-            + [repeat_audio_text_id]
-            + text_ids
-            + [next_audio_text_id, self.begin_audio_token_id]
+        tokenized = self.text_tokenizer.instruct_tokenizer.encode_speech_request(
+            SpeechRequest(input=prompt, voice=voice_name)
         )
+        token_ids = list(tokenized.tokens)
 
         input_ids = torch.tensor(token_ids, dtype=torch.int32, device=self.device).view(-1, 1)
         seq_len = input_ids.shape[0]
