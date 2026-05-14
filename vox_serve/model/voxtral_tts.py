@@ -486,29 +486,70 @@ class VoxtralTTSModel(BaseLM):
         acoustic_args["acoustic_transformer_args"].setdefault("n_decoding_steps", 7)
 
         acoustic_transformer = flow_cls(acoustic_args)
-        audio_tokenizer = tokenizer_cls(audio_tokenizer_args)
+        # VoxtralTTSAudioTokenizer expects a config dict with ``codec_args`` +
+        # ``audio_model_args`` sub-dicts and the backbone hidden size.
+        audio_tokenizer = tokenizer_cls(
+            {
+                "codec_args": audio_tokenizer_args,
+                "audio_model_args": acoustic_args,
+            },
+            text_hidden_size=self.config.hidden_size,
+        )
 
-        # Weight load: split the flat checkpoint by prefix. P1's modules expose
-        # ``load_weight((name, tensor))`` per the vllm-omni convention.
+        # Weight load: split the flat checkpoint by prefix into per-module state
+        # dicts, then load each module from its subset.
         ckpt_path = hf_hub_download(repo_id=model_name, filename="consolidated.safetensors")
         full_state = load_file(ckpt_path, device="cpu")
+        acoustic_state: dict[str, torch.Tensor] = {}
+        tokenizer_state: dict[str, torch.Tensor] = {}
         for name, weight in full_state.items():
             if name.startswith("acoustic_transformer."):
-                acoustic_transformer.load_weight((name[len("acoustic_transformer.") :], weight))
+                acoustic_state[name[len("acoustic_transformer.") :]] = weight
             elif name.startswith("audio_tokenizer."):
-                audio_tokenizer.load_weight((name[len("audio_tokenizer.") :], weight))
+                tokenizer_state[name[len("audio_tokenizer.") :]] = weight
+
+        a_missing, a_unexpected = acoustic_transformer.load_state_dict(acoustic_state, strict=False)
+        if a_missing:
+            self.logger.warning("acoustic_transformer missing keys: %s", a_missing)
+        if a_unexpected:
+            self.logger.warning("acoustic_transformer unexpected keys: %s", a_unexpected)
+        audio_tokenizer.load_weights(tokenizer_state, strict=False)
 
         acoustic_transformer = acoustic_transformer.to(self.dtype).to(self.device)
         audio_tokenizer = audio_tokenizer.to(self.dtype).to(self.audio_decoder_device)
         return acoustic_transformer, audio_tokenizer
 
     def _load_tokenizer(self, model_name: str):
-        """Load the Mistral tokenizer (tekken.json) via mistral-common."""
+        """Load the Mistral tokenizer (tekken.json) via mistral-common.
+
+        The Voxtral-TTS ``tekken.json`` carries a ``voice_num_audio_tokens`` key
+        inside its ``audio`` block that ``mistral_common==1.8.6``'s ``AudioConfig``
+        does not understand. We capture that mapping for ``preprocess`` (it tells
+        how many ``audio_token_id`` placeholders to insert per voice), strip it,
+        and load the tokenizer from a sanitized copy.
+        """
+        import json  # noqa: PLC0415
+        import tempfile  # noqa: PLC0415
+
         from huggingface_hub import hf_hub_download  # noqa: PLC0415
         from mistral_common.tokens.tokenizers.mistral import MistralTokenizer  # noqa: PLC0415
 
         tekken_path = hf_hub_download(repo_id=model_name, filename="tekken.json")
-        return MistralTokenizer.from_file(tekken_path)
+        with open(tekken_path) as f:
+            tekken = json.load(f)
+
+        self.voice_num_audio_tokens: dict[str, int] = {}
+        audio_block = tekken.get("audio")
+        if isinstance(audio_block, dict) and "voice_num_audio_tokens" in audio_block:
+            self.voice_num_audio_tokens = dict(audio_block.pop("voice_num_audio_tokens"))
+
+        # ``MistralTokenizer.from_file`` sniffs the *filename* for "tekken", so the
+        # sanitized copy must keep that name.
+        sanitized_dir = tempfile.mkdtemp(prefix="voxtral_tekken_")
+        sanitized_path = f"{sanitized_dir}/tekken.json"
+        with open(sanitized_path, "w") as tf:
+            json.dump(tekken, tf)
+        return MistralTokenizer.from_file(sanitized_path)
 
     def _load_voice_registry(self, model_name: str) -> None:
         """Download the 20 voice-embedding presets into ``self.voice_to_embedding``."""
@@ -544,7 +585,20 @@ class VoxtralTTSModel(BaseLM):
 
     @property
     def hidden_size(self) -> int:
-        return self._hidden_size
+        # NOTE: Voxtral's attention uses an explicit head_dim of 128, so the
+        # per-head qkv dimension (num_attention_heads * head_dim = 32 * 128 =
+        # 4096) does NOT equal the residual-stream width (config.hidden_size =
+        # 3072). The worker derives the FlashInfer head_dim and the KV-cache
+        # head_dim from this property as ``hidden_size // num_attention_heads``,
+        # so it must report the attention qkv dimension (4096) here, not 3072.
+        # All model-internal modules use ``self.config.hidden_size`` (3072)
+        # directly and are unaffected.
+        return self._num_attention_heads * self.config.head_dim
+
+    @property
+    def head_dim(self) -> int:
+        # Explicit head_dim from params.json (128), not hidden_size // n_heads.
+        return self.config.head_dim
 
     @property
     def has_inline_audio_head(self) -> bool:
@@ -613,8 +667,12 @@ class VoxtralTTSModel(BaseLM):
         """
         return len(token_ids) > 0 and token_ids[0] == _END_AUDIO_TOKEN_ID
 
-    def _resolve_voice(self, kwargs: dict) -> torch.Tensor:
-        """Resolve the voice embedding from request kwargs, with a logged fallback."""
+    def _resolve_voice(self, kwargs: dict) -> tuple[str, torch.Tensor]:
+        """Resolve the voice name + embedding from request kwargs, with a logged fallback.
+
+        Returns ``(voice_name, embedding)`` where ``embedding`` is the per-position
+        speaker reference sequence shaped ``(num_audio_tokens, hidden_size)``.
+        """
         voice = kwargs.get("voice", None)
         if isinstance(voice, list) and voice:
             voice = voice[0]
@@ -629,7 +687,7 @@ class VoxtralTTSModel(BaseLM):
             else:
                 self.logger.warning("Voxtral no voice specified; falling back to %r", fallback)
             voice = fallback
-        return self.voice_to_embedding[voice].to(self.device).clone().detach()
+        return voice, self.voice_to_embedding[voice].to(self.device).clone().detach()
 
     @torch.no_grad()
     def preprocess(
@@ -648,31 +706,44 @@ class VoxtralTTSModel(BaseLM):
         assert audio_path is None, "audio_path is not supported yet for this model"
         assert prompt is not None, "prompt is required for VoxtralTTSModel"
 
-        # mistral-common tokenization -> flat list of text token ids
-        tokenized = self.text_tokenizer.encode(prompt) if hasattr(self.text_tokenizer, "encode") else None
-        if tokenized is None:
-            # MistralTokenizer instances expose token ids through ``__call__``/encode;
-            # fall back to the instruct tokenizer's text encoder.
-            tokenized = self.text_tokenizer.instruct_tokenizer.tokenizer.encode(
-                prompt, bos=True, eos=False
-            )
-        token_ids = list(tokenized)
+        # Resolve the voice: name + per-position speaker reference sequence
+        # shaped (num_audio_tokens, hidden_size).
+        voice_name, voice_emb = self._resolve_voice(kwargs)
+        voice_emb = voice_emb.to(self.device, dtype=self.dtype)
+        if voice_emb.dim() == 1:
+            voice_emb = voice_emb.unsqueeze(0)  # (1, hidden)
+        num_audio_tokens = voice_emb.shape[0]
+
+        # mistral-common tokenization -> flat list of text token ids (no BOS;
+        # we prepend <s> ourselves as part of the TTS prompt layout).
+        text_ids = list(
+            self.text_tokenizer.instruct_tokenizer.tokenizer.encode(prompt, bos=False, eos=False)
+        )
+
+        # Voxtral-TTS prompt layout (mirrors vllm-omni's dummy builder):
+        #   <s> [BEGIN_AUDIO] [AUDIO]*N [REPEAT_AUDIO_TEXT] <text> [NEXT_AUDIO_TEXT] [BEGIN_AUDIO]
+        # The run of N [AUDIO] placeholders carries the voice reference; the
+        # trailing [BEGIN_AUDIO] triggers audio generation.
+        bos_token_id = 1
+        repeat_audio_text_id = 35
+        next_audio_text_id = 36
+        token_ids = (
+            [bos_token_id, self.begin_audio_token_id]
+            + [self.audio_token_id] * num_audio_tokens
+            + [repeat_audio_text_id]
+            + text_ids
+            + [next_audio_text_id, self.begin_audio_token_id]
+        )
 
         input_ids = torch.tensor(token_ids, dtype=torch.int32, device=self.device).view(-1, 1)
         seq_len = input_ids.shape[0]
 
-        # voice embedding to scatter
-        voice_emb = self._resolve_voice(kwargs).to(self.device, dtype=self.dtype)
-        if voice_emb.dim() == 2:
-            # (1, hidden) or (hidden,) -> (hidden,)
-            voice_emb = voice_emb.reshape(-1)
-        voice_emb = voice_emb[: self.hidden_size]
-
-        # input_features: voice embedding broadcast into audio-token positions
-        input_features = torch.zeros(seq_len, self.hidden_size, device=self.device, dtype=self.dtype)
+        # input_features: voice reference scattered onto [AUDIO]-token positions
+        # (one row per placeholder, in order).
+        input_features = torch.zeros(seq_len, self.config.hidden_size, device=self.device, dtype=self.dtype)
         audio_mask_1d = input_ids[:, 0] == self.audio_token_id  # (seq_len,)
         if audio_mask_1d.any():
-            input_features[audio_mask_1d] = voice_emb
+            input_features[audio_mask_1d] = voice_emb[: int(audio_mask_1d.sum())]
 
         # input_masks: 1 where the backbone should use input_features (audio slots)
         input_masks = torch.zeros(seq_len, self.n_codebooks, device=self.device, dtype=torch.bool)
@@ -845,7 +916,23 @@ class VoxtralTTSModel(BaseLM):
         context samples are trimmed. The ring buffer is updated in place
         (graph-safe) from the last 25 frames of this chunk.
         """
-        assert decoder_cache is not None, "VoxtralTTSModel.postprocess requires a decoder_cache"
+        from ..tokenizer.voxtral_tts import VoxtralTTSDecoderCache  # noqa: PLC0415
+
+        # The eager ``ModelWorker.run_detokenize`` path calls ``postprocess`` without
+        # threading the per-request ``decoder_cache``. Fall back to a model-side
+        # ring buffer keyed by batch size (correct for the batch-1 eager path).
+        if decoder_cache is None:
+            batch = token_ids.shape[0]
+            if getattr(self, "_fallback_decoder_cache", None) is None or (
+                self._fallback_decoder_cache.left_ctx.shape[0] != batch
+            ):
+                self._fallback_decoder_cache = VoxtralTTSDecoderCache(
+                    left_ctx=torch.zeros(
+                        batch, 25, self.n_codebooks,
+                        device=self.audio_decoder_device, dtype=torch.int64,
+                    )
+                )
+            decoder_cache = self._fallback_decoder_cache
 
         token_ids = token_ids.to(decoder_cache.left_ctx.device, dtype=decoder_cache.left_ctx.dtype)
 
@@ -853,22 +940,22 @@ class VoxtralTTSModel(BaseLM):
         full = torch.cat([decoder_cache.left_ctx, token_ids], dim=1)
 
         # audio tokenizer wants (B, n_codebooks, T)
-        audio = self.audio_tokenizer.decode(full.transpose(1, 2))
+        audio = self.audio_tokenizer.decode(full.transpose(1, 2), dtype=self.dtype)
 
         # trim leading context samples
         trim = 25 * self.downsample_factor  # 48000
         audio = audio[..., trim:]
 
         # update the ring buffer in place from the last 25 frames (graph-safe)
-        from ..tokenizer.voxtral_tts import VoxtralTTSDecoderCache  # noqa: PLC0415
-
         new_cache = VoxtralTTSDecoderCache(left_ctx=full[:, -25:, :].contiguous())
         decoder_cache.copy_from(new_cache)
 
         # audio is (B, 1, T) from the mono tokenizer; ensure channel dim present
         if audio.dim() == 2:
             audio = audio[:, None, :]
-        return audio
+        # decode runs in bf16 to match conv weights; the worker consumes the
+        # waveform via .numpy(), which requires fp32.
+        return audio.float()
 
     # ------------------------------------------------------------------
     # Phase-4 acoustic CUDA graph hook
@@ -888,7 +975,7 @@ class VoxtralTTSModel(BaseLM):
             capture_sizes=list(capture_sizes),
             device=torch.device(self.device),
             dtype=self.dtype,
-            hidden_dim=self.hidden_size,
+            hidden_dim=self.config.hidden_size,
         )
 
 
