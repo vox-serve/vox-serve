@@ -1019,7 +1019,7 @@ class CudaGraphWorker(ModelWorker):
             for _ in range(padding_size):
                 qo_indptr.append(qo_indptr[-1])
                 paged_kv_indptr.append(paged_kv_indptr[-1] + 1)
-                # paged_kv_indices.append(tmp_page)
+                paged_kv_indices.append(tmp_page)
                 paged_kv_last_page_len.append(1)
 
         # Plan attention wrapper
