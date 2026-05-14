@@ -58,6 +58,7 @@ dependencies = [
     "inflect>=7.4.0",
     "requests>=2.32.0",
     "PyYAML>=6.0.2",
+    "mistral-common==1.8.6",
 ]
 
 [project.urls]
