@@ -430,6 +430,17 @@ class VoxtralTTSModel(BaseLM):
             model_name, FlowMatchingAudioTransformer, VoxtralTTSAudioTokenizer
         )
 
+        # Per-codebook base offsets into the shared ``audio_codebook_embeddings``
+        # table, used to embed a previously-generated 37-codebook audio frame
+        # during decode. Mirrors vllm-omni's ``MultiVocabEmbeddings.offsets``
+        # (``cumsum([0] + codebook_sizes[:-1])`` over the special-token-inclusive,
+        # unpadded codebook sizes). The audio tokenizer's ``audio_token_embedding``
+        # already computed these from the same ``audio_model_args``; reuse them so
+        # the offsets cannot drift from the embedding table layout.
+        self._audio_codebook_offsets = (
+            self.audio_tokenizer.audio_token_embedding.offsets.to(self.device).long()
+        )  # (n_codebooks,)
+
         # ----- tokenizer (mistral-common, tekken.json) -----
         self.text_tokenizer = self._load_tokenizer(model_name)
 
@@ -738,6 +749,27 @@ class VoxtralTTSModel(BaseLM):
             decoder_cache=decoder_cache,
         )
 
+    def _embed_audio_frame(self, input_ids: torch.Tensor) -> torch.Tensor:
+        """Embed a previously-generated 37-codebook audio frame.
+
+        Mirrors vllm-omni's ``VoxtralTTSAudioTokenizer.encode_tokens`` /
+        ``MultiVocabEmbeddings``: each codebook is shifted by its per-codebook
+        base offset into the shared ``audio_codebook_embeddings`` table, looked
+        up, and the 37 per-codebook embeddings are summed
+        (``input_embedding_concat_type == "sum"``).
+
+        ``input_ids`` is ``(B, n_codebooks)`` -- 1 semantic + 36 acoustic codes,
+        each already in the special-token-inclusive codebook range emitted by the
+        acoustic head. Returns ``(B, hidden_size)``.
+        """
+        offsets = self._audio_codebook_offsets.to(input_ids.device)  # (n_codebooks,)
+        shifted = input_ids.long() + offsets[None, :]  # (B, n_codebooks)
+        table_size = self.model.audio_codebook_embeddings.weight.shape[0]
+        shifted = shifted.clamp(0, table_size - 1)
+        # (B, n_codebooks, hidden_size) -> sum over codebooks -> (B, hidden_size)
+        per_codebook = self.model.audio_codebook_embeddings(shifted)
+        return per_codebook.sum(dim=1)
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -748,19 +780,37 @@ class VoxtralTTSModel(BaseLM):
         input_features: torch.Tensor,
         **kwargs: Any,
     ) -> torch.Tensor:
-        """Embed, scatter voice features on audio-token slots, run backbone.
+        """Embed the model input, run the backbone, return hidden states.
 
-        Mirrors ``cosyvoice2.py:1008-1033``. Returns hidden states with a codebook
-        dimension added (``[:, None, :]``) so the worker's logits-buffer plumbing
-        stays uniform; the actual audio decoding happens in ``sampling`` via the
-        inline acoustic head.
+        Two input regimes, distinguished by the codebook dimension of
+        ``input_ids`` (mirrors the prefill-vs-decode embedding split in
+        ``csm.py`` / ``cosyvoice2.py``):
+
+        * **Prefill** -- ``input_ids`` is ``(seq_len, 1)``: the text prompt. Each
+          token is embedded via the backbone's text ``embed_tokens`` table and the
+          per-position voice reference (``input_features``) is scattered onto the
+          ``[AUDIO]``-token slots where ``input_masks`` is true.
+        * **Decode** -- ``input_ids`` is ``(B, n_codebooks)``: the previously
+          generated 37-codebook audio frame. It is embedded via the backbone's
+          ``audio_codebook_embeddings`` table with per-codebook offsets and summed
+          across codebooks (so the backbone actually "hears" the audio it just
+          produced and can track progress toward end-of-speech).
+
+        Returns hidden states with a codebook dimension added (``[:, None, :]``)
+        so the worker's logits-buffer plumbing stays uniform; the actual audio
+        decoding happens in ``sampling`` via the inline acoustic head.
         """
-        # codebook 0 holds the (text or audio) token id; embed via the text table
-        inputs_embeds = self.model.embed_tokens(
-            input_ids[:, 0].clamp(0, self.model.embed_tokens.weight.shape[0] - 1)
-        )
-
-        inputs_embeds = torch.where(input_masks[:, :1], input_features, inputs_embeds)
+        if input_ids.shape[1] == self.n_codebooks:
+            # decode step: previously generated 37-codebook audio frame
+            inputs_embeds = self._embed_audio_frame(input_ids)
+        else:
+            # prefill step: codebook 0 holds the text token id; embed via the
+            # text table, then overwrite audio-token slots with the voice
+            # reference carried in input_features.
+            inputs_embeds = self.model.embed_tokens(
+                input_ids[:, 0].clamp(0, self.model.embed_tokens.weight.shape[0] - 1)
+            )
+            inputs_embeds = torch.where(input_masks[:, :1], input_features, inputs_embeds)
 
         hidden_states = self.model(
             inputs_embeds=inputs_embeds,
