@@ -10,11 +10,163 @@ import torch
 import torch.nn.functional as F
 from einops import rearrange
 from torch import nn
+from torch.nn.utils import parametrize as _parametrize
 from torch.nn.utils.parametrizations import weight_norm
 
 from ..utils import get_logger
 
 logger = get_logger(__name__)
+
+# Inference-time fusion toggles. Hardcode here; flip to False for the upstream
+# snac path when debugging or measuring deltas.
+#
+# Bake weight_norm reparametrization (g/||v||*v) into the underlying Conv weights
+# at load time. Saves ~71 small kernels per forward; helps small batches the most.
+FUSE_REMOVE_WEIGHT_NORM = True
+# Compose each quantizer's (codebook_embed -> out_proj 1x1 conv) into a single
+# Embedding lookup table at load. from_codes becomes one Embedding(codebook_size,
+# input_dim) per codebook instead of Embedding(codebook_size, codebook_dim) plus a
+# 1x1 Conv(codebook_dim -> input_dim).
+FUSE_COMPOSE_QUANTIZER_TABLE = True
+# Swap depthwise nn.Conv1d (groups == in_channels == out_channels) for a hand-tuned
+# Triton kernel. cuDNN's depthwise Conv1d path is launch- and memory-bound and
+# accounts for ~42% of decoder time at bs=64; this replacement is the largest
+# remaining lever.
+FUSE_TRITON_DEPTHWISE_CONV = True
+
+
+_depthwise_kernel = None
+
+
+def _get_depthwise_kernel():
+    """Lazy-build Triton depthwise Conv1d kernel. Returns the launch function or None."""
+    global _depthwise_kernel
+    if _depthwise_kernel is not None:
+        return _depthwise_kernel if _depthwise_kernel else None
+    try:
+        import triton
+        import triton.language as tl
+    except ImportError:
+        _depthwise_kernel = False
+        return None
+
+    @triton.jit
+    def _kernel(
+        x_ptr, w_ptr, b_ptr, out_ptr,
+        B, C, T,
+        K: tl.constexpr, DILATION: tl.constexpr, PADDING: tl.constexpr,
+        HAS_BIAS: tl.constexpr,
+        BLOCK_T: tl.constexpr,
+    ):
+        pid_b = tl.program_id(0)
+        pid_c = tl.program_id(1)
+        pid_t = tl.program_id(2)
+
+        t_out = pid_t * BLOCK_T + tl.arange(0, BLOCK_T)
+        out_mask = t_out < T
+
+        if HAS_BIAS:
+            bias_val = tl.load(b_ptr + pid_c).to(tl.float32)
+        else:
+            bias_val = 0.0
+        acc = tl.zeros((BLOCK_T,), dtype=tl.float32) + bias_val
+
+        x_base = pid_b * C * T + pid_c * T
+        w_base = pid_c * K
+        # K is small (typically 7); unroll explicitly so each tap is a scalar load.
+        for k in tl.static_range(K):
+            t_in = t_out + k * DILATION - PADDING
+            valid = (t_in >= 0) & (t_in < T) & out_mask
+            x_val = tl.load(x_ptr + x_base + t_in, mask=valid, other=0.0).to(tl.float32)
+            wk = tl.load(w_ptr + w_base + k).to(tl.float32)
+            acc += x_val * wk
+
+        out_offs = pid_b * C * T + pid_c * T + t_out
+        tl.store(out_ptr + out_offs, acc.to(out_ptr.dtype.element_ty), mask=out_mask)
+
+    def launch(x: torch.Tensor, weight: torch.Tensor, bias, dilation: int, padding: int):
+        # x: (B, C, T) contiguous. weight: (C, 1, K). bias: (C,) or None.
+        assert x.is_contiguous() and weight.is_contiguous()
+        B, C, T = x.shape
+        K = weight.shape[-1]
+        out = torch.empty_like(x)
+        BLOCK_T = 128
+        grid = (B, C, triton.cdiv(T, BLOCK_T))
+        _kernel[grid](
+            x, weight.view(C, K), bias if bias is not None else x, out,
+            B, C, T,
+            K=K, DILATION=dilation, PADDING=padding,
+            HAS_BIAS=bias is not None,
+            BLOCK_T=BLOCK_T,
+            num_warps=4,
+        )
+        return out
+
+    _depthwise_kernel = launch
+    return launch
+
+
+class _TritonDepthwiseConv1d(nn.Module):
+    """Drop-in replacement for nn.Conv1d when groups == in_channels == out_channels."""
+
+    def __init__(self, src: nn.Conv1d):
+        super().__init__()
+        assert src.groups == src.in_channels == src.out_channels
+        assert src.stride == (1,)
+        # src.weight shape: (C, 1, K)
+        self.register_buffer("weight", src.weight.detach().contiguous())
+        if src.bias is not None:
+            self.register_buffer("bias", src.bias.detach().contiguous())
+        else:
+            self.bias = None
+        self.dilation = src.dilation[0]
+        self.padding = src.padding[0]
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        fn = _get_depthwise_kernel()
+        if fn is None:
+            # Fall back to nn.functional.conv1d if triton isn't available.
+            return F.conv1d(
+                x, self.weight, self.bias,
+                stride=1, padding=self.padding,
+                dilation=self.dilation, groups=self.weight.shape[0],
+            )
+        return fn(x.contiguous(), self.weight, self.bias, self.dilation, self.padding)
+
+
+def _swap_depthwise_convs(module: nn.Module) -> int:
+    """Replace every depthwise nn.Conv1d in `module` with _TritonDepthwiseConv1d.
+
+    Depthwise here means groups == in_channels == out_channels (i.e. one filter per
+    channel). Returns the number of modules swapped.
+    """
+    count = 0
+    for name, child in list(module.named_children()):
+        if isinstance(child, nn.Conv1d) and (
+            child.groups == child.in_channels == child.out_channels
+            and child.stride == (1,)
+        ):
+            setattr(module, name, _TritonDepthwiseConv1d(child))
+            count += 1
+        else:
+            count += _swap_depthwise_convs(child)
+    return count
+
+
+def _bake_out_weight_norm(model: nn.Module) -> int:
+    """Fold weight_norm reparametrization into the underlying weight tensor.
+
+    weight_norm computes `w = g * v / ||v||` on every forward pass — fine for
+    training, wasteful at inference. After calling this the module behaves as a
+    plain Conv1d/ConvTranspose1d with a single `weight` tensor.
+    Returns the number of modules unwrapped.
+    """
+    count = 0
+    for m in model.modules():
+        if _parametrize.is_parametrized(m, "weight"):
+            _parametrize.remove_parametrizations(m, "weight", leave_parametrized=True)
+            count += 1
+    return count
 
 
 class LocalMHA(nn.Module):
@@ -348,6 +500,19 @@ class ResidualVectorQuantize(nn.Module):
         return z_q, codes
 
     def from_codes(self, codes: List[torch.Tensor]) -> torch.Tensor:
+        if FUSE_COMPOSE_QUANTIZER_TABLE and getattr(self, "_composed", False):
+            # composed_embed: (codebook_size, input_dim), bias: (input_dim,)
+            z_q = 0.0
+            for i in range(self.n_codebooks):
+                q = self.quantizers[i]
+                # (B, T_i, input_dim) -> (B, input_dim, T_i)
+                z_q_i = F.embedding(codes[i], q.composed_weight).transpose(1, 2)
+                if q.composed_bias is not None:
+                    z_q_i = z_q_i + q.composed_bias.view(1, -1, 1)
+                z_q_i = z_q_i.repeat_interleave(q.stride, dim=-1)
+                z_q += z_q_i
+            return z_q
+
         z_q = 0.0
         for i in range(self.n_codebooks):
             z_p_i = self.quantizers[i].decode_code(codes[i])
@@ -355,6 +520,25 @@ class ResidualVectorQuantize(nn.Module):
             z_q_i = z_q_i.repeat_interleave(self.quantizers[i].stride, dim=-1)
             z_q += z_q_i
         return z_q
+
+    def _compose_quantizer_tables(self):
+        """Precompute composed (codebook_size, input_dim) lookup table per quantizer.
+
+        Replaces `codebook(idx) -> transpose -> out_proj_1x1conv -> +bias` with a
+        single Embedding lookup. Called once after weights are loaded and any
+        weight_norm bake-out has run, so out_proj.weight is the materialized
+        Conv1d weight of shape (input_dim, codebook_dim, 1).
+        """
+        for q in self.quantizers:
+            E = q.codebook.weight  # (codebook_size, codebook_dim)
+            W = q.out_proj.weight.squeeze(-1)  # (input_dim, codebook_dim)
+            composed = E @ W.t()  # (codebook_size, input_dim)
+            q.composed_weight = nn.Parameter(composed.contiguous(), requires_grad=False)
+            if q.out_proj.bias is not None:
+                q.composed_bias = nn.Parameter(q.out_proj.bias.detach().clone(), requires_grad=False)
+            else:
+                q.composed_bias = None
+        self._composed = True
 
 
 class SNAC(nn.Module):
@@ -462,6 +646,15 @@ class SNAC(nn.Module):
             state_dict = torch.load(os.path.join(repo_id, "pytorch_model.bin"), map_location="cpu")
         model.load_state_dict(state_dict)
         model.eval()
+        if FUSE_REMOVE_WEIGHT_NORM:
+            n = _bake_out_weight_norm(model)
+            logger.info(f"SNAC: folded weight_norm into {n} module(s)")
+        if FUSE_COMPOSE_QUANTIZER_TABLE:
+            model.quantizer._compose_quantizer_tables()
+            logger.info(f"SNAC: composed quantizer tables for {model.quantizer.n_codebooks} codebooks")
+        if FUSE_TRITON_DEPTHWISE_CONV:
+            n = _swap_depthwise_convs(model)
+            logger.info(f"SNAC: swapped {n} depthwise Conv1d -> Triton kernel")
         return model
 
 
