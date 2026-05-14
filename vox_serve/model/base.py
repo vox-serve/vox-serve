@@ -90,6 +90,11 @@ class BaseLM(ABC):
         return False
 
     @property
+    def has_inline_audio_head(self) -> bool:
+        """Indicates if the model has an inline audio head (sampling produces audio codes directly)."""
+        return False
+
+    @property
     def supports_audio_input(self) -> bool:
         """Indicates if the model accepts audio input."""
         return False

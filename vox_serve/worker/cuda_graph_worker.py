@@ -132,6 +132,7 @@ class CudaGraphWorker(ModelWorker):
         self.logger.info(f"KV cache size: {kv_cache_size / 1024 / 1024:.2f} MB")
 
         self.has_depth_transformer = self.model.has_depth_transformer
+        self.has_inline_audio_head = self.model.has_inline_audio_head
         if self.has_depth_transformer:
             # NOTE: for depth, there is always one page per request
             self.depth_qo_indptr_buffer = torch.zeros(self.max_batch_size + 1).to(self.device).to(torch.int32)
@@ -213,6 +214,9 @@ class CudaGraphWorker(ModelWorker):
         self.logger.info("Initializing CUDA graphs for LM decode phase...")
         self._initialize_decode_cuda_graphs()
 
+        if hasattr(self.model, "enable_acoustic_graph"):
+            self.model.enable_acoustic_graph(self.cuda_graph_pool, self.cuda_graph_batch_sizes)
+
         self.logger.info("Initializing CUDA graphs for detokenization phase...")
         self._initialize_detokenization_cuda_graphs()
 
@@ -249,7 +253,7 @@ class CudaGraphWorker(ModelWorker):
         # Create prefill output buffers
         prefill_logits_buffer = torch.zeros(
             max_seq_len,
-            1 if self.has_depth_transformer else self.model.n_codebooks,
+            1 if (self.has_depth_transformer or self.has_inline_audio_head) else self.model.n_codebooks,
             self.model.vocab_size,
             dtype=torch.bfloat16, device=self.device
         )
@@ -392,7 +396,7 @@ class CudaGraphWorker(ModelWorker):
         # Create output buffer (assuming vocab size, will be adjusted based on model)
         logits_buffer = torch.zeros(
             self.max_batch_size,
-            1 if self.has_depth_transformer else self.model.n_codebooks,  # TODO: revisit here
+            1 if (self.has_depth_transformer or self.has_inline_audio_head) else self.model.n_codebooks,
             self.model.vocab_size,
             dtype=torch.bfloat16,
             device=self.device,
@@ -1076,10 +1080,16 @@ class CudaGraphWorker(ModelWorker):
             )
 
         else:
+            sampling_kwargs = {}
+            if self.has_inline_audio_head:
+                sampling_kwargs["backbone_hidden_states"] = self.cuda_graph_buffers[
+                    "backbone_hidden_states"
+                ][:actual_batch_size]
             output_ids, task = self.model.sampling(
                 logits=logits,
                 requests=requests,
                 repetition_cache=repetition_cache,
+                **sampling_kwargs,
             )
             self.nvtx_range_pop() # sampling
 
@@ -1188,10 +1198,16 @@ class CudaGraphWorker(ModelWorker):
             )
 
         else:
+            sampling_kwargs = {}
+            if self.has_inline_audio_head:
+                sampling_kwargs["backbone_hidden_states"] = self.cuda_graph_buffers[
+                    "backbone_hidden_states"
+                ][:actual_batch_size]
             output_ids, task = self.model.sampling(
                 logits=logits,
                 requests=requests,
                 repetition_cache=repetition_cache,
+                **sampling_kwargs,
             )
             self.nvtx_range_pop() # sampling
 
