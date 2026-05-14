@@ -59,8 +59,14 @@ class CudaGraphWorker(ModelWorker):
         # sort in decreasing order to the cuda graph for largest batch is captured first and the smaller
         # shapes can reuse the memory
         self.cuda_graph_batch_sizes = [2**i for i in range(int(np.log2(self.max_batch_size)) + 1)][::-1]
-        self.cuda_graph_seq_len_buckets = [1024][::-1]
-        self.prefill_graph_batch_size = 8
+        # Prefill CUDA graphs: (batch_size, seq_len) buckets. Buckets are picked smallest-first
+        # in _get_prefill_cuda_graph_key so short prompts don't pay the cost of a 1024-token graph.
+        # Captured in decreasing order so the largest graph allocates memory first and smaller
+        # graphs reuse the pool.
+        self.cuda_graph_seq_len_buckets = sorted([128, 512, 1024], reverse=True)
+        self.prefill_graph_batch_sizes = sorted([1, 8], reverse=True)
+        # Kept for backward compat with other code paths that still index by a scalar.
+        self.prefill_graph_batch_size = max(self.prefill_graph_batch_sizes)
         self.cuda_graph_pool = torch.cuda.graph_pool_handle()
         self.depth_unrolled_graph_pool = torch.cuda.graph_pool_handle()
 
@@ -81,26 +87,28 @@ class CudaGraphWorker(ModelWorker):
             use_cuda_graph=False,
         )
 
-        # Create prefill wrappers for CUDA graphs with different batch sizes and sequence lengths
+        # Create prefill wrappers for CUDA graphs across (batch_size, seq_len) buckets.
+        # Skip combos where batch_size > seq_len (degenerate: more "batches" than tokens).
         self.prefill_wrappers = {}
         for seq_len in self.cuda_graph_seq_len_buckets:
-            # Use only the maximum batch size for prefill
-            batch_size = self.prefill_graph_batch_size
-            key = (batch_size, seq_len)
-            self.prefill_wrappers[key] = FlashInferPrefillWrapper(
-                attn_buffer=self.flashinfer_buffer,
-                n_qo_head=self.model.num_attention_heads,
-                n_kv_head=self.model.num_key_value_heads,
-                n_state=self.model.hidden_size,
-                page_size=self.page_size,
-                batch_size=batch_size,
-                max_seq_len=seq_len,
-                qo_indptr_buffer=self.qo_indptr_buffer[: batch_size + 1],
-                paged_kv_indptr_buffer=self.paged_kv_indptr_buffer[: batch_size + 1],
-                paged_kv_indices_buffer=self.paged_kv_indices_buffer,
-                paged_kv_last_page_len_buffer=self.paged_kv_last_page_len_buffer[:batch_size],
-                use_cuda_graph=True,
-            )
+            for batch_size in self.prefill_graph_batch_sizes:
+                if batch_size > seq_len:
+                    continue
+                key = (batch_size, seq_len)
+                self.prefill_wrappers[key] = FlashInferPrefillWrapper(
+                    attn_buffer=self.flashinfer_buffer,
+                    n_qo_head=self.model.num_attention_heads,
+                    n_kv_head=self.model.num_key_value_heads,
+                    n_state=self.model.hidden_size,
+                    page_size=self.page_size,
+                    batch_size=batch_size,
+                    max_seq_len=seq_len,
+                    qo_indptr_buffer=self.qo_indptr_buffer[: batch_size + 1],
+                    paged_kv_indptr_buffer=self.paged_kv_indptr_buffer[: batch_size + 1],
+                    paged_kv_indices_buffer=self.paged_kv_indices_buffer,
+                    paged_kv_last_page_len_buffer=self.paged_kv_last_page_len_buffer[:batch_size],
+                    use_cuda_graph=True,
+                )
 
         self.decode_wrappers = {}
         for batch_size in self.cuda_graph_batch_sizes:
@@ -268,9 +276,11 @@ class CudaGraphWorker(ModelWorker):
             "prefill_backbone_hidden_states": prefill_backbone_hidden_states_buffer,
         })
 
-        # Capture CUDA graphs for different batch size and sequence length combinations
+        # Capture CUDA graphs for different (batch_size, seq_len) buckets.
         for seq_len in self.cuda_graph_seq_len_buckets:
-            batch_size = self.prefill_graph_batch_size
+          for batch_size in self.prefill_graph_batch_sizes:
+            if (batch_size, seq_len) not in self.prefill_wrappers:
+                continue
             key = (batch_size, seq_len)
             self.logger.info(f"Capturing prefill CUDA graph for batch_size={batch_size}, seq_len={seq_len}")
 
@@ -917,32 +927,36 @@ class CudaGraphWorker(ModelWorker):
     def _get_prefill_cuda_graph_key(self, batch_size: int, seq_len: int) -> Optional[Tuple[int, int]]:
         """
         Find the best matching (batch_size, seq_len) key for the prefill CUDA graph.
-        Returns None if no suitable graph exists.
+        Picks the smallest captured bucket that fits both dimensions. Returns None if no
+        suitable graph exists.
         """
-        # Get the padded batch size and seq len
-        padded_batch_size = self.prefill_graph_batch_size
-        # considering the padding tokens to match max batch size
-        padded_seq_len = self._get_cuda_graph_seq_len(seq_len + (padded_batch_size - batch_size))
-
-        if padded_batch_size < batch_size:
+        # Pick smallest prefill batch_size bucket that fits the actual batch.
+        padded_batch_size = None
+        for bs in sorted(self.prefill_graph_batch_sizes):
+            if bs >= batch_size:
+                padded_batch_size = bs
+                break
+        if padded_batch_size is None:
             self.logger.debug("No suitable CUDA graph batch size for actual batch_size %d", batch_size)
             return None
 
+        # Pad seq_len to account for the empty batches we'll append (one token each).
+        padded_seq_len = self._get_cuda_graph_seq_len(seq_len + (padded_batch_size - batch_size))
         if padded_seq_len is None:
             self.logger.debug("No suitable CUDA graph seq_len bucket for actual seq_len %d", seq_len)
             return None
 
-        # Check if we have a graph for this combination
         key = (padded_batch_size, padded_seq_len)
         if key in self.cuda_graphs_lm_prefill:
             return key
 
-        # If not found, try to find the best available batch size for this seq len
-        for batch_sz in sorted(self.cuda_graph_batch_sizes):
-            if batch_sz >= padded_batch_size and batch_sz <= padded_seq_len:
-                test_key = (batch_sz, padded_seq_len)
-                if test_key in self.cuda_graphs_lm_prefill:
-                    return test_key
+        # Fall back: try larger batch_size buckets at the same seq_len.
+        for bs in sorted(self.prefill_graph_batch_sizes):
+            if bs < padded_batch_size:
+                continue
+            test_key = (bs, padded_seq_len)
+            if test_key in self.cuda_graphs_lm_prefill:
+                return test_key
 
         self.logger.debug("No suitable prefill CUDA graph for batch_size %d, seq_len %d", batch_size, seq_len)
         return None
