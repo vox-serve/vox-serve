@@ -8,6 +8,86 @@ from .utils import get_logger
 logger = get_logger(__name__)
 
 
+# Toggle: fuse the two scatter writes (K, V -> paged KV cache) into one Triton kernel.
+# The cuDNN-default path is two index_elementwise_kernel launches per layer; this collapses
+# to one. ~3% of decode GPU time at bs=64. Flip to False for the original behaviour.
+FUSE_KV_SCATTER = True
+
+# FlashInfer decode-wrapper params. Override via env vars to avoid recompiling.
+#   VOXSERVE_FI_USE_TC: "1" enables tensor cores in the decode wrapper (current default)
+#   VOXSERVE_FI_BACKEND: passthrough to BatchDecodeWithPagedKVCacheWrapper(backend=...).
+#     Options: "auto" (default), "fa2", "trtllm-gen".  trtllm-gen requires kv_layout=HND
+#     and tuple kv-cache layout — not currently wired up.
+import os as _fi_os
+FI_DECODE_USE_TC = bool(int(_fi_os.environ.get("VOXSERVE_FI_USE_TC", "1")))
+FI_DECODE_BACKEND = _fi_os.environ.get("VOXSERVE_FI_BACKEND", "auto")
+
+
+_kv_scatter_kernel = None
+
+
+def _get_kv_scatter_kernel():
+    global _kv_scatter_kernel
+    if _kv_scatter_kernel is not None:
+        return _kv_scatter_kernel if _kv_scatter_kernel else None
+    try:
+        import triton
+        import triton.language as tl
+    except ImportError:
+        _kv_scatter_kernel = False
+        return None
+
+    @triton.jit
+    def _kernel(
+        k_ptr, v_ptr, kv_cache_ptr,
+        pages_ptr, positions_ptr,
+        N, page_size, two_p_size_pH_pD, p_size_pH_pD, pH_pD,
+        BLOCK: tl.constexpr,
+    ):
+        # one program per (token, head*head_dim block)
+        tid = tl.program_id(0)
+        blk = tl.program_id(1)
+        offs = blk * BLOCK + tl.arange(0, BLOCK)
+        mask = offs < pH_pD
+
+        # source offsets: token-contiguous k,v of shape (N, n_heads, head_dim) -> flat
+        src = tid * pH_pD + offs
+        k = tl.load(k_ptr + src, mask=mask)
+        v = tl.load(v_ptr + src, mask=mask)
+
+        page = tl.load(pages_ptr + tid)
+        pos = tl.load(positions_ptr + tid)
+
+        # kv_cache layout: (n_pages, 2, page_size, n_heads, head_dim)
+        # element at [page, c, pos, h, d] = ((page*2 + c) * page_size + pos) * pH_pD + h*head_dim+d
+        base_k = (page * two_p_size_pH_pD) + 0 * p_size_pH_pD + pos * pH_pD
+        base_v = (page * two_p_size_pH_pD) + 1 * p_size_pH_pD + pos * pH_pD
+        tl.store(kv_cache_ptr + base_k + offs, k, mask=mask)
+        tl.store(kv_cache_ptr + base_v + offs, v, mask=mask)
+
+    def launch(kv_cache: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
+               pages: torch.Tensor, positions: torch.Tensor):
+        # k, v: (N, n_heads, head_dim). kv_cache: (n_pages, 2, page_size, n_heads, head_dim).
+        N, n_heads, head_dim = k.shape
+        page_size = kv_cache.shape[2]
+        pH_pD = n_heads * head_dim
+        p_size_pH_pD = page_size * pH_pD
+        two_p_size_pH_pD = 2 * p_size_pH_pD
+        BLOCK = 1024
+        if pH_pD <= 1024:
+            BLOCK = triton.next_power_of_2(pH_pD)
+        grid = (N, triton.cdiv(pH_pD, BLOCK))
+        _kernel[grid](
+            k.contiguous(), v.contiguous(), kv_cache,
+            pages.to(torch.int32).contiguous(), positions.to(torch.int32).contiguous(),
+            N, page_size, two_p_size_pH_pD, p_size_pH_pD, pH_pD,
+            BLOCK=BLOCK,
+        )
+
+    _kv_scatter_kernel = launch
+    return launch
+
+
 class FlashInferPrefillWrapper:
     def __init__(
         self,
@@ -136,11 +216,14 @@ class FlashInferPrefillWrapper:
         kv_cache : torch.Tensor, shape = (n_pages, 2, page_size, n_heads, head_dim)
         k, v   : torch.Tensor, shape = (n_token, n_heads, head_dim)
         """
-        # these were created in `plan()`
         page_idx = self.token_to_page  # (total_tokens,)
         cache_idx = self.token_to_cache  # (total_tokens,)
 
-        # two pure‐tensor assignments—no Python loop, no .item():
+        if FUSE_KV_SCATTER:
+            fn = _get_kv_scatter_kernel()
+            if fn is not None:
+                fn(kv_cache, k, v, page_idx, cache_idx)
+                return
         kv_cache[page_idx, 0, cache_idx] = k  # keys
         kv_cache[page_idx, 1, cache_idx] = v  # values
 
@@ -166,14 +249,19 @@ class FlashInferDecodeWrapper:
         self.use_cuda_graph = use_cuda_graph
         self.batch_size = batch_size
 
+        # Honour the env-var overrides for quick A/B testing without rebuilding.
+        _use_tc = FI_DECODE_USE_TC if use_tensor_cores else False
+        _backend = FI_DECODE_BACKEND
+        logger.info(f"FlashInfer decode wrapper: backend={_backend}, use_tensor_cores={_use_tc}")
         self.attn_wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
             attn_buffer,
             "NHD",
             use_cuda_graph=use_cuda_graph,
-            use_tensor_cores=use_tensor_cores,
+            use_tensor_cores=_use_tc,
             paged_kv_indptr_buffer=paged_kv_indptr_buffer,
             paged_kv_indices_buffer=paged_kv_indices_buffer,
             paged_kv_last_page_len_buffer=paged_kv_last_page_len_buffer,
+            backend=_backend,
         )
 
         self.n_qo_head = n_qo_head
@@ -234,12 +322,14 @@ class FlashInferDecodeWrapper:
         kv_cache : torch.Tensor, shape = (n_pages, 2, page_size, n_heads, head_dim)
         k, v   : torch.Tensor, shape = (n_req, n_heads, head_dim)
         """
-        # Assuming self.kv_cache_locations is a tensor of shape (batch_size, 2)
-        # with the first column being page indices and the second column being pos indices.
         pages = self.kv_cache_locations[: self.batch_size, 0].long()
         positions = self.kv_cache_locations[: self.batch_size, 1].long()
 
-        # Vectorized assignment replaces the loop:
+        if FUSE_KV_SCATTER:
+            fn = _get_kv_scatter_kernel()
+            if fn is not None:
+                fn(kv_cache, k, v, pages, positions)
+                return
         kv_cache[pages, 0, positions] = k
         kv_cache[pages, 1, positions] = v
 

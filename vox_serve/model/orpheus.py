@@ -1,3 +1,4 @@
+import os
 from typing import Any, List
 
 import torch
@@ -10,6 +11,15 @@ from ..requests import Request
 from ..sampling import Sampler, SamplingConfig
 from ..tokenizer.snac import SNAC
 from .base import BaseLM, PreprocessOutput
+
+# Load-time LM fusions. Hardcode here; flip to False for the unfused fallback.
+#
+# Fuse the per-layer Q/K/V Linears into one qkv_proj GEMM. Saves 2 of every 3
+# projection launches; consistent win at every batch size, biggest at small bs.
+FUSE_ORPHEUS_QKV = True
+# Use flashinfer.norm.fused_add_rmsnorm at the two combine-then-norm sites per layer.
+# Requires the backbone to carry the residual stream as an explicit state.
+FUSE_RESIDUAL_RMSNORM = True
 
 
 class OrpheusRMSNorm(nn.Module):
@@ -44,8 +54,7 @@ class OrpheusMLP(nn.Module):
         self.act_fn = ACT2FN[config.hidden_act]
 
     def forward(self, x):
-        down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
-        return down_proj
+        return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
 
 
 class OrpheusAttention(nn.Module):
@@ -65,18 +74,43 @@ class OrpheusAttention(nn.Module):
         self.high_freq_factor = config.rope_scaling.get("high_freq_factor", 4.0)
         self.old_context_len = config.rope_scaling.get("original_max_position_embeddings", 8192)
 
-        self.q_proj = nn.Linear(
-            config.hidden_size, config.num_attention_heads * self.head_dim, bias=config.attention_bias
-        )
-        self.k_proj = nn.Linear(
-            config.hidden_size, config.num_key_value_heads * self.head_dim, bias=config.attention_bias
-        )
-        self.v_proj = nn.Linear(
-            config.hidden_size, config.num_key_value_heads * self.head_dim, bias=config.attention_bias
-        )
+        self.q_size = config.num_attention_heads * self.head_dim
+        self.kv_size = config.num_key_value_heads * self.head_dim
+
+        # Separate q/k/v Linears exist so HF's from_pretrained can load the checkpoint
+        # cleanly. fuse_qkv() replaces them with a single qkv_proj after weights are
+        # loaded.
+        self.q_proj = nn.Linear(config.hidden_size, self.q_size, bias=config.attention_bias)
+        self.k_proj = nn.Linear(config.hidden_size, self.kv_size, bias=config.attention_bias)
+        self.v_proj = nn.Linear(config.hidden_size, self.kv_size, bias=config.attention_bias)
         self.o_proj = nn.Linear(
             config.num_attention_heads * self.head_dim, config.hidden_size, bias=config.attention_bias
         )
+
+    def fuse_qkv(self) -> None:
+        """Replace separate q/k/v Linears with a single fused qkv_proj (idempotent)."""
+        if not hasattr(self, "q_proj"):
+            return
+        has_bias = self.q_proj.bias is not None
+        fused = nn.Linear(
+            self.q_proj.in_features,
+            self.q_size + 2 * self.kv_size,
+            bias=has_bias,
+            device=self.q_proj.weight.device,
+            dtype=self.q_proj.weight.dtype,
+        )
+        with torch.no_grad():
+            fused.weight.copy_(
+                torch.cat([self.q_proj.weight, self.k_proj.weight, self.v_proj.weight], dim=0)
+            )
+            if has_bias:
+                fused.bias.copy_(
+                    torch.cat([self.q_proj.bias, self.k_proj.bias, self.v_proj.bias], dim=0)
+                )
+        self.qkv_proj = fused
+        del self.q_proj
+        del self.k_proj
+        del self.v_proj
 
     def forward(
         self,
@@ -88,9 +122,18 @@ class OrpheusAttention(nn.Module):
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
 
-        query_states = self.q_proj(hidden_states).view(hidden_shape)  # .transpose(0, 1)
-        key_states = self.k_proj(hidden_states).view(hidden_shape)  # .transpose(0, 1)
-        value_states = self.v_proj(hidden_states).view(hidden_shape)  # .transpose(0, 1)
+        if hasattr(self, "qkv_proj"):
+            qkv = self.qkv_proj(hidden_states)
+            query_states, key_states, value_states = qkv.split(
+                [self.q_size, self.kv_size, self.kv_size], dim=-1
+            )
+            query_states = query_states.view(hidden_shape)
+            key_states = key_states.view(hidden_shape)
+            value_states = value_states.view(hidden_shape)
+        else:
+            query_states = self.q_proj(hidden_states).view(hidden_shape)
+            key_states = self.k_proj(hidden_states).view(hidden_shape)
+            value_states = self.v_proj(hidden_states).view(hidden_shape)
 
         query_states, key_states = apply_rope_pos_ids(
             query_states=query_states,
@@ -128,7 +171,26 @@ class OrpheusDecoderLayer(nn.Module):
         position_ids: torch.LongTensor,
         attn_wrapper: FlashInferWrapper,
         kv_cache: torch.Tensor,
+        residual: torch.Tensor = None,
     ):
+        if FUSE_RESIDUAL_RMSNORM and residual is not None:
+            # In-place: residual += hidden_states; hidden_states = rmsnorm(residual) * weight
+            import flashinfer.norm as _fn
+            _fn.fused_add_rmsnorm(hidden_states, residual, self.input_layernorm.weight,
+                                  self.input_layernorm.variance_epsilon)
+            # Self attention
+            attn_out = self.self_attn(
+                hidden_states=hidden_states,
+                position_ids=position_ids,
+                attn_wrapper=attn_wrapper,
+                kv_cache=kv_cache,
+            )
+            # residual += attn_out; attn_out = rmsnorm(residual) * weight
+            _fn.fused_add_rmsnorm(attn_out, residual, self.post_attention_layernorm.weight,
+                                  self.post_attention_layernorm.variance_epsilon)
+            mlp_out = self.mlp(attn_out)
+            return mlp_out, residual
+
         residual = hidden_states
 
         hidden_states = self.input_layernorm(hidden_states)
@@ -171,6 +233,24 @@ class OrpheusBackboneModel(nn.Module):
         kv_cache: torch.Tensor,
     ):
         hidden_states = inputs_embeds
+
+        if FUSE_RESIDUAL_RMSNORM:
+            # Carry an explicit residual stream alongside the "what the previous block added"
+            # tensor so each combine+norm site can use flashinfer.norm.fused_add_rmsnorm.
+            residual = torch.zeros_like(hidden_states)
+            for i, decoder_layer in enumerate(self.layers):
+                hidden_states, residual = decoder_layer(
+                    hidden_states,
+                    position_ids=position_ids,
+                    attn_wrapper=attn_wrapper,
+                    kv_cache=kv_cache[i],
+                    residual=residual,
+                )
+            # Final add + norm (final-layer mlp_out + accumulated residual, then RMSNorm).
+            import flashinfer.norm as _fn
+            _fn.fused_add_rmsnorm(hidden_states, residual, self.norm.weight,
+                                  self.norm.variance_epsilon)
+            return hidden_states
 
         for i, decoder_layer in enumerate(self.layers):
             hidden_states = decoder_layer(
@@ -238,15 +318,21 @@ class OrpheusModel(BaseLM):
         self.model = OrpheusForCausalLM.from_pretrained(model_name)
         self.model.to(dtype).to(device)
 
+        if FUSE_ORPHEUS_QKV:
+            for layer in self.model.model.layers:
+                layer.self_attn.fuse_qkv()
+
         self.available_voices = ["tara", "leah", "jess", "leo", "dan", "mia", "zac", "zoe"]
 
         # Use provided tokenizer path or default to model_name
         self.text_tokenizer = self._load_tokenizer(tokenizer_path)
         with torch.cuda.device(self.audio_decoder_device):
             # Initialize audio decoder on specified device (may differ from main device)
+            # Honour either the global compile flag or a detokenizer-only env-var override.
+            _detok_compile = enable_torch_compile or bool(int(os.environ.get("VOXSERVE_SNAC_COMPILE", "0")))
             self.audio_decoder = SNAC.from_pretrained(
                 "hubertsiuzdak/snac_24khz",
-                enable_torch_compile=enable_torch_compile,
+                enable_torch_compile=_detok_compile,
             ).eval().to(self.audio_decoder_device)
 
         self._num_attention_heads = self.model.config.num_attention_heads
@@ -427,6 +513,12 @@ class OrpheusModel(BaseLM):
     ) -> torch.Tensor:
         if sampling_params is None:
             sampling_params = self.default_sampling_config
+
+        # Perf-eval requests use greedy sampling (deterministic, no repetition penalty).
+        # Assume homogeneous batches — benchmark clients should set perf_eval on all-or-none.
+        if requests and requests[0].perf_eval_max_tokens is not None:
+            sampling_params = SamplingConfig(greedy=True)
+            repetition_cache = None
 
         if repetition_cache is not None:
             logits = Sampler.apply_repetition_penalty(

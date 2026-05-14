@@ -350,6 +350,16 @@ class APIServer:
                 if self.detokenize_interval is not None:
                     cmd.extend(["--detokenize-interval", str(self.detokenize_interval)])
 
+                import os as _os
+                nsys_out = _os.environ.get("VOXSERVE_NSYS_OUT")
+                if nsys_out:
+                    nsys_bin = _os.environ.get("VOXSERVE_NSYS_BIN", "nsys")
+                    nsys_args = _os.environ.get(
+                        "VOXSERVE_NSYS_ARGS",
+                        f"profile -t cuda,nvtx,osrt --capture-range=none -d 600 -o {nsys_out} -f true",
+                    ).split()
+                    cmd = [nsys_bin] + nsys_args + cmd
+                    self.logger.info(f"Wrapping scheduler with nsys: {' '.join(cmd[:6])}...")
                 process = subprocess.Popen(cmd)
                 self.scheduler_process = process
                 self.logger.info(f"Started scheduler process with PID: {process.pid}")
@@ -500,6 +510,7 @@ class APIServer:
         text: str = None,
         audio_path: str = None,
         model_kwargs: Dict = None,
+        perf_eval_max_tokens: Optional[int] = None,
     ) -> str:
         """Create and enqueue a streaming request, returning its request ID.
 
@@ -531,6 +542,7 @@ class APIServer:
             "audio_path": audio_path,
             "is_streaming": True,
             "model_kwargs": model_kwargs or {},
+            "perf_eval_max_tokens": perf_eval_max_tokens,
         }
         request_json = json.dumps(request_dict)
         message = f"{request_json}|audio_data_placeholder".encode("utf-8")
@@ -685,6 +697,7 @@ class APIServer:
         text: str = None,
         audio_path: str = None,
         model_kwargs: Dict = None,
+        perf_eval_max_tokens: Optional[int] = None,
     ) -> str:
         """
         Generate audio from text and return path to the audio file.
@@ -716,6 +729,7 @@ class APIServer:
                 "audio_path": audio_path,
                 "is_streaming": False,
                 "model_kwargs": model_kwargs or {},
+                "perf_eval_max_tokens": perf_eval_max_tokens,
             }
 
             request_json = json.dumps(request_dict)
@@ -808,6 +822,8 @@ async def generate(
     ref_text: Optional[str] = Form(None),
     instruct: Optional[str] = Form(None),
     x_vector_only_mode: Optional[bool] = Form(None),
+    # Perf-eval mode: force exactly N LM output tokens (ignores stop tokens, audio may be invalid)
+    perf_eval_max_tokens: Optional[int] = Form(None),
 ):
     """
     Generate speech from text and return audio file or streaming response.
@@ -854,7 +870,9 @@ async def generate(
     try:
         if streaming:
             # Streaming response: enqueue request immediately, then stream asynchronously
-            request_id = api_server.start_streaming_request(text, audio_path, model_kwargs)
+            request_id = api_server.start_streaming_request(
+                text, audio_path, model_kwargs, perf_eval_max_tokens=perf_eval_max_tokens
+            )
 
             async def audio_stream():
                 # WAV header for 24kHz mono 16-bit audio
@@ -886,7 +904,9 @@ async def generate(
             )
         else:
             # Non-streaming response
-            audio_file = await run_in_threadpool(api_server.generate_audio, text, audio_path, model_kwargs)
+            audio_file = await run_in_threadpool(
+                api_server.generate_audio, text, audio_path, model_kwargs, perf_eval_max_tokens
+            )
             request_id = Path(audio_file).stem
 
             return FileResponse(path=audio_file, media_type="audio/wav", filename=f"{request_id}.wav")
@@ -1136,9 +1156,14 @@ def main():
     parser.add_argument("--port", type=int, default=8000, help="Port to bind the server to (default: 8000)")
     parser.add_argument("--max-batch-size", type=int, default=8, help="Maximum batch size for inference (default: 8)")
     parser.add_argument(
-        "--max-num-pages", type=int, default=2048, help="Maximum number of KV cache pages (default: 1024)"
+        "--max-num-pages", type=int, default=512,
+        help="Maximum number of KV cache pages (default: 512). Total KV slots = max-num-pages * page-size.",
     )
-    parser.add_argument("--page-size", type=int, default=128, help="Size of each KV cache page (default: 128)")
+    parser.add_argument(
+        "--page-size", type=int, default=512,
+        help="Size of each KV cache page (default: 512). Larger pages give faster decode attention "
+             "(up to ~1.4x at bs=256) but waste more memory on short requests.",
+    )
     parser.add_argument("--top-p", type=float, default=None, help="Top-p sampling parameter (default: None)")
     parser.add_argument("--top-k", type=int, default=None, help="Top-k sampling parameter (default: None)")
     parser.add_argument("--min-p", type=float, default=None, help="Min-p sampling parameter (default: None)")
