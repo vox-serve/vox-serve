@@ -29,7 +29,12 @@ from typing import Any, List, Tuple
 import torch
 from torch import nn
 
-from ..flashinfer_utils import FlashInferWrapper, apply_rope_pos_ids, rms_norm
+from ..flashinfer_utils import (
+    FlashInferPrefillWrapper,
+    FlashInferWrapper,
+    apply_rope_pos_ids,
+    rms_norm,
+)
 from ..requests import Request
 from ..sampling import SamplingConfig
 from ..utils import get_logger
@@ -581,12 +586,18 @@ class VoxtralTTSModel(BaseLM):
         # NOTE: Voxtral's attention uses an explicit head_dim of 128, so the
         # per-head qkv dimension (num_attention_heads * head_dim = 32 * 128 =
         # 4096) does NOT equal the residual-stream width (config.hidden_size =
-        # 3072). The worker derives the FlashInfer head_dim and the KV-cache
-        # head_dim from this property as ``hidden_size // num_attention_heads``,
-        # so it must report the attention qkv dimension (4096) here, not 3072.
-        # All model-internal modules use ``self.config.hidden_size`` (3072)
-        # directly and are unaffected.
+        # 3072). This property reports the attention qkv width (4096) used to
+        # size the FlashInfer wrappers; ``embedding_hidden_size`` reports the
+        # residual-stream width (3072) used to size the input_features /
+        # backbone_hidden_states CUDA-graph buffers. All model-internal modules
+        # use ``self.config.hidden_size`` (3072) directly.
         return self._num_attention_heads * self.config.head_dim
+
+    @property
+    def embedding_hidden_size(self) -> int:
+        # Residual-stream width: voice-reference input_features and the backbone
+        # hidden states are this wide (3072), narrower than ``hidden_size`` (4096).
+        return self.config.hidden_size
 
     @property
     def head_dim(self) -> int:
@@ -646,6 +657,30 @@ class VoxtralTTSModel(BaseLM):
     @property
     def vocab_size(self) -> int:
         return 131072
+
+    def audio_decoder_initial_cache(self, batch_size: int):
+        """Per-batch left-context ring buffer for the Voxtral-TTS waveform decoder.
+
+        ``BaseLM.audio_decoder_initial_cache`` returns ``None``; with ``None`` the
+        cuda_graph_worker detok-graph path skips per-request cache threading and
+        ``postprocess`` falls back to a single shared ``_fallback_decoder_cache``
+        ring buffer, which cross-contaminates requests under batched CUDA-graph
+        replay. Returning a real per-batch ``VoxtralTTSDecoderCache`` fixes that.
+
+        ``preprocess`` builds the per-request ``(25, n_codebooks)`` variant; this
+        is the batched ``(batch_size, 25, n_codebooks)`` version the worker manages.
+        """
+        from ..tokenizer.voxtral_tts import VoxtralTTSDecoderCache  # noqa: PLC0415
+
+        return VoxtralTTSDecoderCache(
+            left_ctx=torch.zeros(
+                batch_size,
+                25,
+                self.n_codebooks,
+                device=self.audio_decoder_device,
+                dtype=torch.int64,
+            )
+        )
 
     # ------------------------------------------------------------------
     # BaseLM methods
@@ -717,7 +752,16 @@ class VoxtralTTSModel(BaseLM):
         )
         token_ids = list(tokenized.tokens)
 
-        input_ids = torch.tensor(token_ids, dtype=torch.int32, device=self.device).view(-1, 1)
+        # input_ids is (seq_len, n_codebooks): the text token id sits in codebook
+        # 0, the rest are zero padding. The worker batches prefill and decode
+        # requests together via ``torch.cat(dim=0)``, so the prefill input must
+        # have the same codebook width as the (B, n_codebooks) audio frames
+        # produced during decode. ``forward`` discriminates prefill vs decode by
+        # attention-wrapper type and reads only column 0 for the prefill path.
+        input_ids = torch.zeros(
+            len(token_ids), self.n_codebooks, dtype=torch.int32, device=self.device
+        )
+        input_ids[:, 0] = torch.tensor(token_ids, dtype=torch.int32, device=self.device)
         seq_len = input_ids.shape[0]
 
         # input_features: voice reference scattered onto [AUDIO]-token positions
@@ -734,12 +778,13 @@ class VoxtralTTSModel(BaseLM):
         # No repetition penalty for Voxtral (gap fix #2/#11).
         repetition_cache = None
 
-        # model-private left-context ring buffer (contract section 3.1)
-        from ..tokenizer.voxtral_tts import VoxtralTTSDecoderCache  # noqa: PLC0415
-
-        decoder_cache = VoxtralTTSDecoderCache(
-            left_ctx=torch.zeros(25, self.n_codebooks, device=self.device, dtype=torch.int64)
-        )
+        # model-private left-context ring buffer (contract section 3.1). Built via
+        # ``audio_decoder_initial_cache`` so the per-request cache has the same
+        # batched ``(1, 25, n_codebooks)`` shape as the worker's detok-graph cache
+        # buffer -- the CUDA-graph worker threads ``req.decoder_cache`` in/out of
+        # that buffer and ``copy_from`` requires matching shapes (mirrors
+        # ``cosyvoice2.py``'s ``preprocess``).
+        decoder_cache = self.audio_decoder_initial_cache(batch_size=1)
 
         return PreprocessOutput(
             input_tokens=input_ids,
@@ -782,28 +827,36 @@ class VoxtralTTSModel(BaseLM):
     ) -> torch.Tensor:
         """Embed the model input, run the backbone, return hidden states.
 
-        Two input regimes, distinguished by the codebook dimension of
-        ``input_ids`` (mirrors the prefill-vs-decode embedding split in
-        ``csm.py`` / ``cosyvoice2.py``):
+        Two input regimes, distinguished by the *attention wrapper type* (mirrors
+        the prefill-vs-decode embedding split in ``csm.py`` / ``cosyvoice2.py``):
 
-        * **Prefill** -- ``input_ids`` is ``(seq_len, 1)``: the text prompt. Each
-          token is embedded via the backbone's text ``embed_tokens`` table and the
-          per-position voice reference (``input_features``) is scattered onto the
-          ``[AUDIO]``-token slots where ``input_masks`` is true.
-        * **Decode** -- ``input_ids`` is ``(B, n_codebooks)``: the previously
-          generated 37-codebook audio frame. It is embedded via the backbone's
+        * **Prefill** (``attn_wrapper`` is a ``FlashInferPrefillWrapper``) --
+          ``input_ids`` holds the text prompt. Codebook 0 carries the text token
+          id; it is embedded via the backbone's text ``embed_tokens`` table and
+          the per-position voice reference (``input_features``) is scattered onto
+          the ``[AUDIO]``-token slots where ``input_masks`` is true.
+        * **Decode** (``attn_wrapper`` is a ``FlashInferDecodeWrapper``) --
+          ``input_ids`` is ``(B, n_codebooks)``: the previously generated
+          37-codebook audio frame. It is embedded via the backbone's
           ``audio_codebook_embeddings`` table with per-codebook offsets and summed
           across codebooks (so the backbone actually "hears" the audio it just
           produced and can track progress toward end-of-speech).
+
+        The regime is keyed off ``type(attn_wrapper)`` rather than
+        ``input_ids.shape[1]``: under CUDA graphs the worker's prefill
+        ``input_ids`` buffer is allocated ``n_codebooks``-wide (the prefill text
+        ids are broadcast across all 37 columns), so the codebook-dimension test
+        is ambiguous. The wrapper type is a capture-time-static signal -- the
+        prefill graph is always captured with a ``FlashInferPrefillWrapper`` and
+        the decode graph with a ``FlashInferDecodeWrapper`` -- so this branch is
+        resolved correctly at graph-capture trace time in both eager and
+        CUDA-graph modes.
 
         Returns hidden states with a codebook dimension added (``[:, None, :]``)
         so the worker's logits-buffer plumbing stays uniform; the actual audio
         decoding happens in ``sampling`` via the inline acoustic head.
         """
-        if input_ids.shape[1] == self.n_codebooks:
-            # decode step: previously generated 37-codebook audio frame
-            inputs_embeds = self._embed_audio_frame(input_ids)
-        else:
+        if isinstance(attn_wrapper, FlashInferPrefillWrapper):
             # prefill step: codebook 0 holds the text token id; embed via the
             # text table, then overwrite audio-token slots with the voice
             # reference carried in input_features.
@@ -811,6 +864,9 @@ class VoxtralTTSModel(BaseLM):
                 input_ids[:, 0].clamp(0, self.model.embed_tokens.weight.shape[0] - 1)
             )
             inputs_embeds = torch.where(input_masks[:, :1], input_features, inputs_embeds)
+        else:
+            # decode step: previously generated 37-codebook audio frame
+            inputs_embeds = self._embed_audio_frame(input_ids)
 
         hidden_states = self.model(
             inputs_embeds=inputs_embeds,

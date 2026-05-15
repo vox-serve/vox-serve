@@ -243,22 +243,25 @@ class CudaGraphWorker(ModelWorker):
             max_seq_len, dtype=torch.int32, device=self.device
         )
         prefill_input_features_buffer = torch.zeros(
-            max_seq_len, self.model.hidden_size,
+            max_seq_len, self.model.embedding_hidden_size,
             dtype=torch.bfloat16, device=self.device
         )
         prefill_input_masks_buffer = torch.zeros(
             max_seq_len, self.model.n_codebooks, dtype=torch.bool, device=self.device
         )
 
-        # Create prefill output buffers
+        # Create prefill output buffers. Inline-audio-head models (e.g. Voxtral-TTS)
+        # have no vocab-logits head: forward() returns (seq, 1, embedding_hidden_size)
+        # backbone hidden states, which sampling() feeds to the acoustic head. Size
+        # the buffer for hidden states in that case, not vocab_size.
         prefill_logits_buffer = torch.zeros(
             max_seq_len,
             1 if (self.has_depth_transformer or self.has_inline_audio_head) else self.model.n_codebooks,
-            self.model.vocab_size,
+            self.model.embedding_hidden_size if self.has_inline_audio_head else self.model.vocab_size,
             dtype=torch.bfloat16, device=self.device
         )
         prefill_backbone_hidden_states_buffer = torch.zeros(
-            max_seq_len, self.model.hidden_size,
+            max_seq_len, self.model.embedding_hidden_size,
             dtype=torch.bfloat16, device=self.device
         )
 
@@ -385,7 +388,7 @@ class CudaGraphWorker(ModelWorker):
         position_ids_buffer = torch.zeros(self.max_batch_size, dtype=torch.int32, device=self.device)
         input_features_buffer = torch.zeros(
             self.max_batch_size,
-            self.model.hidden_size,
+            self.model.embedding_hidden_size,
             dtype=torch.bfloat16,
             device=self.device,
         )
@@ -393,16 +396,19 @@ class CudaGraphWorker(ModelWorker):
             self.max_batch_size, self.model.n_codebooks, dtype=torch.bool, device=self.device
         )
 
-        # Create output buffer (assuming vocab size, will be adjusted based on model)
+        # Create output buffer. Inline-audio-head models (e.g. Voxtral-TTS) have no
+        # vocab-logits head: forward() returns (B, 1, embedding_hidden_size) backbone
+        # hidden states, which sampling() feeds to the acoustic head. Size the buffer
+        # for hidden states in that case, not vocab_size.
         logits_buffer = torch.zeros(
             self.max_batch_size,
             1 if (self.has_depth_transformer or self.has_inline_audio_head) else self.model.n_codebooks,
-            self.model.vocab_size,
+            self.model.embedding_hidden_size if self.has_inline_audio_head else self.model.vocab_size,
             dtype=torch.bfloat16,
             device=self.device,
         )
         backbone_hidden_states_buffer = torch.zeros(
-            self.max_batch_size, self.model.hidden_size, dtype=torch.bfloat16, device=self.device
+            self.max_batch_size, self.model.embedding_hidden_size, dtype=torch.bfloat16, device=self.device
         )
 
         # Store buffers
@@ -1082,9 +1088,11 @@ class CudaGraphWorker(ModelWorker):
         else:
             sampling_kwargs = {}
             if self.has_inline_audio_head:
-                sampling_kwargs["backbone_hidden_states"] = self.cuda_graph_buffers[
-                    "backbone_hidden_states"
-                ][:actual_batch_size]
+                # Inline-audio-head: the graph wrote backbone hidden states into the
+                # "logits" buffer (no vocab-logits head). `logits` here is already
+                # the per-request last-token slice; feed it to the acoustic head as
+                # backbone_hidden_states.
+                sampling_kwargs["backbone_hidden_states"] = logits
             output_ids, task = self.model.sampling(
                 logits=logits,
                 requests=requests,
@@ -1200,9 +1208,11 @@ class CudaGraphWorker(ModelWorker):
         else:
             sampling_kwargs = {}
             if self.has_inline_audio_head:
-                sampling_kwargs["backbone_hidden_states"] = self.cuda_graph_buffers[
-                    "backbone_hidden_states"
-                ][:actual_batch_size]
+                # Inline-audio-head: the graph wrote backbone hidden states into the
+                # "logits" buffer (no vocab-logits head). `logits` here is already
+                # the per-request last-token slice; feed it to the acoustic head as
+                # backbone_hidden_states.
+                sampling_kwargs["backbone_hidden_states"] = logits
             output_ids, task = self.model.sampling(
                 logits=logits,
                 requests=requests,

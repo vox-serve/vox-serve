@@ -76,8 +76,25 @@ class BaseLM(ABC):
     @property
     @abstractmethod
     def hidden_size(self) -> int:
-        """Hidden size of the model."""
+        """Hidden size of the model.
+
+        This is the attention working width (``num_attention_heads * head_dim``),
+        used to size the FlashInfer attention wrappers. For most models it equals
+        the residual-stream width; when they differ (e.g. an explicit ``head_dim``
+        that makes ``n_heads * head_dim != residual_width``), override
+        ``embedding_hidden_size`` to report the residual width separately.
+        """
         pass
+
+    @property
+    def embedding_hidden_size(self) -> int:
+        """Residual-stream / embedding width of the model.
+
+        Used to size the ``input_features`` and ``backbone_hidden_states`` CUDA
+        graph buffers. Defaults to ``hidden_size``; override when the attention
+        working width differs from the residual-stream width.
+        """
+        return self.hidden_size
 
     @property
     def head_dim(self) -> int:
