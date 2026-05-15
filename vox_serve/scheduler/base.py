@@ -1,7 +1,7 @@
 import asyncio
 import json
 import time
-from typing import List
+from typing import List, Optional
 
 import torch
 import zmq
@@ -167,25 +167,66 @@ class Scheduler:
             asyncio.run(task)
 
 
-    async def _step_async(self, task, lm_requests, detokenize_requests):
+    def _spawn_prep_future(
+        self,
+        task: Optional[asyncio.Task],
+        lm_requests: List[Request],
+        detokenize_requests: List[Request],
+    ) -> asyncio.Task:
+        """Schedule prepare_lm_inputs for the next iteration on an executor thread.
+
+        The returned task is awaited from inside the next iteration's run_model,
+        between run_detokenize and run_lm_decode/prefill. While the event loop runs
+        detokenize, the executor thread completes the CPU-heavy prep, so the two
+        overlap on different threads.
+
+        `task` is the previous iteration's update_req_states coroutine (may be None
+        on the first call). We await it so its mutations (req.repetition_cache slice
+        assignment when rep penalty is on, req.done_lm_generation for stopped
+        requests) are visible before prep reads request state.
+        """
+        async def _prep():
+            if task is not None:
+                await task
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(
+                None,
+                self.model_worker.prepare_lm_inputs,
+                lm_requests,
+                detokenize_requests,
+            )
+        return asyncio.ensure_future(_prep())
+
+    async def _step_async(self, task, lm_inputs_future, lm_requests, detokenize_requests):
         """
         Process the next batch of requests asynchronously.
+
+        Inputs for the LM step are prepared on an executor thread (spawned at the end
+        of the previous iteration via _spawn_prep_future) so the CPU-heavy work
+        overlaps with this iteration's run_detokenize on the event loop. The future
+        is awaited inside run_model between detokenize and the LM forward.
         """
 
         # insert/remove requests to self.active_requests
         await self._prepare_requests_async()
 
-        # Prepare LM inputs outside the worker and run either prefill or decode
-        lm_inputs = self.model_worker.prepare_lm_inputs(lm_requests, detokenize_requests)
-
         async def run_model():
-            # run detokenization if needed
+            # run detokenization first — it does not depend on lm_inputs and runs
+            # in parallel (on a separate thread) with the prep future resolving.
             self.model_worker.run_detokenize(detokenize_requests)
 
             # return results to clients
             await self._send_responses_async(detokenize_requests)
 
-            if lm_inputs is not None and lm_inputs["is_prefill"]:
+            # Consume the prep future spawned at the end of the previous iter.
+            # On the first iter this is None and we skip the model work.
+            if lm_inputs_future is None:
+                return None
+            lm_inputs = await lm_inputs_future
+            if lm_inputs is None:
+                return None
+
+            if lm_inputs["is_prefill"]:
                 coro = self.model_worker.run_lm_prefill(lm_requests, lm_inputs)
             else:
                 coro = self.model_worker.run_lm_decode(lm_requests, lm_inputs)
@@ -214,12 +255,23 @@ class Scheduler:
         next_task = model_result
         next_lm_requests, next_detokenize_requests = scheduling_result
 
-        return next_task, next_lm_requests, next_detokenize_requests
+        # Spawn the next iteration's prep on an executor thread. It will resolve
+        # while the next iteration's run_detokenize runs on the event loop.
+        next_lm_inputs_future = self._spawn_prep_future(
+            next_task, next_lm_requests, next_detokenize_requests
+        )
+
+        return next_task, next_lm_inputs_future, next_lm_requests, next_detokenize_requests
 
     async def _run_async_loop(self):
-        task, lm_requests, detokenize_requests = None, [], []
+        task = None
+        lm_inputs_future = None
+        lm_requests: List[Request] = []
+        detokenize_requests: List[Request] = []
         while True:
-            task, lm_requests, detokenize_requests = await self._step_async(task, lm_requests, detokenize_requests)
+            task, lm_inputs_future, lm_requests, detokenize_requests = await self._step_async(
+                task, lm_inputs_future, lm_requests, detokenize_requests
+            )
             await asyncio.sleep(0)
 
     def run_forever(self):
