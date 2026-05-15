@@ -77,12 +77,20 @@ class BenchmarkResults:
 class BenchmarkClient:
     """Client for benchmarking vox-serve TTS server."""
 
-    def __init__(self, host: str, port: int, save_audio: bool = False, data_source: str = "fixed"):
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        save_audio: bool = False,
+        data_source: str = "fixed",
+        perf_eval_max_tokens: Optional[int] = None,
+    ):
         self.base_url = f"http://{host}:{port}"
         self.save_audio = save_audio
         self.output_dir = "benchmark_output"
         self.metrics: List[RequestMetrics] = []
         self.data_source = data_source
+        self.perf_eval_max_tokens = perf_eval_max_tokens
         self.dataset = None
         self.dataset_size = 0
         self.text_column = None
@@ -225,6 +233,8 @@ class BenchmarkClient:
             form_data = aiohttp.FormData()
             form_data.add_field("text", text)
             form_data.add_field("streaming", "true")
+            if self.perf_eval_max_tokens is not None:
+                form_data.add_field("perf_eval_max_tokens", str(self.perf_eval_max_tokens))
 
             # print(f"new request {request_id=}")
             # Make streaming request
@@ -359,7 +369,7 @@ class BenchmarkClient:
                     scale_theta = 1.0 / (burstiness * rate)
                     inter_arrival_time = np.random.gamma(shape_k, scale_theta)
                 else:
-                    inter_arrival_time = float('inf')
+                    inter_arrival_time = float("inf")
                 next_request_time += inter_arrival_time
 
             print(f"Scheduled {len(tasks)} requests. Waiting for completion...")
@@ -376,14 +386,10 @@ class BenchmarkClient:
                     status = "✓" if result.success else "✗"
                     ttfa_str = f"{result.ttfa:.3f}s" if result.ttfa else "N/A"
                     streaming_viability_str = (
-                        f"{result.streaming_viability:.1f}%"
-                        if result.streaming_viability is not None
-                        else "N/A"
+                        f"{result.streaming_viability:.1f}%" if result.streaming_viability is not None else "N/A"
                     )
                     print(
-                        f"{status} {result.request_id}: "
-                        f"TTFA={ttfa_str}, "
-                        f"Streaming_viability={streaming_viability_str}"
+                        f"{status} {result.request_id}: TTFA={ttfa_str}, Streaming_viability={streaming_viability_str}"
                     )
 
         return self.calculate_results(rate)
@@ -406,16 +412,13 @@ class BenchmarkClient:
         # Extract metrics for successful requests
         ttfa_values = [m.ttfa for m in successful_metrics if m.ttfa is not None]
         streaming_viability_values = [
-            m.streaming_viability for m in successful_metrics
-            if m.streaming_viability is not None
+            m.streaming_viability for m in successful_metrics if m.streaming_viability is not None
         ]
         streaming_viability_per_chunk_values = [
-            m.streaming_viability_per_chunk for m in successful_metrics
-            if m.streaming_viability_per_chunk is not None
+            m.streaming_viability_per_chunk for m in successful_metrics if m.streaming_viability_per_chunk is not None
         ]
         streaming_viability_all_chunks_values = [
-            m.streaming_viability for m in successful_metrics
-            if m.streaming_viability is not None
+            m.streaming_viability for m in successful_metrics if m.streaming_viability is not None
         ]
 
         # Calculate TTFA statistics
@@ -437,7 +440,6 @@ class BenchmarkClient:
         if streaming_viability_all_chunks_values:
             results.streaming_viability_all_chunks_mean = statistics.mean(streaming_viability_all_chunks_values)
 
-
         return results
 
     def _percentile(self, sorted_values: List[float], percentile: int) -> float:
@@ -456,13 +458,11 @@ class BenchmarkClient:
         weight = index - lower_index
         return sorted_values[lower_index] * (1 - weight) + sorted_values[upper_index] * weight
 
-
-
     def print_comparison_table(self, all_results: List[BenchmarkResults]):
         """Print comparison table for multiple request rates."""
-        print("\n" + "="*80)
+        print("\n" + "=" * 80)
         print("MULTIPLE RATE BENCHMARK COMPARISON")
-        print("="*80)
+        print("=" * 80)
 
         if not all_results:
             print("No results to display.")
@@ -474,7 +474,7 @@ class BenchmarkClient:
         # Request Summary Table
         print("\n## Request Summary\n")
         print("| Metric | " + " | ".join([f"{rate:.1f} req/s" for rate in rates]) + " |")
-        print("|--------|" + "|".join(["-"*12 for _ in rates]) + "|")
+        print("|--------|" + "|".join(["-" * 12 for _ in rates]) + "|")
 
         # Total requests row
         total_row = "| Total | " + " | ".join([str(result.total_requests) for result in all_results]) + " |"
@@ -499,7 +499,7 @@ class BenchmarkClient:
         # TTFA Metrics Table
         print("\n## Time to First Audio (TTFA) - seconds\n")
         print("| Statistic | " + " | ".join([f"{rate:.1f} req/s" for rate in rates]) + " |")
-        print("|-----------|" + "|".join(["-"*12 for _ in rates]) + "|")
+        print("|-----------|" + "|".join(["-" * 12 for _ in rates]) + "|")
 
         # Mean TTFA
         mean_ttfa_row = "| Mean | " + " | ".join([f"{result.ttfa_mean:.3f}" for result in all_results]) + " |"
@@ -532,23 +532,27 @@ class BenchmarkClient:
         # Streaming Viability Table (Per-Chunk Metric)
         print("\n## Streaming Viability (Per-Chunk Real-time Requirement) - percentage\n")
         print("| Statistic | " + " | ".join([f"{rate:.1f} req/s" for rate in rates]) + " |")
-        print("|-----------|" + "|".join(["-"*12 for _ in rates]) + "|")
+        print("|-----------|" + "|".join(["-" * 12 for _ in rates]) + "|")
 
         # Mean streaming viability (per-chunk)
-        streaming_per_chunk_row = "| Mean | " + " | ".join([
-            f"{result.streaming_viability_per_chunk_mean:.1f}" for result in all_results]
-        ) + " |"
+        streaming_per_chunk_row = (
+            "| Mean | "
+            + " | ".join([f"{result.streaming_viability_per_chunk_mean:.1f}" for result in all_results])
+            + " |"
+        )
         print(streaming_per_chunk_row)
 
         # Streaming Viability Table (All-Chunks Metric)
         print("\n## Streaming Viability (All-Chunks Real-time Requirement) - percentage\n")
         print("| Statistic | " + " | ".join([f"{rate:.1f} req/s" for rate in rates]) + " |")
-        print("|-----------|" + "|".join(["-"*12 for _ in rates]) + "|")
+        print("|-----------|" + "|".join(["-" * 12 for _ in rates]) + "|")
 
         # Mean streaming viability (all-chunks)
-        streaming_all_chunks_row = "| Mean | " + " | ".join(
-            [f"{result.streaming_viability_all_chunks_mean:.1f}" for result in all_results]
-        ) + " |"
+        streaming_all_chunks_row = (
+            "| Mean | "
+            + " | ".join([f"{result.streaming_viability_all_chunks_mean:.1f}" for result in all_results])
+            + " |"
+        )
         print(streaming_all_chunks_row)
         print()
 
@@ -557,17 +561,35 @@ async def main():
     parser = argparse.ArgumentParser(description="Benchmark vox-serve TTS server")
     parser.add_argument("--host", default="localhost", help="Server host (default: localhost)")
     parser.add_argument("--port", type=int, default=8000, help="Server port (default: 8000)")
-    parser.add_argument("--rate", type=float, nargs='+', default=[1.0],
-                       help="Request rate(s) in req/s (single value or list, default: [1.0])")
+    parser.add_argument(
+        "--rate",
+        type=float,
+        nargs="+",
+        default=[1.0],
+        help="Request rate(s) in req/s (single value or list, default: [1.0])",
+    )
     parser.add_argument("--duration", type=float, default=10.0, help="Test duration (seconds, default: 10.0)")
-    parser.add_argument("--burstiness", type=float, default=1.0,
-                       help="Arrival burstiness parameter (default: 1.0 for Poisson). Lower values = more bursty")
+    parser.add_argument(
+        "--burstiness",
+        type=float,
+        default=1.0,
+        help="Arrival burstiness parameter (default: 1.0 for Poisson). Lower values = more bursty",
+    )
     parser.add_argument("--save-audio", action="store_true", help="Save generated audio files")
-    parser.add_argument("--data-source", type=str, default="fixed",
-                       choices=["fixed", "hifi", "libritts", "lj-speech", "alpacaeval", "commoneval", "wildvoice"],
-                       help="Input data source: 'fixed' for fixed text, or dataset name (default: fixed)")
-    parser.add_argument("--seed", type=int, default=42,
-                       help="Random seed for reproducible experiments (default: 42)")
+    parser.add_argument(
+        "--data-source",
+        type=str,
+        default="fixed",
+        choices=["fixed", "hifi", "libritts", "lj-speech", "alpacaeval", "commoneval", "wildvoice"],
+        help="Input data source: 'fixed' for fixed text, or dataset name (default: fixed)",
+    )
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducible experiments (default: 42)")
+    parser.add_argument(
+        "--perf-eval-max-tokens",
+        type=int,
+        default=None,
+        help="Force every request to run exactly this many LM output tokens (perf-eval mode).",
+    )
 
     args = parser.parse_args()
 
@@ -590,16 +612,18 @@ async def main():
         return 1
 
     # Create and run benchmark
-    client = BenchmarkClient(args.host, args.port, args.save_audio, args.data_source)
+    client = BenchmarkClient(
+        args.host, args.port, args.save_audio, args.data_source, perf_eval_max_tokens=args.perf_eval_max_tokens
+    )
 
     # Always use multiple benchmark approach
     print(f"Running benchmarks at rates: {args.rate}")
     all_results = []
 
     for rate in args.rate:
-        print(f"\n{'='*80}")
+        print(f"\n{'=' * 80}")
         print(f"Running benchmark at {rate} req/s")
-        print(f"{'='*80}")
+        print(f"{'=' * 80}")
 
         # Clear previous metrics
         client.metrics = []
