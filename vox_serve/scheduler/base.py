@@ -474,6 +474,7 @@ class Scheduler:
                 is_streaming=request_dict.get("is_streaming", False),
                 is_pressing=request_dict.get("is_streaming", False), # at first, streaming requests are pressing
                 model_kwargs=request_dict.get("model_kwargs", {}),
+                perf_eval_max_tokens=request_dict.get("perf_eval_max_tokens"),
             )
 
             self.logger.debug("new_request=%s", new_request)

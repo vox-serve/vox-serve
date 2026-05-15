@@ -21,6 +21,10 @@ class Request:
     # Model-specific kwargs (e.g., language, speaker, ref_text for Qwen3-TTS)
     model_kwargs: Dict[str, Any] = field(default_factory=dict)
 
+    # Perf-eval mode flag: when set, model.sampling forces greedy and disables
+    # repetition penalty for this request (see model/orpheus.py).
+    perf_eval_max_tokens: Optional[int] = None
+
     # next_position_id == len(input_tokens) + len(lm_output_tokens) + 1
     next_position_id: int = None
 
