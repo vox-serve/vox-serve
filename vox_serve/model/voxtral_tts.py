@@ -730,6 +730,18 @@ class VoxtralTTSModel(BaseLM):
         return 25
 
     @property
+    def first_chunk_frames(self) -> int:
+        """Emit the first audio chunk after 5 real frames instead of 25 (TTFA gain).
+
+        Mirrors vllm-omni's ``codec_chunk_frames_at_begin=5``
+        (``vllm_omni/deploy/voxtral_tts.yaml``). The model pre-seeds 20 zero-coded
+        silence frames in ``sampling`` before the first real frame is appended;
+        the worker trims those samples from the resulting PCM. See
+        ``BaseLM.first_chunk_frames`` for the contract.
+        """
+        return 5
+
+    @property
     def detokenize_overlap(self) -> int:
         # left-context is a model-private ring buffer, NOT scheduler overlap
         return 0
@@ -1043,6 +1055,14 @@ class VoxtralTTSModel(BaseLM):
             if req.input_masks is not None:
                 req.input_masks = req.input_masks[:1].zero_()
 
+        # Pre-computed once per call: number of zero-coded silence frames to
+        # prepend at the start of each request's audio stream so the first
+        # detokenize chunk fires after ``first_chunk_frames`` real frames
+        # (TTFA optimization; see ``BaseLM.first_chunk_frames``).
+        n_silence_prefill = 0
+        if self.first_chunk_frames is not None:
+            n_silence_prefill = self.detokenize_interval - self.first_chunk_frames
+
         async def update_req_states():
             for i, req in enumerate(requests):
                 req.lm_output_tokens.append(output_ids[i : i + 1])
@@ -1051,6 +1071,12 @@ class VoxtralTTSModel(BaseLM):
                     req.finish_reason = "stop_id_encountered"
                 else:
                     # gap fix #10: lm_output_audio_tokens entries are (1, n_codebooks)
+                    if n_silence_prefill > 0 and len(req.lm_output_audio_tokens) == 0:
+                        # TTFA pre-seed: codec maps code 0 to silence via the
+                        # (x - 2).clamp(min=0) shift in postprocess.
+                        silence = torch.zeros_like(output_ids[i : i + 1])
+                        for _ in range(n_silence_prefill):
+                            req.lm_output_audio_tokens.append(silence)
                     req.lm_output_audio_tokens.append(output_ids[i : i + 1])
                 if req.next_position_id is not None and req.next_position_id > self.max_tokens:
                     req.done_lm_generation = True

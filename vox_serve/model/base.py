@@ -123,6 +123,27 @@ class BaseLM(ABC):
         return 1
 
     @property
+    def first_chunk_frames(self) -> Optional[int]:
+        """Optional small-first-chunk size for TTFA-optimized streaming.
+
+        When ``None`` (default), the detokenizer always emits chunks of
+        ``detokenize_interval`` frames. When set (e.g. ``5`` for Voxtral-TTS,
+        mirroring vllm-omni's ``codec_chunk_frames_at_begin``), the model
+        pre-seeds ``detokenize_interval - first_chunk_frames`` zero-coded
+        silence frames into ``req.lm_output_audio_tokens`` before the first
+        real frame is appended. The scheduler then dispatches the first
+        detokenize chunk as soon as ``first_chunk_frames`` real frames are
+        available (instead of waiting for the full ``detokenize_interval``);
+        the worker trims the leading silence-frame samples from the resulting
+        PCM. Subsequent chunks behave normally.
+
+        Models that override must also rely on the codec mapping ``code 0``
+        to silence (Voxtral does, via the ``(x - 2).clamp(min=0)`` shift in
+        ``VoxtralTTSModel.postprocess``).
+        """
+        return None
+
+    @property
     def supports_audio_input(self) -> bool:
         """Indicates if the model accepts audio input."""
         return False

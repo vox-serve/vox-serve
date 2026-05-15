@@ -1495,6 +1495,18 @@ class CudaGraphWorker(ModelWorker):
                 )
                 audio_int16 = audio_int16[:, :trim_len]
 
+            # TTFA first-chunk: when the model pre-seeded N silence frames at the
+            # head of lm_output_audio_tokens, this chunk's slice [0:25] is
+            # ``N silence ++ first_chunk_frames real`` (see BaseLM.first_chunk_frames).
+            # Drop the leading silence samples from the PCM. Done AFTER tail trim
+            # so the early-EOS (real_frames < first_chunk_frames) case still works.
+            first_chunk_frames = getattr(self.model, "first_chunk_frames", None)
+            if decode_idx == 0 and first_chunk_frames is not None:
+                n_silence = self.detokenize_interval - first_chunk_frames
+                samples_per_frame = self.model.output_audio_length // self.detokenize_interval
+                prefix_samples = n_silence * samples_per_frame
+                audio_int16 = audio_int16[:, prefix_samples:]
+
             audio_bytes = audio_int16.tobytes()
             req.output_audio.put(audio_bytes)
 
