@@ -211,9 +211,21 @@ class Scheduler:
         await self._prepare_requests_async()
 
         async def run_model():
-            # run detokenization first — it does not depend on lm_inputs and runs
-            # in parallel (on a separate thread) with the prep future resolving.
-            self.model_worker.run_detokenize(detokenize_requests)
+            loop = asyncio.get_running_loop()
+
+            # Wait for previous iter's update_req_states task to settle
+            # req.lm_output_audio_tokens before run_detokenize reads it on an
+            # executor thread. Without this gate, the executor thread could race
+            # with the task running on the event loop.
+            if task is not None:
+                await task
+
+            # Run detokenize on an executor thread so its internal cuda.synchronize
+            # calls block an executor thread, not the event loop. The event loop
+            # is then free to run run_scheduling and advance the prep future.
+            await loop.run_in_executor(
+                None, self.model_worker.run_detokenize, detokenize_requests
+            )
 
             # return results to clients
             await self._send_responses_async(detokenize_requests)
@@ -226,10 +238,16 @@ class Scheduler:
             if lm_inputs is None:
                 return None
 
+            # Same offload for the LM forward: cuda.synchronize inside
+            # run_lm_decode/prefill blocks an executor thread rather than the loop.
             if lm_inputs["is_prefill"]:
-                coro = self.model_worker.run_lm_prefill(lm_requests, lm_inputs)
+                coro = await loop.run_in_executor(
+                    None, self.model_worker.run_lm_prefill, lm_requests, lm_inputs
+                )
             else:
-                coro = self.model_worker.run_lm_decode(lm_requests, lm_inputs)
+                coro = await loop.run_in_executor(
+                    None, self.model_worker.run_lm_decode, lm_requests, lm_inputs
+                )
 
             next_task = asyncio.create_task(coro) if coro else None
             return next_task
