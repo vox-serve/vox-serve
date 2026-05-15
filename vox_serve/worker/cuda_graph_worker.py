@@ -1009,18 +1009,63 @@ class CudaGraphWorker(ModelWorker):
             padded_batch_size, actual_batch_size, padded_seq_len, actual_seq_len
         )
 
-        # Pad batch size if needed
-        # We need to temporally allocate new pages for the padded requests, to be released soon after the graph replay
-        tmp_page = None
-        if actual_batch_size < padded_batch_size:
-            tmp_page = self.empty_pages.get_nowait()
-            padding_size = padded_batch_size - actual_batch_size
+        # Capture the real per-request qo offsets BEFORE padding mutates
+        # qo_indptr (the padding_tokens>0 branch below inflates qo_indptr[-1]).
+        actual_qo_indptr = torch.tensor(qo_indptr[: actual_batch_size + 1], dtype=torch.int32, device=self.device)
 
-            for _ in range(padding_size):
-                qo_indptr.append(qo_indptr[-1])
-                paged_kv_indptr.append(paged_kv_indptr[-1] + 1)
+        # Pad to the captured graph shape. The prefill CUDA graph is captured
+        # per (batch_size, seq_len) bucket and replays the model over exactly
+        # `padded_seq_len` input rows, so the FlashInfer plan must describe
+        # exactly that many query tokens AND the input buffer's padding rows
+        # must hold valid token ids. This matters even when
+        # actual_batch_size == padded_batch_size: a single short prompt is
+        # still bucketed up to a 128/512/1024-token graph. Without this,
+        # the captured attention kernel reads outside its planned region and
+        # the embedding lookup indexes stale token ids -> illegal memory
+        # access (masked by timing in plain sync; exposed by nvtx/async).
+        tmp_pages = []
+        padding_tokens = padded_seq_len - actual_seq_len
+        padding_requests = padded_batch_size - actual_batch_size
+
+        if padding_tokens < 0:
+            raise RuntimeError(
+                f"Prefill CUDA graph key {graph_key} is smaller than actual seq_len={actual_seq_len}"
+            )
+
+        if padding_requests > 0:
+            # Distribute the padding tokens across the empty padding requests.
+            base_padding_len, extra_padding = divmod(padding_tokens, padding_requests)
+
+            for i in range(padding_requests):
+                pad_len = base_padding_len + (1 if i < extra_padding else 0)
+                qo_indptr.append(qo_indptr[-1] + pad_len)
+
+                n_pages = max(1, (pad_len + self.page_size - 1) // self.page_size)
+                for _ in range(n_pages):
+                    tmp_page = self.empty_pages.get_nowait()
+                    tmp_pages.append(tmp_page)
+                    paged_kv_indices.append(tmp_page)
+
+                paged_kv_indptr.append(paged_kv_indptr[-1] + n_pages)
+                last_page_len = pad_len % self.page_size
+                paged_kv_last_page_len.append(last_page_len if last_page_len else self.page_size)
+        elif padding_tokens > 0:
+            # No padding requests (actual_batch_size == padded_batch_size) but
+            # the seq_len bucket is larger: extend the last real request with
+            # the extra query tokens and back them with temp KV pages.
+            qo_indptr[-1] += padding_tokens
+
+            n_extra_pages = (paged_kv_last_page_len[-1] + padding_tokens + self.page_size - 1) // self.page_size - (
+                1 if paged_kv_last_page_len[-1] > 0 else 0
+            )
+            for _ in range(n_extra_pages):
+                tmp_page = self.empty_pages.get_nowait()
+                tmp_pages.append(tmp_page)
                 paged_kv_indices.append(tmp_page)
-                paged_kv_last_page_len.append(1)
+
+            paged_kv_indptr[-1] += n_extra_pages
+            padded_last_page_len = (paged_kv_last_page_len[-1] + padding_tokens) % self.page_size
+            paged_kv_last_page_len[-1] = padded_last_page_len if padded_last_page_len else self.page_size
 
         # Plan attention wrapper
         qo_indptr_tensor = torch.tensor(qo_indptr, dtype=torch.int32)
@@ -1039,14 +1084,24 @@ class CudaGraphWorker(ModelWorker):
 
         graph = self.cuda_graphs_lm_prefill[graph_key]
 
-        # Copy inputs to CUDA graph buffers
+        # Copy inputs to CUDA graph buffers. Zero the padding tail so the
+        # captured graph's embedding lookup over the full padded_seq_len rows
+        # never indexes stale (possibly out-of-vocab) token ids left over from
+        # a previous, longer prefill.
         self.cuda_graph_buffers["prefill_input_ids"][:actual_seq_len].copy_(input_ids)
         self.cuda_graph_buffers["prefill_position_ids"][:actual_seq_len].copy_(position_ids)
+        if actual_seq_len < padded_seq_len:
+            self.cuda_graph_buffers["prefill_input_ids"][actual_seq_len:padded_seq_len].zero_()
+            self.cuda_graph_buffers["prefill_position_ids"][actual_seq_len:padded_seq_len].zero_()
 
         if self.model.needs_input_features:
             self.cuda_graph_buffers["prefill_input_features"][:actual_seq_len].copy_(input_features)
+            if actual_seq_len < padded_seq_len:
+                self.cuda_graph_buffers["prefill_input_features"][actual_seq_len:padded_seq_len].zero_()
         if self.model.needs_input_masks:
             self.cuda_graph_buffers["prefill_input_masks"][:actual_seq_len].copy_(input_masks)
+            if actual_seq_len < padded_seq_len:
+                self.cuda_graph_buffers["prefill_input_masks"][actual_seq_len:padded_seq_len].zero_()
 
         # Replay the CUDA graph
         self.nvtx_range_push("cuda_graph_replay")
@@ -1054,13 +1109,13 @@ class CudaGraphWorker(ModelWorker):
         torch.cuda.synchronize()
         self.nvtx_range_pop()
 
-        # Extract logits for the actual batch size - need to get last token for each actual request
-        actual_qo_indptr = qo_indptr_tensor[:actual_batch_size + 1].to(self.device)
+        # Extract logits for the actual batch size - need to get last token for each actual request.
+        # actual_qo_indptr was captured before padding mutated qo_indptr.
         logits = self.cuda_graph_buffers["prefill_logits"][:padded_seq_len]
         logits = logits[actual_qo_indptr[1:] - 1]
 
-        # Release temporaly allocated pages
-        if tmp_page is not None:
+        # Release temporarily allocated padding pages
+        for tmp_page in tmp_pages:
             self.empty_pages.put(tmp_page)
 
         if self.has_depth_transformer:
