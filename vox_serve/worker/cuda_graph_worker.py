@@ -71,12 +71,20 @@ class CudaGraphWorker(ModelWorker):
         self.paged_kv_indices_buffer = torch.zeros(self.max_num_pages).to(self.device).to(torch.int32)
         self.paged_kv_last_page_len_buffer = torch.zeros(self.max_batch_size).to(self.device).to(torch.int32)
 
+        # ``n_state`` is consumed by the FlashInfer wrapper only to derive
+        # ``head_dim = n_state // n_qo_head``. For models where
+        # ``num_attention_heads * head_dim != hidden_size`` (Voxtral has
+        # 32 * 128 = 4096 vs hidden_size 3072), passing hidden_size yields a
+        # WRONG head_dim and silently corrupts attention. Use the actual
+        # attention-state size.
+        attn_state_size = self.model.num_attention_heads * self.model.head_dim
+
         # Prefill wrapper without CUDA graph for fallback
         self.prefill_wrapper_no_cudagraph = FlashInferPrefillWrapper(
             attn_buffer=self.flashinfer_buffer,
             n_qo_head=self.model.num_attention_heads,
             n_kv_head=self.model.num_key_value_heads,
-            n_state=self.model.hidden_size,
+            n_state=attn_state_size,
             page_size=self.page_size,
             use_cuda_graph=False,
         )
@@ -91,7 +99,7 @@ class CudaGraphWorker(ModelWorker):
                 attn_buffer=self.flashinfer_buffer,
                 n_qo_head=self.model.num_attention_heads,
                 n_kv_head=self.model.num_key_value_heads,
-                n_state=self.model.hidden_size,
+                n_state=attn_state_size,
                 page_size=self.page_size,
                 batch_size=batch_size,
                 max_seq_len=seq_len,
@@ -108,7 +116,7 @@ class CudaGraphWorker(ModelWorker):
                 attn_buffer=self.flashinfer_buffer,
                 n_qo_head=self.model.num_attention_heads,
                 n_kv_head=self.model.num_key_value_heads,
-                n_state=self.model.hidden_size,
+                n_state=attn_state_size,
                 page_size=self.page_size,
                 batch_size=batch_size,
                 paged_kv_indptr_buffer=self.paged_kv_indptr_buffer[: batch_size + 1],
@@ -130,6 +138,8 @@ class CudaGraphWorker(ModelWorker):
 
         kv_cache_size = self.kv_cache.numel() * self.kv_cache.element_size()
         self.logger.info(f"KV cache size: {kv_cache_size / 1024 / 1024:.2f} MB")
+
+        self.has_inline_audio_head = self.model.has_inline_audio_head
 
         self.has_depth_transformer = self.model.has_depth_transformer
         if self.has_depth_transformer:
@@ -223,6 +233,11 @@ class CudaGraphWorker(ModelWorker):
                 self.logger.info("Initializing CUDA graphs for depth transformer...")
                 self._initialize_depth_cuda_graphs()
 
+        # Inline-audio-head models (e.g. Voxtral-TTS) can opt into a captured
+        # acoustic-head CUDA graph reusing this worker's graph pool.
+        if hasattr(self.model, "enable_acoustic_graph"):
+            self.model.enable_acoustic_graph(self.cuda_graph_pool, self.cuda_graph_batch_sizes)
+
         self.logger.info(f"CUDA graphs initialized for batch sizes: {list(self.cuda_graphs_lm_decode.keys())}")
 
     def _initialize_prefill_cuda_graphs(self):
@@ -239,22 +254,25 @@ class CudaGraphWorker(ModelWorker):
             max_seq_len, dtype=torch.int32, device=self.device
         )
         prefill_input_features_buffer = torch.zeros(
-            max_seq_len, self.model.hidden_size,
+            max_seq_len, self.model.embedding_hidden_size,
             dtype=torch.bfloat16, device=self.device
         )
         prefill_input_masks_buffer = torch.zeros(
             max_seq_len, self.model.n_codebooks, dtype=torch.bool, device=self.device
         )
 
-        # Create prefill output buffers
+        # Create prefill output buffers. Inline-audio-head models (e.g. Voxtral-TTS)
+        # have no vocab-logits head: forward() returns (seq, 1, embedding_hidden_size)
+        # backbone hidden states, which sampling() feeds to the acoustic head. Size
+        # the buffer for hidden states in that case, not vocab_size.
         prefill_logits_buffer = torch.zeros(
             max_seq_len,
-            1 if self.has_depth_transformer else self.model.n_codebooks,
-            self.model.vocab_size,
+            1 if (self.has_depth_transformer or self.has_inline_audio_head) else self.model.n_codebooks,
+            self.model.embedding_hidden_size if self.has_inline_audio_head else self.model.vocab_size,
             dtype=torch.bfloat16, device=self.device
         )
         prefill_backbone_hidden_states_buffer = torch.zeros(
-            max_seq_len, self.model.hidden_size,
+            max_seq_len, self.model.embedding_hidden_size,
             dtype=torch.bfloat16, device=self.device
         )
 
@@ -381,7 +399,7 @@ class CudaGraphWorker(ModelWorker):
         position_ids_buffer = torch.zeros(self.max_batch_size, dtype=torch.int32, device=self.device)
         input_features_buffer = torch.zeros(
             self.max_batch_size,
-            self.model.hidden_size,
+            self.model.embedding_hidden_size,
             dtype=torch.bfloat16,
             device=self.device,
         )
@@ -389,16 +407,19 @@ class CudaGraphWorker(ModelWorker):
             self.max_batch_size, self.model.n_codebooks, dtype=torch.bool, device=self.device
         )
 
-        # Create output buffer (assuming vocab size, will be adjusted based on model)
+        # Create output buffer. Inline-audio-head models (e.g. Voxtral-TTS) have no
+        # vocab-logits head: forward() returns (B, 1, embedding_hidden_size) backbone
+        # hidden states, which sampling() feeds to the acoustic head. Size the buffer
+        # for hidden states in that case, not vocab_size.
         logits_buffer = torch.zeros(
             self.max_batch_size,
-            1 if self.has_depth_transformer else self.model.n_codebooks,  # TODO: revisit here
-            self.model.vocab_size,
+            1 if (self.has_depth_transformer or self.has_inline_audio_head) else self.model.n_codebooks,
+            self.model.embedding_hidden_size if self.has_inline_audio_head else self.model.vocab_size,
             dtype=torch.bfloat16,
             device=self.device,
         )
         backbone_hidden_states_buffer = torch.zeros(
-            self.max_batch_size, self.model.hidden_size, dtype=torch.bfloat16, device=self.device
+            self.max_batch_size, self.model.embedding_hidden_size, dtype=torch.bfloat16, device=self.device
         )
 
         # Store buffers
@@ -1076,10 +1097,18 @@ class CudaGraphWorker(ModelWorker):
             )
 
         else:
+            sampling_kwargs = {}
+            if self.has_inline_audio_head:
+                # Inline-audio-head: the graph wrote backbone hidden states into the
+                # "logits" buffer (no vocab-logits head). `logits` here is already
+                # the per-request last-token slice; feed it to the acoustic head as
+                # backbone_hidden_states.
+                sampling_kwargs["backbone_hidden_states"] = logits
             output_ids, task = self.model.sampling(
                 logits=logits,
                 requests=requests,
                 repetition_cache=repetition_cache,
+                **sampling_kwargs,
             )
             self.nvtx_range_pop() # sampling
 
@@ -1188,10 +1217,18 @@ class CudaGraphWorker(ModelWorker):
             )
 
         else:
+            sampling_kwargs = {}
+            if self.has_inline_audio_head:
+                # Inline-audio-head: the graph wrote backbone hidden states into the
+                # "logits" buffer (no vocab-logits head). `logits` here is already
+                # the per-request last-token slice; feed it to the acoustic head as
+                # backbone_hidden_states.
+                sampling_kwargs["backbone_hidden_states"] = logits
             output_ids, task = self.model.sampling(
                 logits=logits,
                 requests=requests,
                 repetition_cache=repetition_cache,
+                **sampling_kwargs,
             )
             self.nvtx_range_pop() # sampling
 

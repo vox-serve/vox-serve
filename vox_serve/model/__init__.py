@@ -11,6 +11,7 @@ from .glm_voice import GLMVoiceModel
 from .orpheus import OrpheusModel
 from .qwen3_tts import Qwen3TTSModel
 from .step_audio_2 import StepAudio2Model
+from .voxtral_tts import VoxtralTTSModel
 from .zonos import ZonosModel
 
 # Registry mapping model name patterns to model classes
@@ -38,6 +39,8 @@ MODEL_REGISTRY: Dict[str, Type[BaseLM]] = {
     "Qwen/Qwen3-TTS-12Hz-0.6B-Base": Qwen3TTSModel,
     "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign": Qwen3TTSModel,
     "Qwen/Qwen3-TTS-12Hz-0.6B-VoiceDesign": Qwen3TTSModel,
+    "voxtral-tts": VoxtralTTSModel,
+    "mistralai/Voxtral-4B-TTS-2603": VoxtralTTSModel,
 }
 
 

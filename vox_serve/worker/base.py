@@ -153,11 +153,19 @@ class ModelWorker:
     def _prepare_attention_wrappers(self):
         self.flashinfer_buffer = torch.empty(256 * 1024 * 1024, dtype=torch.uint8, device=self.device)
 
+        # ``n_state`` is consumed by the FlashInfer wrapper only to derive
+        # ``head_dim = n_state // n_qo_head``. For models where
+        # ``num_attention_heads * head_dim != hidden_size`` (Voxtral has
+        # 32 * 128 = 4096 vs hidden_size 3072), passing hidden_size yields a
+        # WRONG head_dim and silently corrupts attention. Use the actual
+        # attention-state size.
+        attn_state_size = self.model.num_attention_heads * self.model.head_dim
+
         self.prefill_wrapper = FlashInferPrefillWrapper(
             attn_buffer=self.flashinfer_buffer,
             n_qo_head=self.model.num_attention_heads,
             n_kv_head=self.model.num_key_value_heads,
-            n_state=self.model.hidden_size,
+            n_state=attn_state_size,
             page_size=self.page_size,
             use_cuda_graph=False,
         )
@@ -165,7 +173,7 @@ class ModelWorker:
             attn_buffer=self.flashinfer_buffer,
             n_qo_head=self.model.num_attention_heads,
             n_kv_head=self.model.num_key_value_heads,
-            n_state=self.model.hidden_size,
+            n_state=attn_state_size,
             page_size=self.page_size,
             use_cuda_graph=False,
         )
@@ -299,7 +307,7 @@ class ModelWorker:
                 paged_kv_indices.extend(req.kv_pages)
                 paged_kv_last_page_len.append(req.kv_last_page_len)
 
-                req.next_position_id = len(req.input_tokens) + 1
+                req.next_position_id = len(req.input_tokens) + self.model.first_decode_position_offset
                 req.done_lm_prefill = True
 
             else:
