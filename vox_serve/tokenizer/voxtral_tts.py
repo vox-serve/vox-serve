@@ -370,16 +370,23 @@ class FlowMatchingAudioTransformer(nn.Module):
         semantic_code: torch.Tensor,
         llm_hidden: torch.Tensor,
         cfg_alpha: torch.Tensor,
+        noise: torch.Tensor | None = None,
     ) -> torch.Tensor:
         B = semantic_code.shape[0]
 
         # Skip decoding if codebook 0 is the [END_AUDIO] token.
         should_decode = semantic_code != self._end_audio_token_id
 
-        # acoustic_codes starts from x_0.
-        x_0 = torch.randn(B, self.model_args.n_acoustic_codebook).to(
-            dtype=llm_hidden.dtype, device=llm_hidden.device
-        )
+        # acoustic_codes starts from x_0. When ``noise`` is provided the caller
+        # supplies the initial Euler-ODE noise draw verbatim (enabling bitwise
+        # eager-vs-CUDA-graph parity tests); otherwise preserve the original
+        # bare ``torch.randn`` behavior exactly.
+        if noise is None:
+            x_0 = torch.randn(B, self.model_args.n_acoustic_codebook).to(
+                dtype=llm_hidden.dtype, device=llm_hidden.device
+            )
+        else:
+            x_0 = noise.to(dtype=llm_hidden.dtype, device=llm_hidden.device)
         x_0 = self._noise_scale * x_0
 
         timesteps = self._timesteps.to(dtype=llm_hidden.dtype)
@@ -444,8 +451,16 @@ class FlowMatchingAudioTransformer(nn.Module):
 
         return v_t
 
-    def forward(self, llm_hidden: torch.Tensor, cfg_alpha: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        llm_hidden: torch.Tensor,
+        cfg_alpha: torch.Tensor,
+        noise: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         # llm_hidden: BxD
+        # ``noise`` (optional, ``(B, n_acoustic_codebook)``) lets a caller inject
+        # the initial Euler-ODE noise draw verbatim; when ``None`` the per-frame
+        # helper falls back to the original bare ``torch.randn`` behavior.
         semantic_logit = self.semantic_codebook_output(llm_hidden).float()
         semantic_logit[:, self._empty_audio_token_id] = -float("inf")  # eoa is allowed
         semantic_logit[:, (len(AudioSpecialTokens) + self.model_args.semantic_codebook_size) :] = -float("inf")
@@ -457,6 +472,7 @@ class FlowMatchingAudioTransformer(nn.Module):
             semantic_code.squeeze(1),
             llm_hidden,
             cfg_alpha=cfg_alpha,
+            noise=noise,
         )
 
         audio_codes = torch.concatenate([semantic_code, acoustic_codes], dim=1)
