@@ -151,16 +151,45 @@ class Scheduler:
         # Prepare LM inputs outside the worker and run either prefill or decode
         lm_inputs = self.model_worker.prepare_lm_inputs(lm_requests, detokenize_requests)
 
-        # run detokenization if needed
-        self.model_worker.run_detokenize(detokenize_requests)
+        # OVERLAP OPT (Part 2): run the SNAC vocoder concurrently with the LLM decode.
+        # The vocoder runs on a dedicated CUDA stream and the decode on the default stream,
+        # so they execute in parallel on the GPU. The ordering below is what enables this:
+        #   1. launch the vocoder (non-blocking) -> kernels in flight on vocoder_stream
+        #   2. enqueue the decode on the default stream -> runs alongside the vocoder
+        #   3. collect the vocoder output (CPU blocks only on the vocoder event, by which
+        #      point the decode is already running)
+        #
+        # Old serialized ordering (vocoder fully finished, incl. a device-wide sync, before
+        # the decode was even enqueued):
+        #   self.model_worker.run_detokenize(detokenize_requests)
+        #   self._send_responses(detokenize_requests)
+        #   if lm_inputs is not None and lm_inputs["is_prefill"]:
+        #       task = self.model_worker.run_lm_prefill(lm_requests, lm_inputs)
+        #   else:
+        #       task = self.model_worker.run_lm_decode(lm_requests, lm_inputs)
 
-        # return results to clients
-        self._send_responses(detokenize_requests)
+        # 1. Launch the vocoder on vocoder_stream (returns immediately; None if nothing to do).
+        detokenize_ctx = self.model_worker.run_detokenize_launch(detokenize_requests)
 
+        # 2. Enqueue LLM prefill/decode on the default stream -> overlaps the vocoder.
         if lm_inputs is not None and lm_inputs["is_prefill"]:
             task = self.model_worker.run_lm_prefill(lm_requests, lm_inputs)
         else:
             task = self.model_worker.run_lm_decode(lm_requests, lm_inputs)
+
+        # 3. Collect vocoder audio. Blocks only on the vocoder completion event, so the decode
+        #    enqueued in step 2 keeps running on the default stream while the CPU waits.
+        self.model_worker.run_detokenize_collect(detokenize_ctx)
+
+        if detokenize_ctx is None:
+            # Decode-only step: there is no vocoder collect to provide backpressure, so sync the
+            # default stream to stop the CPU running unboundedly ahead and accumulating transient
+            # per-step tensors. There is nothing to overlap on a decode-only step, so this sync
+            # costs no concurrency. (Replaces the blanket per-step sync removed from run_forever.)
+            torch.cuda.synchronize()
+
+        # 4. Return results to clients (moved after collect, which produces this step's audio).
+        self._send_responses(detokenize_requests)
 
         # Execute the sampling task right away for synchronous scheduling
         if task is not None:
@@ -179,18 +208,40 @@ class Scheduler:
         lm_inputs = self.model_worker.prepare_lm_inputs(lm_requests, detokenize_requests)
 
         async def run_model():
-            # run detokenization if needed
-            self.model_worker.run_detokenize(detokenize_requests)
+            # OVERLAP OPT (Part 2, async parity): same launch -> decode -> collect ordering as
+            # the sync _step, so the SNAC vocoder (on vocoder_stream) overlaps the LLM decode
+            # (on the default stream) in async mode too, and both modes emit the same NVTX
+            # markers (detokenize_launch_* / detokenize_collect) for apples-to-apples profiling.
+            #
+            # Old serialized ordering (vocoder ran fully, incl. a device sync, before decode):
+            #   self.model_worker.run_detokenize(detokenize_requests)
+            #   await self._send_responses_async(detokenize_requests)
+            #   if lm_inputs is not None and lm_inputs["is_prefill"]:
+            #       coro = self.model_worker.run_lm_prefill(lm_requests, lm_inputs)
+            #   else:
+            #       coro = self.model_worker.run_lm_decode(lm_requests, lm_inputs)
+            #   next_task = asyncio.create_task(coro) if coro else None
 
-            # return results to clients
-            await self._send_responses_async(detokenize_requests)
+            # 1. Launch the vocoder on vocoder_stream (non-blocking; None if nothing to do).
+            detokenize_ctx = self.model_worker.run_detokenize_launch(detokenize_requests)
 
+            # 2. Enqueue LLM prefill/decode on the default stream -> overlaps the vocoder.
             if lm_inputs is not None and lm_inputs["is_prefill"]:
                 coro = self.model_worker.run_lm_prefill(lm_requests, lm_inputs)
             else:
                 coro = self.model_worker.run_lm_decode(lm_requests, lm_inputs)
-
             next_task = asyncio.create_task(coro) if coro else None
+
+            # 3. Collect vocoder audio. Blocks only on the vocoder completion event, so the
+            #    decode enqueued in step 2 keeps running on the default stream meanwhile.
+            #    (No ctx-None device sync here, unlike sync _step: in async the previous step's
+            #    sampling task is awaited in run_scheduling and its torch.nonzero already bounds
+            #    run-ahead, so a blocking sync on the event-loop thread would be wasteful.)
+            self.model_worker.run_detokenize_collect(detokenize_ctx)
+
+            # 4. Return results to clients (after collect, which produced this step's audio).
+            await self._send_responses_async(detokenize_requests)
+
             return next_task
 
         async def run_scheduling():
@@ -231,7 +282,13 @@ class Scheduler:
         else:
             while True:
                 self._step()
-                torch.cuda.synchronize()
+                # OVERLAP OPT (Part 1): removed the blanket per-step device-wide sync.
+                # It was the dominant serializer (forced CPU/GPU lock-step every step and
+                # drained the vocoder stream, preventing decode/vocoder overlap). Ordering and
+                # backpressure are now handled inside _step: the vocoder completion event in
+                # run_detokenize_collect bounds run-ahead on detokenize steps, and a default-
+                # stream sync covers decode-only steps.
+                # torch.cuda.synchronize()
 
     def _select_lm_requests(self):
         """

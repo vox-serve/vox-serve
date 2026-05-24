@@ -734,23 +734,29 @@ class ModelWorker:
 
     def nvtx_range_push(self, name: str):
         """
-        Push an NVTX range with CUDA synchronization if profiling is enabled.
-        Does nothing if NVTX profiling is disabled.
+        Push an NVTX range if profiling is enabled. Does nothing if NVTX is disabled.
 
         Args:
             name: Name of the NVTX range
         """
         if self.nvtx_enabled:
-            torch.cuda.synchronize()
+            # OVERLAP OPT: removed the torch.cuda.synchronize() that used to precede the
+            # marker. The sync only existed to stretch the CPU-side NVTX range so it visually
+            # bracketed the GPU kernels — but it serializes the CPU/GPU and drains every
+            # stream, which would erase the decode/vocoder overlap we now want to measure.
+            # NVTX ranges are CPU-thread markers; kernel timing comes from CUPTI hardware
+            # timestamps regardless, and kernels are attributed to a range via correlationId.
+            # torch.cuda.synchronize()
             torch.cuda.nvtx.range_push(name)
 
     def nvtx_range_pop(self):
         """
-        Pop an NVTX range with CUDA synchronization if profiling is enabled.
-        Does nothing if NVTX profiling is disabled.
+        Pop an NVTX range if profiling is enabled. Does nothing if NVTX is disabled.
         """
         if self.nvtx_enabled:
-            torch.cuda.synchronize()
+            # OVERLAP OPT: removed the torch.cuda.synchronize() here for the same reason as
+            # in nvtx_range_push — it would serialize the streams and hide the overlap.
+            # torch.cuda.synchronize()
             torch.cuda.nvtx.range_pop()
 
     def free_kv_cache(self, request: Request):

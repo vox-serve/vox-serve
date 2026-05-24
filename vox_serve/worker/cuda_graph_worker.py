@@ -1,3 +1,5 @@
+import contextlib
+from dataclasses import dataclass
 from typing import Coroutine, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -7,6 +9,23 @@ from ..flashinfer_utils import FlashInferDecodeWrapper, FlashInferPrefillWrapper
 from ..requests import LMInputs, Request
 from ..tokenizer.base import DecoderCache
 from .base import ModelWorker
+
+
+@dataclass
+class DetokenizeContext:
+    """Handle returned by run_detokenize_launch and consumed by run_detokenize_collect.
+
+    The detokenize step is split into a non-blocking GPU "launch" and a later CPU "collect"
+    so the caller can enqueue the LLM decode on the default stream in between. This object
+    carries the state needed to finish the work once the vocoder kernels complete: which
+    request/chunk each output row belongs to, the batch size to slice, and the CUDA event
+    that signals the vocoder graph has finished on self.vocoder_stream.
+    """
+
+    requests: List[Request]
+    request_chunk_mapping: List[Tuple[int, int]]
+    actual_batch_size: int
+    done_event: torch.cuda.Event
 
 
 class CudaGraphWorker(ModelWorker):
@@ -36,6 +55,10 @@ class CudaGraphWorker(ModelWorker):
         else:
             self.detokenizer_cuda_graph_pool = None
 
+        # Dedicated stream for the vocoder/detokenizer so its kernels can overlap with the
+        # LLM decode running on the default stream (see run_detokenize_launch/collect).
+        self.vocoder_stream = torch.cuda.Stream(device=self.device)
+
         # Initialize CUDA graphs after parent initialization
         original_nvtx_enable = self.nvtx_enabled
         self.nvtx_enabled = False  # Disable NVTX during initialization to reduce overhead
@@ -60,7 +83,7 @@ class CudaGraphWorker(ModelWorker):
         # shapes can reuse the memory
         self.cuda_graph_batch_sizes = [2**i for i in range(int(np.log2(self.max_batch_size)) + 1)][::-1]
         self.cuda_graph_seq_len_buckets = [1024][::-1]
-        self.prefill_graph_batch_size = 8
+        self.prefill_graph_batch_size = 256
         self.cuda_graph_pool = torch.cuda.graph_pool_handle()
         self.depth_unrolled_graph_pool = torch.cuda.graph_pool_handle()
 
@@ -1138,7 +1161,11 @@ class CudaGraphWorker(ModelWorker):
             paged_kv_last_page_len_tensor,
             torch.bfloat16,
         )
-        torch.cuda.synchronize()
+        # OVERLAP OPT (Part 1): removed the device-wide sync after plan(). plan()'s H2D
+        # copies and the decode graph replay below are both enqueued on the default stream,
+        # so they are already FIFO-ordered — the sync was redundant. It also drained the
+        # vocoder stream, which would defeat the decode/vocoder overlap.
+        # torch.cuda.synchronize()
 
         graph = self.cuda_graphs_lm_decode[padded_batch_size]
 
@@ -1154,7 +1181,11 @@ class CudaGraphWorker(ModelWorker):
         # Replay the CUDA graph
         self.nvtx_range_push("cuda_graph_replay")
         graph.replay()
-        torch.cuda.synchronize()
+        # OVERLAP OPT (Part 1): removed the device-wide sync after replay. The logits buffer
+        # is consumed by GPU sampling kernels (model.sampling below) on the same default
+        # stream, so ordering is implicit. Keeping a sync here would block the CPU and
+        # prevent it from launching/collecting the concurrent vocoder work.
+        # torch.cuda.synchronize()
         self.nvtx_range_pop()
 
         # Copy output from buffer - only take the actual batch size, not padded
@@ -1469,4 +1500,182 @@ class CudaGraphWorker(ModelWorker):
                 req.done_all = True
 
         self.nvtx_range_pop() # detokenize
+        return
+
+    # ------------------------------------------------------------------
+    # Overlap-optimized detokenize (Part 2): launch + collect
+    #
+    # The monolithic run_detokenize() above blocks the CPU on a device-wide
+    # torch.cuda.synchronize() right after the SNAC graph replay, so the scheduler
+    # cannot enqueue the LLM decode until the vocoder is fully done -> the two never
+    # overlap on the single (default) stream. The pair below splits that work:
+    #   * run_detokenize_launch() enqueues the SNAC graph on self.vocoder_stream and
+    #     returns immediately (no host wait).
+    #   * the scheduler then launches the LLM decode on the default stream.
+    #   * run_detokenize_collect() waits only on the vocoder's completion event and
+    #     copies audio to the host.
+    # Because the vocoder runs on its own stream while the decode runs on the default
+    # stream, the two execute concurrently. run_detokenize() is intentionally kept
+    # intact for callers that don't pipeline (e.g. offline/disaggregation schedulers).
+    # ------------------------------------------------------------------
+    def run_detokenize_launch(self, requests: List[Request]) -> Optional[DetokenizeContext]:
+        """Enqueue the SNAC vocoder graph on self.vocoder_stream without blocking the CPU.
+
+        Returns a DetokenizeContext to be passed to run_detokenize_collect, or None when
+        there is nothing to detokenize this step.
+        """
+        self.nvtx_range_push(f"detokenize_launch_bs{len(requests)}")
+        if len(requests) == 0:
+            self.nvtx_range_pop()
+            return None
+
+        # ---- CPU-side input assembly (identical to run_detokenize) ----
+        token_ids = []
+        decoder_caches: List[DecoderCache] = []
+        request_chunk_mapping = []  # Track which request each chunk belongs to
+
+        for req_idx, req in enumerate(requests):
+            # Process multiple chunks from the same request if available
+            for chunk_idx in range(len(req.audio_decode_idx)):
+                decode_idx = req.audio_decode_idx[chunk_idx]
+                new_tokens = req.lm_output_audio_tokens[
+                    decode_idx : decode_idx + self.detokenize_interval
+                ]
+
+                if len(new_tokens) < self.detokenize_interval:
+                    new_tokens.extend([new_tokens[-1]] * (self.detokenize_interval - len(new_tokens)))
+
+                token_ids.append(torch.cat(new_tokens, dim=0))
+                if req.decoder_cache is not None:
+                    decoder_caches.append(req.decoder_cache)
+                request_chunk_mapping.append((req_idx, chunk_idx))
+
+        if not token_ids:
+            self.nvtx_range_pop()
+            return None
+
+        actual_batch_size = len(token_ids)
+        padded_batch_size = self._get_cuda_graph_batch_size(actual_batch_size)
+        graph = self.cuda_graphs_detokenization[padded_batch_size]
+
+        # When the detokenizer shares the GPU with the LLM (Orpheus single-GPU case), run on
+        # the dedicated vocoder stream so the SNAC kernels overlap the decode that the caller
+        # enqueues on the default stream next. Under disaggregation the detokenizer lives on a
+        # separate GPU and already overlaps the LLM, so we keep the default stream there.
+        use_vocoder_stream = self.detokenizer_device == self.device
+        stream_ctx = torch.cuda.stream(self.vocoder_stream) if use_vocoder_stream else contextlib.nullcontext()
+
+        # Capture the default stream BEFORE entering the vocoder-stream context. Inside that
+        # context torch.cuda.current_stream() would return the vocoder stream itself, making
+        # the wait_stream() below a no-op.
+        default_stream = torch.cuda.current_stream(self.device)
+
+        with torch.cuda.device(self.detokenizer_device):
+            with stream_ctx:
+                if use_vocoder_stream:
+                    # Order the vocoder behind work ALREADY queued on the default stream
+                    # (the prior-step decodes that produced the token tensors we read above),
+                    # but NOT behind the current step's decode (not yet enqueued). This is what
+                    # makes the overlap safe: detokenize(step k) never reads decode(k)'s output.
+                    self.vocoder_stream.wait_stream(default_stream)
+
+                token_ids_stacked = torch.stack(token_ids, dim=0)
+                if self.detokenizer_device != self.device:
+                    self.nvtx_range_push("transfer_to_detokenizer")
+                    token_ids_stacked = token_ids_stacked.to(self.detokenizer_device, non_blocking=True)
+                    # Disaggregation only: keep the original explicit sync after the cross-GPU
+                    # H2D copy. This path doesn't use vocoder_stream (the detokenizer is on a
+                    # separate GPU and already overlaps the LLM), so the sync costs no overlap
+                    # and preserves the pre-optimization behavior for multi-GPU setups.
+                    torch.cuda.synchronize(device=self.detokenizer_device)
+                    self.nvtx_range_pop()
+
+                self.cuda_graph_buffers["detokenize_input"][:actual_batch_size].copy_(token_ids_stacked)
+
+                if self.cuda_graph_buffers["detokenize_cache"] is not None:
+                    batched_cache = DecoderCache.cat(decoder_caches)
+                    sliced_buffer = self.cuda_graph_buffers["detokenize_cache"][:actual_batch_size]
+                    sliced_buffer.copy_from(batched_cache)
+
+                self.nvtx_range_push("detokenize_replay")
+                graph.replay()
+                self.nvtx_range_pop()
+
+                # Record completion on the stream the graph ran on. collect() waits on this
+                # event instead of a device-wide synchronize, so the concurrent decode on the
+                # default stream is never drained.
+                done_event = torch.cuda.Event()
+                done_event.record()
+
+        self.nvtx_range_pop()  # detokenize_launch
+        return DetokenizeContext(
+            requests=requests,
+            request_chunk_mapping=request_chunk_mapping,
+            actual_batch_size=actual_batch_size,
+            done_event=done_event,
+        )
+
+    def run_detokenize_collect(self, ctx: Optional[DetokenizeContext]) -> None:
+        """Wait on the vocoder event and copy audio to the host. Pairs with run_detokenize_launch.
+
+        Must be called after the caller has enqueued the LLM decode, so the CPU only blocks
+        here (on the vocoder event) while that decode is already running on the default stream.
+        """
+        if ctx is None:
+            return
+
+        self.nvtx_range_push("detokenize_collect")
+        requests = ctx.requests
+        request_chunk_mapping = ctx.request_chunk_mapping
+        actual_batch_size = ctx.actual_batch_size
+
+        # Block the CPU only on the vocoder stream's completion event. This replaces the old
+        # device-wide torch.cuda.synchronize() (which would have drained the decode too).
+        ctx.done_event.synchronize()
+
+        audio_tensors = self.cuda_graph_buffers["detokenize_output"][:actual_batch_size]
+
+        # Copy back updated decoder caches to each request (no-op for Orpheus: cache is None)
+        if self.cuda_graph_buffers["detokenize_cache"] is not None:
+            for i, (req_idx, _chunk_idx) in enumerate(request_chunk_mapping):
+                req = requests[req_idx]
+                req.decoder_cache.copy_from(self.cuda_graph_buffers["detokenize_cache"][i : i + 1])
+
+        if self.needs_watermarking:
+            for i in range(audio_tensors.shape[0]):
+                audio_tensors[i, 0] = self.run_watermark(audio_tensors[i, 0], orig_sr=24000)
+
+        # Process each chunk and assign to the corresponding request
+        for i, (req_idx, chunk_idx) in enumerate(request_chunk_mapping):
+            req = requests[req_idx]
+            decode_idx = req.audio_decode_idx[chunk_idx]
+
+            audio = audio_tensors[i].detach().cpu().numpy()
+            audio_int16 = (audio * 32767).astype(np.int16)
+
+            last_chunk_len = len(
+                req.lm_output_audio_tokens[
+                    decode_idx : decode_idx + self.detokenize_interval
+                ]
+            )
+            if last_chunk_len < self.detokenize_interval:
+                # remove the padded audio
+                trim_len = int(
+                    audio_int16.shape[1]
+                    * (last_chunk_len - 0.5)
+                    / self.detokenize_interval
+                )
+                audio_int16 = audio_int16[:, :trim_len]
+
+            audio_bytes = audio_int16.tobytes()
+            req.output_audio.put(audio_bytes)
+
+        # Check if any request is completely done
+        for req in requests:
+            if req.done_lm_generation and (
+                req.audio_decode_idx[-1] + self.detokenize_interval >= len(req.lm_output_audio_tokens)
+            ):
+                req.done_all = True
+
+        self.nvtx_range_pop()  # detokenize_collect
         return
