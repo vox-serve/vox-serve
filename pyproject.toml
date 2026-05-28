@@ -58,6 +58,8 @@ dependencies = [
     "inflect>=7.4.0",
     "requests>=2.32.0",
     "PyYAML>=6.0.2",
+    "ko-speech-tools>=0.1.0",
+    "num2words>=0.5.14",
 ]
 
 [project.urls]
