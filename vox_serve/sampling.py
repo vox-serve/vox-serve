@@ -161,18 +161,24 @@ class Sampler:
         Returns:
             Updated repetition cache tensor.
         """
-        # Shift the cache to make room for new tokens
+        # Use explicit batch indices to pair each row with its own vocab index; the
+        # implicit-broadcast form would contaminate every row's cache with every
+        # other row's tokens under concurrent batched decoding.
+        B = output_ids.shape[0]
+        n_cb_out = output_ids.shape[1]
+        n_cb_cache = repetition_cache.shape[2]
+        batch_idx = torch.arange(B, device=output_ids.device)
+
         if window_size > 1:
-            # shift the cache to the left and add the new token
             repetition_cache[:, :-1] = repetition_cache[:, 1:]
             repetition_cache[:, -1].zero_()
-            if output_ids.shape[1] == 1 and repetition_cache.shape[2] != 1:
-                repetition_cache[:, -1, 0, output_ids[:, 0]] = True
+            if n_cb_out == 1 and n_cb_cache != 1:
+                repetition_cache[batch_idx, -1, 0, output_ids[:, 0]] = True
             else:
-                repetition_cache[:, -1, :, output_ids] = True
-
-        # global cache, just set the new token
-        elif output_ids.shape[1] == 1 and repetition_cache.shape[2] != 1:
-            repetition_cache[:, :, 0, output_ids[:, 0]] = True
+                cb_idx = torch.arange(n_cb_out, device=output_ids.device)
+                repetition_cache[batch_idx[:, None], -1, cb_idx[None, :], output_ids] = True
+        elif n_cb_out == 1 and n_cb_cache != 1:
+            repetition_cache[batch_idx, :, 0, output_ids[:, 0]] = True
         else:
-            repetition_cache[:, :, :, output_ids] = True
+            cb_idx = torch.arange(n_cb_out, device=output_ids.device)
+            repetition_cache[batch_idx[:, None], :, cb_idx[None, :], output_ids] = True

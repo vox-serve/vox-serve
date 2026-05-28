@@ -177,7 +177,7 @@ class ModelWorker:
             self.page_size,
             self.model.num_key_value_heads,  # kv heads
             self.model.head_dim,
-            dtype=torch.bfloat16,
+            dtype=getattr(self.model, "dtype", torch.bfloat16),
             device="cuda",
         )
 
@@ -203,7 +203,7 @@ class ModelWorker:
                 self.model.depth_n_codebooks,
                 self.model.depth_num_key_value_heads,  # kv heads
                 self.model.depth_head_dim,
-                dtype=torch.bfloat16,
+                dtype=getattr(self.model, "dtype", torch.bfloat16),
                 device="cuda",
             )
         else:
@@ -425,7 +425,7 @@ class ModelWorker:
             paged_kv_indptr_tensor,
             paged_kv_indices_tensor,
             paged_kv_last_page_len_tensor,
-            torch.bfloat16,
+            getattr(self.model, "dtype", torch.bfloat16),
         )
         torch.cuda.synchronize()
 
@@ -464,13 +464,16 @@ class ModelWorker:
             )
 
             # select last token for each request for prefill
+            qo_indptr_for_sampling = None
             if getattr(self.prefill_wrapper, "qo_indptr", None) is not None:
                 logits = logits[self.prefill_wrapper.qo_indptr[:-1] - 1]
+                qo_indptr_for_sampling = self.prefill_wrapper.qo_indptr
 
             output_ids, task = self.model.sampling(
                 logits=logits,
                 requests=requests,
                 repetition_cache=repetition_cache,
+                qo_indptr=qo_indptr_for_sampling,
             )
 
             return task
@@ -505,7 +508,7 @@ class ModelWorker:
             paged_kv_indptr_tensor,
             paged_kv_indices_tensor,
             paged_kv_last_page_len_tensor,
-            torch.bfloat16,
+            getattr(self.model, "dtype", torch.bfloat16),
         )
         torch.cuda.synchronize()
 
@@ -538,10 +541,12 @@ class ModelWorker:
                 input_masks=input_masks,
             )
 
+            decode_qo_indptr = torch.arange(len(requests) + 1, dtype=torch.int32, device=self.device)
             output_ids, task = self.model.sampling(
                 logits=logits,
                 requests=requests,
                 repetition_cache=repetition_cache,
+                qo_indptr=decode_qo_indptr,
             )
 
             return task
@@ -572,7 +577,7 @@ class ModelWorker:
                 paged_kv_indptr=depth_kv_indptr,
                 paged_kv_indices=depth_kv_indices,
                 paged_kv_last_page_len=depth_kv_last_page_len,
-                dtype=torch.bfloat16,
+                dtype=getattr(self.model, "dtype", torch.bfloat16),
             )
             torch.cuda.synchronize()
 
@@ -622,6 +627,7 @@ class ModelWorker:
 
         # Prepare token_ids for multiple chunks from each request
         token_ids = []
+        decoder_caches = []
         request_chunk_mapping = []  # Track which request each chunk belongs to
 
         for req_idx, req in enumerate(requests):
@@ -634,6 +640,8 @@ class ModelWorker:
                     new_tokens.extend([new_tokens[-1]] * (self.detokenize_interval - len(new_tokens)))
 
                 token_ids.append(torch.cat(new_tokens, dim=0))
+                if req.decoder_cache is not None:
+                    decoder_caches.append(req.decoder_cache)
                 request_chunk_mapping.append((req_idx, chunk_idx))
 
         if not token_ids:
@@ -646,7 +654,14 @@ class ModelWorker:
             token_ids = token_ids.to(self.detokenizer_device, non_blocking=True)
             torch.cuda.synchronize(device=self.detokenizer_device)
 
-        audio_tensors = self.model.postprocess(token_ids)
+        if decoder_caches:
+            from ..tokenizer.base import DecoderCache
+            batched_cache = DecoderCache.cat(decoder_caches)
+            audio_tensors = self.model.postprocess(token_ids, decoder_cache=batched_cache)
+            for i, (req_idx, _chunk_idx) in enumerate(request_chunk_mapping):
+                requests[req_idx].decoder_cache.copy_from(batched_cache[i : i + 1])
+        else:
+            audio_tensors = self.model.postprocess(token_ids)
         self.logger.debug("Audio tensors: %s", audio_tensors)
 
         if self.needs_watermarking:

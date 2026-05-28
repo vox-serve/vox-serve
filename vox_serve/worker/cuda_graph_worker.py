@@ -124,7 +124,7 @@ class CudaGraphWorker(ModelWorker):
             self.page_size,
             self.model.num_key_value_heads,  # kv heads
             self.model.head_dim,
-            dtype=torch.bfloat16,
+            dtype=getattr(self.model, "dtype", torch.bfloat16),
             device="cuda",
         )
 
@@ -197,7 +197,7 @@ class CudaGraphWorker(ModelWorker):
                 self.model.depth_n_codebooks,
                 self.model.depth_num_key_value_heads,  # kv heads
                 self.model.depth_head_dim,
-                dtype=torch.bfloat16,
+                dtype=getattr(self.model, "dtype", torch.bfloat16),
                 device="cuda",
             )
         else:
@@ -240,7 +240,7 @@ class CudaGraphWorker(ModelWorker):
         )
         prefill_input_features_buffer = torch.zeros(
             max_seq_len, self.model.hidden_size,
-            dtype=torch.bfloat16, device=self.device
+            dtype=getattr(self.model, "dtype", torch.bfloat16), device=self.device
         )
         prefill_input_masks_buffer = torch.zeros(
             max_seq_len, self.model.n_codebooks, dtype=torch.bool, device=self.device
@@ -251,11 +251,11 @@ class CudaGraphWorker(ModelWorker):
             max_seq_len,
             1 if self.has_depth_transformer else self.model.n_codebooks,
             self.model.vocab_size,
-            dtype=torch.bfloat16, device=self.device
+            dtype=getattr(self.model, "dtype", torch.bfloat16), device=self.device
         )
         prefill_backbone_hidden_states_buffer = torch.zeros(
             max_seq_len, self.model.hidden_size,
-            dtype=torch.bfloat16, device=self.device
+            dtype=getattr(self.model, "dtype", torch.bfloat16), device=self.device
         )
 
         # Add prefill buffers to the unified buffer dictionary
@@ -300,7 +300,7 @@ class CudaGraphWorker(ModelWorker):
                 paged_kv_indptr,
                 paged_kv_indices,
                 paged_kv_last_page_len,
-                torch.bfloat16,
+                getattr(self.model, "dtype", torch.bfloat16),
             )
             torch.cuda.synchronize()
 
@@ -382,7 +382,7 @@ class CudaGraphWorker(ModelWorker):
         input_features_buffer = torch.zeros(
             self.max_batch_size,
             self.model.hidden_size,
-            dtype=torch.bfloat16,
+            dtype=getattr(self.model, "dtype", torch.bfloat16),
             device=self.device,
         )
         input_masks_buffer = torch.zeros(
@@ -394,11 +394,11 @@ class CudaGraphWorker(ModelWorker):
             self.max_batch_size,
             1 if self.has_depth_transformer else self.model.n_codebooks,  # TODO: revisit here
             self.model.vocab_size,
-            dtype=torch.bfloat16,
+            dtype=getattr(self.model, "dtype", torch.bfloat16),
             device=self.device,
         )
         backbone_hidden_states_buffer = torch.zeros(
-            self.max_batch_size, self.model.hidden_size, dtype=torch.bfloat16, device=self.device
+            self.max_batch_size, self.model.hidden_size, dtype=getattr(self.model, "dtype", torch.bfloat16), device=self.device
         )
 
         # Store buffers
@@ -437,7 +437,7 @@ class CudaGraphWorker(ModelWorker):
                 paged_kv_indptr,
                 paged_kv_indices,
                 paged_kv_last_page_len,
-                torch.bfloat16,
+                getattr(self.model, "dtype", torch.bfloat16),
             )
             torch.cuda.synchronize()
 
@@ -509,6 +509,10 @@ class CudaGraphWorker(ModelWorker):
 
     def _initialize_detokenization_cuda_graphs(self):
         """Initialize CUDA graphs for detokenization phase."""
+        # Models with variable-length postprocess input opt out via
+        # ``supports_postprocess_cuda_graph = False`` and use the eager path.
+        if not getattr(self.model, "supports_postprocess_cuda_graph", True):
+            return
         # Use detokenizer device for all detokenization buffers
         with torch.cuda.device(self.detokenizer_device):
             detokenize_input_buffer = torch.zeros(
@@ -621,12 +625,12 @@ class CudaGraphWorker(ModelWorker):
         # We reserve input tensors with batch size of `2 * self.max_batch_size` since the first step of
         # depth transformer has sequence length of 2 per request.
         depth_hidden_states_buffer = torch.zeros(
-            2 * self.max_batch_size, self.model.hidden_size, dtype=torch.bfloat16, device=self.device
+            2 * self.max_batch_size, self.model.hidden_size, dtype=getattr(self.model, "dtype", torch.bfloat16), device=self.device
         )
         depth_position_ids_buffer = torch.zeros(2 * self.max_batch_size, dtype=torch.int32, device=self.device)
 
         depth_logits_buffer = torch.zeros(
-            2 * self.max_batch_size, self.model.depth_vocab_size, dtype=torch.bfloat16, device=self.device
+            2 * self.max_batch_size, self.model.depth_vocab_size, dtype=getattr(self.model, "dtype", torch.bfloat16), device=self.device
         )
 
         # Add depth transformer buffers to the unified buffer dictionary
@@ -665,7 +669,7 @@ class CudaGraphWorker(ModelWorker):
                 depth_paged_kv_indptr,
                 depth_paged_kv_indices,
                 depth_paged_kv_last_page_len,
-                torch.bfloat16,
+                getattr(self.model, "dtype", torch.bfloat16),
             )
             torch.cuda.synchronize()
 
@@ -719,7 +723,7 @@ class CudaGraphWorker(ModelWorker):
                 depth_paged_kv_indptr,
                 depth_paged_kv_indices,
                 depth_paged_kv_last_page_len,
-                torch.bfloat16,
+                getattr(self.model, "dtype", torch.bfloat16),
             )
             torch.cuda.synchronize()
 
@@ -1019,7 +1023,7 @@ class CudaGraphWorker(ModelWorker):
             paged_kv_indptr_tensor,
             paged_kv_indices_tensor,
             paged_kv_last_page_len_tensor,
-            torch.bfloat16,
+            getattr(self.model, "dtype", torch.bfloat16),
         )
         torch.cuda.synchronize()
 
@@ -1080,6 +1084,7 @@ class CudaGraphWorker(ModelWorker):
                 logits=logits,
                 requests=requests,
                 repetition_cache=repetition_cache,
+                qo_indptr=actual_qo_indptr,
             )
             self.nvtx_range_pop() # sampling
 
@@ -1136,7 +1141,7 @@ class CudaGraphWorker(ModelWorker):
             paged_kv_indptr_tensor,
             paged_kv_indices_tensor,
             paged_kv_last_page_len_tensor,
-            torch.bfloat16,
+            getattr(self.model, "dtype", torch.bfloat16),
         )
         torch.cuda.synchronize()
 
@@ -1188,10 +1193,12 @@ class CudaGraphWorker(ModelWorker):
             )
 
         else:
+            decode_qo_indptr = torch.arange(actual_batch_size + 1, dtype=torch.int32, device=self.device)
             output_ids, task = self.model.sampling(
                 logits=logits,
                 requests=requests,
                 repetition_cache=repetition_cache,
+                qo_indptr=decode_qo_indptr,
             )
             self.nvtx_range_pop() # sampling
 
@@ -1273,7 +1280,7 @@ class CudaGraphWorker(ModelWorker):
                     paged_kv_indptr=depth_kv_indptr,
                     paged_kv_indices=depth_kv_indices,
                     paged_kv_last_page_len=depth_kv_last_page_len,
-                    dtype=torch.bfloat16,
+                    dtype=getattr(self.model, "dtype", torch.bfloat16),
                 )
                 torch.cuda.synchronize()
 
@@ -1311,7 +1318,7 @@ class CudaGraphWorker(ModelWorker):
                     paged_kv_indptr=depth_kv_indptr,
                     paged_kv_indices=depth_kv_indices,
                     paged_kv_last_page_len=depth_kv_last_page_len,
-                    dtype=torch.bfloat16,
+                    dtype=getattr(self.model, "dtype", torch.bfloat16),
                 )
                 torch.cuda.synchronize()
 
@@ -1352,9 +1359,10 @@ class CudaGraphWorker(ModelWorker):
         return output_ids
 
     def run_detokenize(self, requests: List[Request]):
-        """
-        Override parent's run_detokenize to add CUDA graph optimization with padding.
-        """
+        """Override parent's run_detokenize to add CUDA graph optimization with padding."""
+        if not getattr(self.model, "supports_postprocess_cuda_graph", True):
+            return super().run_detokenize(requests)
+
         self.nvtx_range_push(f"detokenize_bs{len(requests)}")
         if len(requests) == 0:
             self.nvtx_range_pop()
