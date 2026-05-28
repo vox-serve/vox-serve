@@ -857,6 +857,7 @@ class ZonosModel(BaseLM):
         sampling_params: SamplingConfig | None = None,
         repetition_cache: torch.Tensor | None = None,
         cfg_scale: float | None = None,
+        **kwargs,
     ) -> torch.Tensor:
         if sampling_params is None:
             sampling_params = self.default_sampling_config

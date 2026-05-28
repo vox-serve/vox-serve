@@ -73,7 +73,7 @@ def get_model_class(model_name: str) -> Type[BaseLM]:
 def load_model(
     model_name: str,
     device: str = "cuda",
-    dtype: torch.dtype = torch.bfloat16,
+    dtype: torch.dtype | None = None,
     top_p: float = None,
     top_k: int = None,
     min_p: float = None,
@@ -118,10 +118,11 @@ def load_model(
     model_kwargs = {
         "model_name": model_name,
         "device": device,
-        "dtype": dtype,
         "enable_torch_compile": enable_torch_compile,
         **kwargs,
     }
+    if dtype is not None:
+        model_kwargs["dtype"] = dtype
     if detokenize_interval is not None:
         if model_class != Qwen3TTSModel:
             raise ValueError(f"Detokenize interval is only supported for Qwen3TTS models, got {model_name}")
