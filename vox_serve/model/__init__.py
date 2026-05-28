@@ -11,6 +11,7 @@ from .glm_voice import GLMVoiceModel
 from .orpheus import OrpheusModel
 from .qwen3_tts import Qwen3TTSModel
 from .step_audio_2 import StepAudio2Model
+from .xtts import XTTSModel
 from .zonos import ZonosModel
 
 # Registry mapping model name patterns to model classes
@@ -29,6 +30,8 @@ MODEL_REGISTRY: Dict[str, Type[BaseLM]] = {
     "ResembleAI/chatterbox": ChatterboxModel,
     "cosyvoice2": CosyVoice2Model,
     "FunAudioLLM/CosyVoice2-0.5B": CosyVoice2Model,
+    "xtts": XTTSModel,
+    "coqui/xtts-v2": XTTSModel,
     "qwen3-tts": Qwen3TTSModel,
     "qwen3-tts-base": Qwen3TTSModel,
     "qwen3-tts-voice-design": Qwen3TTSModel,
