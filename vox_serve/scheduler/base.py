@@ -1,8 +1,11 @@
 import asyncio
 import json
+import queue
+import threading
 import time
 from typing import List
 
+import numpy as np
 import torch
 import zmq
 import zmq.asyncio
@@ -126,6 +129,23 @@ class Scheduler:
         except Exception:
             pass
 
+        # B3: dedicated emitter thread for the SYNC scheduler. run_detokenize_collect snapshots the
+        # audio to host on the scheduler thread; this thread does the per-chunk byte conversion and
+        # the (ZMQ) socket send, so the scheduler loop returns to the next decode without blocking
+        # on conversion/IO. Consequence: in sync mode the result_socket is used ONLY by this thread.
+        # The bounded queue applies backpressure (and bounds memory / run-ahead) if the emitter
+        # falls behind. The async path keeps its inline _send_responses_async (no emitter thread).
+        # A/B TOGGLE: VOX_B3_OFFLOAD=0 disables the emitter thread so the byte-convert + socket send
+        # runs INLINE on the scheduler thread (the pre-B3 behavior), isolating "off-thread + bounded
+        # queue" as the only changed variable. Default (unset/"1") keeps B3 on. Used to test whether
+        # B3 caused the 10rps streaming-viability regression (45.1% -> 16.8%).
+        # self._b3_offload_emit = os.environ.get("VOX_B3_OFFLOAD", "1") != "0"
+        self._b3_offload_emit = True
+        if not self.async_scheduling and self._b3_offload_emit:
+            self._emit_queue: "queue.Queue" = queue.Queue(maxsize=16)
+            self._emit_thread = threading.Thread(target=self._emit_worker_loop, name="vox-emit", daemon=True)
+            self._emit_thread.start()
+
         self.available_batch_sizes = self.model_worker.available_batch_sizes
 
         # Audio parameters for duration calculation
@@ -158,15 +178,6 @@ class Scheduler:
         #   2. enqueue the decode on the default stream -> runs alongside the vocoder
         #   3. collect the vocoder output (CPU blocks only on the vocoder event, by which
         #      point the decode is already running)
-        #
-        # Old serialized ordering (vocoder fully finished, incl. a device-wide sync, before
-        # the decode was even enqueued):
-        #   self.model_worker.run_detokenize(detokenize_requests)
-        #   self._send_responses(detokenize_requests)
-        #   if lm_inputs is not None and lm_inputs["is_prefill"]:
-        #       task = self.model_worker.run_lm_prefill(lm_requests, lm_inputs)
-        #   else:
-        #       task = self.model_worker.run_lm_decode(lm_requests, lm_inputs)
 
         # 1. Launch the vocoder on vocoder_stream (returns immediately; None if nothing to do).
         detokenize_ctx = self.model_worker.run_detokenize_launch(detokenize_requests)
@@ -178,8 +189,9 @@ class Scheduler:
             task = self.model_worker.run_lm_decode(lm_requests, lm_inputs)
 
         # 3. Collect vocoder audio. Blocks only on the vocoder completion event, so the decode
-        #    enqueued in step 2 keeps running on the default stream while the CPU waits.
-        self.model_worker.run_detokenize_collect(detokenize_ctx)
+        #    enqueued in step 2 keeps running on the default stream while the CPU waits. B3: this
+        #    now only snapshots audio to host + reads request state; it returns a CollectedAudio.
+        collected = self.model_worker.run_detokenize_collect(detokenize_ctx)
 
         if detokenize_ctx is None:
             # Decode-only step: there is no vocoder collect to provide backpressure, so sync the
@@ -188,8 +200,25 @@ class Scheduler:
             # costs no concurrency. (Replaces the blanket per-step sync removed from run_forever.)
             torch.cuda.synchronize()
 
-        # 4. Return results to clients (moved after collect, which produces this step's audio).
-        self._send_responses(detokenize_requests)
+        # Free KV pages for finished requests synchronously (cheap: returns page indices to a
+        # pool). Kept on the scheduler thread so reclamation is never deferred behind the emitter
+        # and the next step's empty_pages.get_nowait() can reuse them immediately. The completion
+        # MESSAGE is still sent by the emitter (after the request's audio, preserving ordering).
+        for req in detokenize_requests:
+            if req.done_all:
+                self.model_worker.free_kv_cache(req)
+
+        # 4. B3: hand byte-conversion + socket send to the emitter thread so the scheduler returns
+        #    to the next decode immediately. Only enqueue when there is something to emit (audio,
+        #    or a done_all completion message) to avoid flooding the queue on empty/idle steps.
+        if collected is not None or detokenize_requests:
+            if self._b3_offload_emit:
+                self._emit_queue.put((collected, detokenize_requests))
+            else:
+                # B3 OFF (VOX_B3_OFFLOAD=0): emit synchronously on the scheduler thread, same work as
+                # the emitter would do, but without the thread or the bounded queue. A/B baseline.
+                self._emit_collected(collected, detokenize_requests)
+        # self._send_responses(detokenize_requests)  # B3: moved to the emitter thread (_emit_collected)
 
         # Execute the sampling task right away for synchronous scheduling
         if task is not None:
@@ -237,7 +266,14 @@ class Scheduler:
             #    (No ctx-None device sync here, unlike sync _step: in async the previous step's
             #    sampling task is awaited in run_scheduling and its torch.nonzero already bounds
             #    run-ahead, so a blocking sync on the event-loop thread would be wasteful.)
-            self.model_worker.run_detokenize_collect(detokenize_ctx)
+            collected = self.model_worker.run_detokenize_collect(detokenize_ctx)
+
+            # B3 async parity: there is no emitter thread in async mode, so materialize the
+            # collected audio into req.output_audio here, then stream it via _send_responses_async
+            # exactly as before. The byte conversion is shared with the sync emitter (_chunk_to_bytes).
+            if collected is not None:
+                for req, i, trim_len in collected.chunks:
+                    req.output_audio.put(self._chunk_to_bytes(collected.audio_np[i], trim_len))
 
             # 4. Return results to clients (after collect, which produced this step's audio).
             await self._send_responses_async(detokenize_requests)
@@ -450,6 +486,69 @@ class Scheduler:
                 )
                 self.logger.debug("Sending completion for request %s", req.request_id)
                 await self.result_socket.send(completion_payload)
+
+    # ------------------------------------------------------------------
+    # B3: off-thread audio emission (sync scheduler).
+    #
+    # run_detokenize_collect snapshots audio to an owned host array on the scheduler thread; the
+    # emitter thread then byte-converts and sends it, so the scheduler returns to the next decode
+    # without blocking on the (Python-bound) conversion loop + socket IO that A2 showed dominate
+    # detokenize_collect. The result_socket is therefore used only by the emitter thread in sync
+    # mode, and a single FIFO thread preserves per-request chunk ordering (audio before completion).
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _chunk_to_bytes(audio_np_row, trim_len):
+        """Convert one host audio row [n_channels, samples] (float) to int16 PCM bytes, optionally
+        trimming the padded tail (trim_len == -1 means no trim). Pure NumPy/CPU -> thread-safe."""
+        audio_int16 = (audio_np_row * 32767).astype(np.int16)
+        if trim_len >= 0:
+            audio_int16 = audio_int16[:, :trim_len]
+        return audio_int16.tobytes()
+
+    def _emit_collected(self, collected, detokenize_requests):
+        """Byte-convert + send audio and completion messages. Runs ONLY on the emitter thread."""
+        # Non-sync NVTX (respects nvtx_enabled): labels the offloaded work as an "emit" range on
+        # the emitter thread's timeline row, so it can be measured there and confirmed gone from
+        # detokenize_collect on the scheduler thread. try/finally keeps the range balanced if a
+        # send raises. NVTX ranges are per-thread, so this annotates the emitter thread only.
+        self.model_worker.nvtx_range_push("emit")
+        try:
+            if collected is not None:
+                for req, i, trim_len in collected.chunks:
+                    audio_bytes = self._chunk_to_bytes(collected.audio_np[i], trim_len)
+                    if req.is_streaming:
+                        req.chunk_send_timestamps.append(time.time())
+                        req.chunk_durations.append(self._calculate_chunk_duration(audio_bytes))
+                    self.result_socket.send(req.request_id.encode("utf-8") + b"|AUDIO|" + audio_bytes)
+
+            # Completion messages for finished requests (sent after their audio, by FIFO ordering).
+            # NOTE: free_kv_cache is intentionally NOT done here — the scheduler thread frees KV
+            # pages synchronously in _step so page reclamation is never deferred behind this thread
+            # (which could starve the next step's empty_pages.get_nowait() under page pressure).
+            for req in detokenize_requests:
+                if req.done_all:
+                    completion_message = {"status": "completed", "reason": req.finish_reason or "unknown"}
+                    completion_payload = (
+                        req.request_id.encode("utf-8")
+                        + b"|COMPLETION|"
+                        + json.dumps(completion_message).encode("utf-8")
+                    )
+                    self.logger.debug("Sending completion for request %s", req.request_id)
+                    self.result_socket.send(completion_payload)
+        finally:
+            self.model_worker.nvtx_range_pop()  # emit
+
+    def _emit_worker_loop(self):
+        """Consume (collected, detokenize_requests) packets and emit them. None is the stop sentinel."""
+        while True:
+            item = self._emit_queue.get()
+            if item is None:
+                break
+            collected, detokenize_requests = item
+            try:
+                self._emit_collected(collected, detokenize_requests)
+            except Exception:
+                self.logger.exception("emitter thread failed while sending responses")
 
     def _calculate_chunk_duration(self, audio_chunk: bytes) -> float:
         """
