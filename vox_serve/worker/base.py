@@ -17,10 +17,17 @@ from ..utils import get_logger
 class DeferredStopHandle:
     """A deferred-EOS stop: a pinned host copy of the GPU stop-mask plus the CUDA event that
     signals the copy is complete. Produced by ModelWorker._make_stop_handle in the step that
-    generated the tokens and consumed by apply_deferred_stops at the top of the next step."""
+    generated the tokens and consumed by apply_deferred_stops one step later.
+
+    audio_lens captures len(req.lm_output_audio_tokens) per request AT BUILD TIME (right after the
+    EOS token was appended). apply_deferred_stops truncates back to audio_lens[i]-1, which removes
+    the EOS token AND any optimistic over-generation token(s) appended between build and apply in
+    the carried-batch pipeline (where a stopped request gets one extra decode before its stop is
+    applied). A plain pop() would remove the over-gen token and wrongly leave the EOS token."""
     requests: List[Request]
     host_mask: torch.Tensor
     event: torch.cuda.Event
+    audio_lens: List[int]
 
 
 class ModelWorker:
@@ -822,21 +829,32 @@ class ModelWorker:
         host_mask.copy_(stop_mask, non_blocking=True)
         event = torch.cuda.Event()
         event.record()
-        return DeferredStopHandle(requests=requests, host_mask=host_mask, event=event)
+        # Snapshot the audio-token length per request now (EOS token already appended this step), so
+        # apply_deferred_stops can truncate exactly to the pre-EOS length even if the carried-batch
+        # pipeline appends an optimistic over-generation token before the stop is applied. Pure host
+        # read; absolute indices are stable (the list is append-only + tail-truncated).
+        audio_lens = [len(req.lm_output_audio_tokens) for req in requests]
+        return DeferredStopHandle(
+            requests=requests, host_mask=host_mask, event=event, audio_lens=audio_lens
+        )
 
     def apply_deferred_stops(self, handle: "Optional[DeferredStopHandle]") -> None:
         """Apply a deferred EOS stop produced in the previous step. The event is already complete a
-        step later, so synchronize() is ~us. For each set bit: pop the trailing EOS token (appended
-        eagerly in sampling) so detokenize never emits it, and finalize the request. Idempotent with
-        the host-side max_tokens termination."""
+        step later, so synchronize() is ~us. For each set bit: truncate lm_output_audio_tokens back
+        to the pre-EOS length captured at build time (removing the EOS token AND any optimistic
+        over-generation token appended since, in the carried-batch pipeline) so detokenize never
+        emits them, then finalize the request. Idempotent with the host-side max_tokens
+        termination (truncation still runs; finalize is guarded)."""
         if handle is None:
             return
         handle.event.synchronize()
         host_mask = handle.host_mask
+        audio_lens = handle.audio_lens
         for i, req in enumerate(handle.requests):
             if host_mask[i]:
-                # The last appended token was EOS -> not audio. Remove it.
-                req.lm_output_audio_tokens.pop()
+                # audio_lens[i] = length right after the EOS token was appended; the EOS token sits
+                # at index audio_lens[i]-1. Truncate there to drop it plus any over-gen tail.
+                del req.lm_output_audio_tokens[audio_lens[i] - 1:]
                 if not req.done_lm_generation:
                     req.done_lm_generation = True
                     req.finish_reason = "stop_id_encountered"

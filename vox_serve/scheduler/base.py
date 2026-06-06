@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import queue
 import threading
 import time
@@ -150,6 +151,28 @@ class Scheduler:
 
         self.available_batch_sizes = self.model_worker.available_batch_sizes
 
+        # Carried-batch pipeline (deferred-EOS Phase 3a): when enabled AND the model uses the
+        # deferred-EOS path, run_forever uses _step_carried (which enqueues the current decode
+        # before selecting + preparing the NEXT batch, so the host work overlaps the in-flight
+        # decode) instead of the serial _step_pipelined. Requires the deferred path (handles, not
+        # coroutines), i.e. VOX_DEFER_EOS=1, and sync mode. VOX_CARRIED_SYNC=0 forces the serial
+        # path for A/B bisection.
+        model_defers_eos = getattr(getattr(self.model_worker, "model", None), "_defer_eos", False)
+        self._carried_sync = (
+            os.environ.get("VOX_CARRIED_SYNC", "1") != "0"
+            and not self.async_scheduling
+            and model_defers_eos
+        )
+        # Detokenize frontier safety margin (see _select_detokenize_requests). Only the carried
+        # pipeline needs it (=1, the pipeline depth); the serial path keeps 0 to stay byte-identical
+        # with the pre-Phase-3a baseline.
+        self._overgen_lag = 1 if self._carried_sync else 0
+        # Sleep on fully-idle carried steps (no decode, no detok, nothing queued) to avoid a busy
+        # spin / unbounded transient allocation when there is genuinely no work.
+        self._idle_sleep_s = 0.0005
+        if self._carried_sync:
+            self.logger.info("Using carried-batch pipelined sync step (_step_carried)")
+
         # Audio parameters for duration calculation
         # Assuming 24kHz mono 16-bit audio
         self.sample_rate = 24000
@@ -262,6 +285,103 @@ class Scheduler:
             with w.nvtx_range("host_run_sampling_task"):
                 asyncio.run(task)
 
+    def _step_carried(self, handle, lm_requests, detokenize_requests, lm_inputs):
+        """
+        Carried-batch pipelined sync step (deferred-EOS Phase 3a).
+
+        Unlike _step_pipelined (which applies the previous stop at the TOP and then selects + preps
+        + decodes serially), this enqueues the CURRENT batch's decode FIRST, then — while that
+        decode runs on the GPU — applies the previous step's stop, selects the NEXT batch, and runs
+        prepare_lm_inputs (the prefill tokenizer + FlashInfer plan()) for it. Nothing synchronizes
+        the default stream between the decode enqueue and the next-step host prep, so that host work
+        overlaps the in-flight decode. State carried across run_forever iterations:
+            handle              -> DeferredStopHandle from the PREVIOUS decode (applied this step)
+            lm_requests         -> batch to decode THIS step (selected last step)
+            detokenize_requests -> detok batch for THIS step (selected last step)
+            lm_inputs           -> prepare_lm_inputs output for lm_requests (computed last step)
+        Returns the same tuple shifted by one for the next iteration.
+
+        Correctness rests on two companion changes: apply_deferred_stops truncates the EOS token AND
+        any optimistic over-generation token (a stopped request gets one extra decode here before
+        its stop is applied), and _select_detokenize_requests holds the streaming frontier back by
+        OVERGEN_LAG so an unconfirmed frontier token is never detokenized before truncation.
+        """
+        w = self.model_worker
+        w.nvtx_mark("host_step_begin")
+
+        # --- GPU launch region for the carried batch K (no default-stream sync inside) ---
+        # 1. Launch the SNAC vocoder for this step's detok batch (non-blocking; None if nothing).
+        detokenize_ctx = w.run_detokenize_launch(detokenize_requests)
+
+        # 2. Enqueue prefill/decode for the carried batch on the default stream -> overlaps the
+        #    vocoder AND the host prep below. Returns a DeferredStopHandle (deferred path) or None.
+        if lm_inputs is not None and lm_inputs["is_prefill"]:
+            new_handle = w.run_lm_prefill(lm_requests, lm_inputs)
+        else:
+            new_handle = w.run_lm_decode(lm_requests, lm_inputs)
+        assert not asyncio.iscoroutine(new_handle), (
+            "carried-batch sync requires the deferred-EOS path (VOX_DEFER_EOS=1); got a coroutine"
+        )
+
+        # 3. Collect vocoder audio. Blocks ONLY on the vocoder completion event, so the decode from
+        #    step 2 keeps running on the default stream while the CPU proceeds below.
+        collected = w.run_detokenize_collect(detokenize_ctx)
+
+        # --- CPU region overlapping decode(K) ---
+        # 4. Apply the PREVIOUS step's deferred EOS stop. Its event was recorded a full step ago, so
+        #    synchronize() is ~us and does NOT wait on decode(K). Truncates EOS + over-gen tokens
+        #    before any detok selection below can see them.
+        with w.nvtx_range("host_apply_deferred_stops"):
+            w.apply_deferred_stops(handle)
+
+        # 5. Intake new requests + drop finished (done_all) ones. No GPU dependency.
+        with w.nvtx_range("host_prepare_requests"):
+            self._prepare_requests()
+
+        # 6. Free KV pages for requests that finished detokenizing this step (done_all set during
+        #    run_detokenize_collect above or by a prior _select_detokenize_requests).
+        with w.nvtx_range("host_free_kv"):
+            for req in detokenize_requests:
+                if req.done_all:
+                    w.free_kv_cache(req)
+
+        # 7. Hand byte-conversion + socket send to the emitter thread (B3), or emit inline if off.
+        with w.nvtx_range("host_emit_enqueue"):
+            if collected is not None or detokenize_requests:
+                if self._b3_offload_emit:
+                    self._emit_queue.put((collected, detokenize_requests))
+                else:
+                    self._emit_collected(collected, detokenize_requests)
+
+        # 8-9. Select the NEXT step's batches. This runs BEFORE decode(K)'s stops are known (they
+        #      are in new_handle, applied next step) -> a stopped request may be optimistically
+        #      selected for one extra decode; it is truncated next step and its unconfirmed frontier
+        #      token is held out of the audio by the OVERGEN_LAG margin until then.
+        with w.nvtx_range("host_select_detokenize"):
+            next_detokenize_requests = self._select_detokenize_requests()
+        with w.nvtx_range("host_select_lm"):
+            next_lm_requests = self._select_lm_requests()
+
+        # 10. Prepare LM inputs for the NEXT batch (prefill tokenizer is pure CPU; plan() H2D is
+        #     enqueued BEHIND decode(K)) -> this is the host work that now overlaps decode(K).
+        with w.nvtx_range(f"host_prepare_lm_inputs_bs{len(next_lm_requests)}"):
+            next_lm_inputs = w.prepare_lm_inputs(next_lm_requests, next_detokenize_requests)
+
+        # 11. Bound run-ahead. The decode-only torch.cuda.synchronize() is intentionally gone:
+        #       - steady decode -> new_handle's event is synchronized next step in
+        #         apply_deferred_stops, bounding run-ahead to ~1 step.
+        #       - detok-only step -> the vocoder collect event above already bounded it.
+        #       - fully idle (no decode, no detok, and nothing queued for next step) -> brief sleep
+        #         so the loop does not busy-spin / accumulate transient allocations.
+        if (
+            new_handle is None
+            and detokenize_ctx is None
+            and not next_lm_requests
+            and not next_detokenize_requests
+        ):
+            time.sleep(self._idle_sleep_s)
+
+        return new_handle, next_lm_requests, next_detokenize_requests, next_lm_inputs
 
     async def _step_async(self, task, lm_requests, detokenize_requests):
         """
@@ -372,6 +492,17 @@ class Scheduler:
         """
         if self.async_scheduling:
             asyncio.run(self._run_async_loop())
+        elif self._carried_sync:
+            # Carried-batch pipeline (Phase 3a): carry (handle, lm_requests, detokenize_requests,
+            # lm_inputs) across iterations so each step enqueues the current decode before doing the
+            # next step's host prep, overlapping it with the in-flight decode. Run-ahead is bounded
+            # inside _step_carried (next-step apply_deferred_stops event sync / vocoder collect /
+            # idle sleep), so no per-iteration device sync here.
+            handle, lm_requests, detokenize_requests, lm_inputs = None, [], [], None
+            while True:
+                handle, lm_requests, detokenize_requests, lm_inputs = self._step_carried(
+                    handle, lm_requests, detokenize_requests, lm_inputs
+                )
         else:
             while True:
                 self._step_pipelined()
@@ -461,6 +592,17 @@ class Scheduler:
         detokenize_overlap = self.model_worker.detokenize_overlap
         step = detokenize_interval - detokenize_overlap
 
+        # Carried-batch pipeline safety margin: in the pipelined sync loop (_step_carried) a request's
+        # EOS is detected one step late, and a stopped request may decode one extra optimistic token
+        # before its stop is applied/truncated. Holding the streaming (not-done) detokenize frontier
+        # back by OVERGEN_LAG tokens guarantees we never decode an unconfirmed frontier token (a
+        # possible EOS / over-gen token) into audio before apply_deferred_stops truncates it; those
+        # trailing tokens are only ever handled by the final-flush (done_lm_generation) branch below,
+        # which runs after truncation. =0 in the non-pipelined path is also correct, but =1 is
+        # harmless there (it just defers a chunk by <1 SNAC frame). detokenize_overlap does NOT
+        # provide this margin (it shifts where chunks start, not how close to the frontier they end).
+        overgen_lag = self._overgen_lag
+
         for req in self.active_requests:
             if len(detokenize_requests) >= self.max_batch_size:
                 break
@@ -468,7 +610,8 @@ class Scheduler:
             # req.next_audio_decode_idx[-1] is the last decode index
             next_decode_idx = req.next_audio_decode_idx[-1] + step if req.next_audio_decode_idx else 0
             if req.done_lm_generation:
-                # Only schedule if there are tokens left to decode
+                # Only schedule if there are tokens left to decode (final flush, no margin: the stop
+                # is already applied + truncated, so the frontier is confirmed).
                 if next_decode_idx < len(req.lm_output_audio_tokens):
                     req.next_audio_decode_idx = [next_decode_idx]
                     detokenize_requests.append(req)
@@ -478,7 +621,7 @@ class Scheduler:
                     # Add to detokenize_requests so _send_responses can send completion
                     req.done_all = True
                     detokenize_requests.append(req)
-            elif next_decode_idx + detokenize_interval <= len(req.lm_output_audio_tokens):
+            elif next_decode_idx + detokenize_interval <= len(req.lm_output_audio_tokens) - overgen_lag:
                 req.next_audio_decode_idx = [next_decode_idx]
                 detokenize_requests.append(req)
 
