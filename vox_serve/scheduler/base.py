@@ -12,7 +12,7 @@ import zmq.asyncio
 
 from ..requests import Request
 from ..utils import get_logger
-from ..worker import CudaGraphWorker, ModelWorker
+from ..worker import CudaGraphWorker, DeferredStopHandle, ModelWorker
 
 
 class Scheduler:
@@ -47,6 +47,8 @@ class Scheduler:
         self.device = device
         self.max_batch_size = max_batch_size
         self.async_scheduling = async_scheduling
+        # Deferred-EOS handle carried across steps (sync _step_pipelined and async _step_async).
+        self._pending_stop_handle = None
         self.dp_rank = dp_rank
         self.dp_size = dp_size
 
@@ -154,22 +156,48 @@ class Scheduler:
         self.bytes_per_sample = 2  # 16-bit = 2 bytes
         self.channels = 1  # mono
 
-    def _step(self):
+    def _step_pipelined(self):
         """
-        Process the next batch of requests.
+        Process the next batch of requests (deferred-EOS pipeline variant).
+
+        Renamed from _step. EOS is no longer applied inline via asyncio.run(task) at the end of the
+        step (which paid the full ~5.9 ms torch.nonzero device sync). Instead the GPU stop-mask
+        computed in the PREVIOUS step is applied here at the top via apply_deferred_stops (its CUDA
+        event is already complete -> ~us), before request selection; the current step's decode
+        returns a DeferredStopHandle carried to the next step. NOTE: this is the light-touch rename
+        + async-EOS wiring; a later refactor will adopt the carried-batch (run_model/run_scheduling)
+        shape to fully pipeline the sync loop.
         """
+        # NVTX (CPU-side): label every host phase of the step so the previously-dark gaps
+        # between GPU kernels are attributable in nsys. host_step_begin marks the step boundary
+        # (read step cadence from the spacing between these marks); each host_* range below shows
+        # which host phase owns the GPU-idle time (typically host_prepare_lm_inputs and
+        # host_run_sampling_task). These are pure CPU markers and add no cuda sync.
+        w = self.model_worker
+        w.nvtx_mark("host_step_begin")
+
+        # Apply the previous step's deferred EOS stop before any selection sees the requests. The
+        # CUDA event recorded when the mask was copied is already complete a step later, so this is
+        # a ~us wait, not the ~5.9 ms torch.nonzero device sync it replaces.
+        with w.nvtx_range("host_apply_deferred_stops"):
+            self.model_worker.apply_deferred_stops(self._pending_stop_handle)
+            self._pending_stop_handle = None
 
         # insert/remove requests to self.active_requests
-        self._prepare_requests()
+        with w.nvtx_range("host_prepare_requests"):
+            self._prepare_requests()
 
         # Select requests for detokenization
-        detokenize_requests = self._select_detokenize_requests()
+        with w.nvtx_range("host_select_detokenize"):
+            detokenize_requests = self._select_detokenize_requests()
 
         # Select requests for LM processing
-        lm_requests = self._select_lm_requests()
+        with w.nvtx_range("host_select_lm"):
+            lm_requests = self._select_lm_requests()
 
         # Prepare LM inputs outside the worker and run either prefill or decode
-        lm_inputs = self.model_worker.prepare_lm_inputs(lm_requests, detokenize_requests)
+        with w.nvtx_range(f"host_prepare_lm_inputs_bs{len(lm_requests)}"):
+            lm_inputs = self.model_worker.prepare_lm_inputs(lm_requests, detokenize_requests)
 
         # OVERLAP OPT (Part 2): run the SNAC vocoder concurrently with the LLM decode.
         # The vocoder runs on a dedicated CUDA stream and the decode on the default stream,
@@ -198,31 +226,41 @@ class Scheduler:
             # default stream to stop the CPU running unboundedly ahead and accumulating transient
             # per-step tensors. There is nothing to overlap on a decode-only step, so this sync
             # costs no concurrency. (Replaces the blanket per-step sync removed from run_forever.)
-            torch.cuda.synchronize()
+            # NVTX: this IS a blocking sync, so the host-idle time it owns is genuine GPU-bound
+            # waiting (vs the host_* ranges, which are CPU-bound work). Labeling it separates them.
+            with w.nvtx_range("host_decode_only_sync"):
+                torch.cuda.synchronize()
 
         # Free KV pages for finished requests synchronously (cheap: returns page indices to a
         # pool). Kept on the scheduler thread so reclamation is never deferred behind the emitter
         # and the next step's empty_pages.get_nowait() can reuse them immediately. The completion
         # MESSAGE is still sent by the emitter (after the request's audio, preserving ordering).
-        for req in detokenize_requests:
-            if req.done_all:
-                self.model_worker.free_kv_cache(req)
+        with w.nvtx_range("host_free_kv"):
+            for req in detokenize_requests:
+                if req.done_all:
+                    self.model_worker.free_kv_cache(req)
 
         # 4. B3: hand byte-conversion + socket send to the emitter thread so the scheduler returns
         #    to the next decode immediately. Only enqueue when there is something to emit (audio,
         #    or a done_all completion message) to avoid flooding the queue on empty/idle steps.
-        if collected is not None or detokenize_requests:
-            if self._b3_offload_emit:
-                self._emit_queue.put((collected, detokenize_requests))
-            else:
-                # B3 OFF (VOX_B3_OFFLOAD=0): emit synchronously on the scheduler thread, same work as
-                # the emitter would do, but without the thread or the bounded queue. A/B baseline.
-                self._emit_collected(collected, detokenize_requests)
+        with w.nvtx_range("host_emit_enqueue"):
+            if collected is not None or detokenize_requests:
+                if self._b3_offload_emit:
+                    self._emit_queue.put((collected, detokenize_requests))
+                else:
+                    # B3 OFF (VOX_B3_OFFLOAD=0): emit synchronously on the scheduler thread, same work
+                    # as the emitter would do, but without the thread or the bounded queue. A/B baseline.
+                    self._emit_collected(collected, detokenize_requests)
         # self._send_responses(detokenize_requests)  # B3: moved to the emitter thread (_emit_collected)
 
-        # Execute the sampling task right away for synchronous scheduling
-        if task is not None:
-            asyncio.run(task)
+        # Carry the EOS result. Deferred path: run_lm_* returned a DeferredStopHandle -> stash it and
+        # apply at the top of the NEXT step (no sync here). Legacy path (VOX_DEFER_EOS=0 or a
+        # non-Orpheus model): a coroutine -> run it inline now, preserving the old behavior.
+        if isinstance(task, DeferredStopHandle):
+            self._pending_stop_handle = task
+        elif task is not None:
+            with w.nvtx_range("host_run_sampling_task"):
+                asyncio.run(task)
 
 
     async def _step_async(self, task, lm_requests, detokenize_requests):
@@ -230,11 +268,20 @@ class Scheduler:
         Process the next batch of requests asynchronously.
         """
 
+        # NVTX (CPU-side) parity with sync _step: label host phases so async-mode nsys captures
+        # show the same host_* breakdown. Here the scheduling host work (select_*) is expected to
+        # overlap the model coroutine via asyncio.gather below, so these ranges let you confirm
+        # the overlap actually happens (host_select_* should sit under run_model's GPU work).
+        w = self.model_worker
+        w.nvtx_mark("host_step_begin")
+
         # insert/remove requests to self.active_requests
-        await self._prepare_requests_async()
+        with w.nvtx_range("host_prepare_requests"):
+            await self._prepare_requests_async()
 
         # Prepare LM inputs outside the worker and run either prefill or decode
-        lm_inputs = self.model_worker.prepare_lm_inputs(lm_requests, detokenize_requests)
+        with w.nvtx_range(f"host_prepare_lm_inputs_bs{len(lm_requests)}"):
+            lm_inputs = self.model_worker.prepare_lm_inputs(lm_requests, detokenize_requests)
 
         async def run_model():
             # OVERLAP OPT (Part 2, async parity): same launch -> decode -> collect ordering as
@@ -255,11 +302,12 @@ class Scheduler:
             detokenize_ctx = self.model_worker.run_detokenize_launch(detokenize_requests)
 
             # 2. Enqueue LLM prefill/decode on the default stream -> overlaps the vocoder.
+            #    Deferred-EOS: run_lm_* now returns a DeferredStopHandle (or a legacy coroutine /
+            #    None); it is applied/awaited next step in run_scheduling, not wrapped in a task.
             if lm_inputs is not None and lm_inputs["is_prefill"]:
-                coro = self.model_worker.run_lm_prefill(lm_requests, lm_inputs)
+                next_task = self.model_worker.run_lm_prefill(lm_requests, lm_inputs)
             else:
-                coro = self.model_worker.run_lm_decode(lm_requests, lm_inputs)
-            next_task = asyncio.create_task(coro) if coro else None
+                next_task = self.model_worker.run_lm_decode(lm_requests, lm_inputs)
 
             # 3. Collect vocoder audio. Blocks only on the vocoder completion event, so the
             #    decode enqueued in step 2 keeps running on the default stream meanwhile.
@@ -281,14 +329,23 @@ class Scheduler:
             return next_task
 
         async def run_scheduling():
-            if task is not None:
-                await task
+            # Apply the previous step's deferred EOS (or run a legacy sampling coroutine) before
+            # selecting the next batch. NOTE: async mode is wired for consistency but not yet
+            # validated/optimized in this pass.
+            if isinstance(task, DeferredStopHandle):
+                with w.nvtx_range("host_apply_deferred_stops"):
+                    self.model_worker.apply_deferred_stops(task)
+            elif task is not None:
+                with w.nvtx_range("host_await_sampling_task"):
+                    await task
 
             # Select requests for detokenization
-            next_detokenize_requests = self._select_detokenize_requests()
+            with w.nvtx_range("host_select_detokenize"):
+                next_detokenize_requests = self._select_detokenize_requests()
 
             # Select requests for LM processing
-            next_lm_requests = self._select_lm_requests()
+            with w.nvtx_range("host_select_lm"):
+                next_lm_requests = self._select_lm_requests()
 
             return next_lm_requests, next_detokenize_requests
 
@@ -317,7 +374,7 @@ class Scheduler:
             asyncio.run(self._run_async_loop())
         else:
             while True:
-                self._step()
+                self._step_pipelined()
                 # OVERLAP OPT (Part 1): removed the blanket per-step device-wide sync.
                 # It was the dominant serializer (forced CPU/GPU lock-step every step and
                 # drained the vocoder stream, preventing decode/vocoder overlap). Ordering and

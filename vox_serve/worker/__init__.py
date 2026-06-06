@@ -1,4 +1,4 @@
-from .base import ModelWorker
+from .base import DeferredStopHandle, ModelWorker
 from .cuda_graph_worker import CudaGraphWorker
 
-__all__ = ["ModelWorker", "CudaGraphWorker"]
+__all__ = ["ModelWorker", "CudaGraphWorker", "DeferredStopHandle"]

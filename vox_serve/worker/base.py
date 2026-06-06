@@ -1,3 +1,5 @@
+import contextlib
+from dataclasses import dataclass
 import queue
 from typing import Coroutine, List, Optional
 
@@ -9,6 +11,16 @@ from ..flashinfer_utils import FlashInferDecodeWrapper, FlashInferPrefillWrapper
 from ..model import load_model
 from ..requests import LMInputs, Request
 from ..utils import get_logger
+
+
+@dataclass
+class DeferredStopHandle:
+    """A deferred-EOS stop: a pinned host copy of the GPU stop-mask plus the CUDA event that
+    signals the copy is complete. Produced by ModelWorker._make_stop_handle in the step that
+    generated the tokens and consumed by apply_deferred_stops at the top of the next step."""
+    requests: List[Request]
+    host_mask: torch.Tensor
+    event: torch.cuda.Event
 
 
 class ModelWorker:
@@ -94,6 +106,15 @@ class ModelWorker:
 
         # Tensor to store offset values for each client
         self.offsets = torch.zeros(self.max_batch_size, dtype=torch.int32, device=self.device)
+
+        # Deferred-EOS: rotating pinned host buffers holding the GPU stop-mask. EOS detection
+        # becomes a fixed-size async copy (+ CUDA event) read one step later, replacing the
+        # per-step torch.nonzero device sync. 2 slots (prev/cur) suffice for a 1-step defer.
+        self._stop_mask_pinned_ring = [
+            torch.empty(self.max_batch_size, dtype=torch.bool, pin_memory=True)
+            for _ in range(2)
+        ]
+        self._stop_mask_pinned_idx = 0
 
         # Use CLI-provided values or defaults
         self.max_num_pages = max_num_pages
@@ -467,13 +488,17 @@ class ModelWorker:
             if getattr(self.prefill_wrapper, "qo_indptr", None) is not None:
                 logits = logits[self.prefill_wrapper.qo_indptr[:-1] - 1]
 
-            output_ids, task = self.model.sampling(
+            output_ids, second = self.model.sampling(
                 logits=logits,
                 requests=requests,
                 repetition_cache=repetition_cache,
             )
 
-            return task
+            # Deferred-EOS: a tensor return is the GPU stop-mask -> build an async handle. A
+            # non-tensor (legacy coroutine / None) is passed through unchanged.
+            if torch.is_tensor(second):
+                return self._make_stop_handle(requests, second)
+            return second
 
     def run_lm_decode(self, requests: List[Request], lm_inputs: LMInputs) -> Optional[Coroutine]:
         """
@@ -538,13 +563,17 @@ class ModelWorker:
                 input_masks=input_masks,
             )
 
-            output_ids, task = self.model.sampling(
+            output_ids, second = self.model.sampling(
                 logits=logits,
                 requests=requests,
                 repetition_cache=repetition_cache,
             )
 
-            return task
+            # Deferred-EOS: a tensor return is the GPU stop-mask -> build an async handle. A
+            # non-tensor (legacy coroutine / None) is passed through unchanged.
+            if torch.is_tensor(second):
+                return self._make_stop_handle(requests, second)
+            return second
 
     def run_lm_depth(
         self,
@@ -758,6 +787,59 @@ class ModelWorker:
             # in nvtx_range_push — it would serialize the streams and hide the overlap.
             # torch.cuda.synchronize()
             torch.cuda.nvtx.range_pop()
+
+    @contextlib.contextmanager
+    def nvtx_range(self, name: str):
+        """Exception-safe NVTX range as a context manager.
+
+        Use this to label CPU-only phases (e.g. the scheduler's per-step host work) so they
+        stop showing up as dark/unattributed gaps between GPU kernels in nsys. Like
+        nvtx_range_push/pop, this is a pure CPU-thread marker and adds NO cuda synchronize, so
+        it does not perturb the decode/vocoder overlap. No-op when NVTX is disabled.
+        """
+        self.nvtx_range_push(name)
+        try:
+            yield
+        finally:
+            self.nvtx_range_pop()
+
+    def nvtx_mark(self, name: str):
+        """Emit an instantaneous NVTX marker (a labeled vertical line in nsys).
+
+        Handy as a per-step delimiter (e.g. "host_step_begin") so step boundaries and cadence
+        are readable without wrapping the whole loop body in a range. No-op when NVTX is off.
+        """
+        if self.nvtx_enabled:
+            torch.cuda.nvtx.mark(name)
+
+    def _make_stop_handle(self, requests: List[Request], stop_mask: torch.Tensor) -> "DeferredStopHandle":
+        """Async-copy the GPU stop-mask into a rotating pinned host buffer and record a CUDA event
+        on the current stream. Returns a DeferredStopHandle applied at the top of the next step.
+        Non-blocking: the copy is enqueued and the event signals its completion."""
+        slot = self._stop_mask_pinned_idx
+        self._stop_mask_pinned_idx = (slot + 1) % len(self._stop_mask_pinned_ring)
+        host_mask = self._stop_mask_pinned_ring[slot][: len(requests)]
+        host_mask.copy_(stop_mask, non_blocking=True)
+        event = torch.cuda.Event()
+        event.record()
+        return DeferredStopHandle(requests=requests, host_mask=host_mask, event=event)
+
+    def apply_deferred_stops(self, handle: "Optional[DeferredStopHandle]") -> None:
+        """Apply a deferred EOS stop produced in the previous step. The event is already complete a
+        step later, so synchronize() is ~us. For each set bit: pop the trailing EOS token (appended
+        eagerly in sampling) so detokenize never emits it, and finalize the request. Idempotent with
+        the host-side max_tokens termination."""
+        if handle is None:
+            return
+        handle.event.synchronize()
+        host_mask = handle.host_mask
+        for i, req in enumerate(handle.requests):
+            if host_mask[i]:
+                # The last appended token was EOS -> not audio. Remove it.
+                req.lm_output_audio_tokens.pop()
+                if not req.done_lm_generation:
+                    req.done_lm_generation = True
+                    req.finish_reason = "stop_id_encountered"
 
     def free_kv_cache(self, request: Request):
         """

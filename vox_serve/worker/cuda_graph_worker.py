@@ -1136,12 +1136,18 @@ class CudaGraphWorker(ModelWorker):
             )
 
         else:
-            output_ids, task = self.model.sampling(
+            output_ids, second = self.model.sampling(
                 logits=logits,
                 requests=requests,
                 repetition_cache=repetition_cache,
             )
             self.nvtx_range_pop() # sampling
+            # Deferred-EOS: a tensor return is the GPU stop-mask -> build an async handle;
+            # otherwise (legacy coroutine / None) pass through. Consumed by `return task` below.
+            if torch.is_tensor(second):
+                task = self._make_stop_handle(requests, second)
+            else:
+                task = second
 
         self.nvtx_range_pop() # lm_prefill
 
@@ -1256,12 +1262,18 @@ class CudaGraphWorker(ModelWorker):
             )
 
         else:
-            output_ids, task = self.model.sampling(
+            output_ids, second = self.model.sampling(
                 logits=logits,
                 requests=requests,
                 repetition_cache=repetition_cache,
             )
             self.nvtx_range_pop() # sampling
+            # Deferred-EOS: a tensor return is the GPU stop-mask -> build an async handle;
+            # otherwise (legacy coroutine / None) pass through. Consumed by `return task` below.
+            if torch.is_tensor(second):
+                task = self._make_stop_handle(requests, second)
+            else:
+                task = second
 
         self.nvtx_range_pop() # lm_decode
 
@@ -1673,7 +1685,8 @@ class CudaGraphWorker(ModelWorker):
 
         # Block the CPU only on the vocoder stream's completion event. This replaces the old
         # device-wide torch.cuda.synchronize() (which would have drained the decode too).
-        ctx.done_event.synchronize()
+        with self.nvtx_range("detok_wait_vocoder"):
+            ctx.done_event.synchronize()
 
         audio_tensors = self.cuda_graph_buffers["detokenize_output"][:actual_batch_size]
 
