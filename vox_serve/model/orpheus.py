@@ -250,6 +250,19 @@ class OrpheusModel(BaseLM):
                 enable_torch_compile=enable_torch_compile,
             ).eval().to(self.audio_decoder_device)
 
+            # Vocoder perf flags (A/B-gated). Both run before the detokenize CUDA
+            # graph is captured (worker init happens after this), so the captured
+            # graph holds the folded / bf16 kernels.
+            #   VOX_FOLD_WEIGHTNORM: materialize weight_norm into raw conv weights so
+            #     the per-chunk weight_norm recompute is dropped from the graph.
+            #   VOX_VOCODER_BF16: run SNAC in the LM dtype (bf16) instead of FP32; the
+            #     detokenize graph's final copy_ upcasts the bf16 audio into the FP32
+            #     output buffer, so nothing downstream of the graph changes.
+            if os.environ.get("VOX_FOLD_WEIGHTNORM", "1") != "0":
+                self.audio_decoder.remove_weight_norm()
+            if os.environ.get("VOX_VOCODER_BF16", "1") != "0":
+                self.audio_decoder.to(dtype)
+
         self._num_attention_heads = self.model.config.num_attention_heads
         self._num_key_value_heads = self.model.config.num_key_value_heads
         self._num_hidden_layers = self.model.config.num_hidden_layers

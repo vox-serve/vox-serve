@@ -1,4 +1,5 @@
 import contextlib
+import os
 from dataclasses import dataclass
 from typing import Coroutine, Dict, List, Optional, Tuple
 
@@ -33,16 +34,23 @@ class CollectedAudio:
     """Host-side output of run_detokenize_collect, ready for byte conversion + socket send on a
     dedicated emitter thread (B3).
 
-    The GPU detokenize_output buffer has already been copied into audio_np (an owned host array),
-    so the next scheduler step may overwrite the GPU buffer while this object is still being
-    emitted. `chunks` lists (request, row index into audio_np, trim_len), where trim_len == -1
-    means "no trim". All reads of mutable request state happened on the scheduler thread that
-    produced this object, so the emitter thread only touches the owned host array + immutable
-    request fields.
+    audio_np is a numpy VIEW into a pinned-ring slot (the GPU->host D2H copy targets that slot).
+    `chunks` lists (request, row index into audio_np, trim_len), where trim_len == -1 means
+    "no trim". All reads of mutable request state happened on the scheduler thread that produced
+    this object, so the consumer only touches the pinned-slot view + immutable request fields.
+
+    DEFERRED-COLLECT: when copy_event is not None, the D2H copy is still IN FLIGHT on the vocoder
+    stream and audio_np's VALUES are not yet valid — the consumer MUST call copy_event.synchronize()
+    before reading them. This moves the vocoder wait off the scheduler thread onto the emitter
+    thread (sync mode) so it overlaps the next decode. When copy_event is None (watermark / decoder-
+    cache / disaggregation fallback) the copy already landed before this object was returned.
+    pinned_slot records which ring slot audio_np views (bookkeeping; the ring depth bounds reuse).
     """
 
     audio_np: np.ndarray
     chunks: List[Tuple[Request, int, int]]
+    copy_event: Optional[torch.cuda.Event] = None
+    pinned_slot: Optional[int] = None
 
 
 class CudaGraphWorker(ModelWorker):
@@ -79,11 +87,16 @@ class CudaGraphWorker(ModelWorker):
         # PINNED-D2H OPT: pre-allocated pinned host buffers for the audio snapshot in
         # run_detokenize_collect. Slots rotate per call so the emitter thread (B3) can still
         # hold a numpy view of slot N while the scheduler writes the next slot. Ring depth must
-        # exceed the worst-case emitter backlog; 4 gives ~3 steps of headroom, which is
-        # comfortably above the observed emitter latency (~1-2 ms vs scheduler step ~17-25 ms).
+        # exceed the worst-case emitter backlog.
+        # DEFERRED-COLLECT: once the scheduler stops synchronizing each detok step it can run
+        # ahead, so the ring depth becomes load-bearing: a slot must not be overwritten while a
+        # still-queued CollectedAudio references its view. Worst-case live views =
+        # emit_queue.maxsize + 1 (being emitted) + 1 (just produced); ring depth 6 covers
+        # maxsize 4 (see Scheduler._emit_queue) with the coupling asserted there.
         # With pinned destination, cudaMemcpyAsync(non_blocking=True) is genuinely async — the
         # API returns ~µs and we only wait for the copy itself on the vocoder stream (no
-        # default-stream drain). Per-slot size on Orpheus: 256×1×2048×4 = 2 MB → 8 MB total.
+        # default-stream drain). Per-slot size on Orpheus: 256×1×2048×4 = 2 MB → 12 MB total.
+        self._audio_pinned_ring_depth = 6
         self._audio_pinned_ring = [
             torch.empty(
                 self.max_batch_size,
@@ -92,9 +105,15 @@ class CudaGraphWorker(ModelWorker):
                 dtype=torch.float32,
                 pin_memory=True,
             )
-            for _ in range(4)
+            for _ in range(self._audio_pinned_ring_depth)
         ]
         self._audio_pinned_idx = 0
+
+        # DEFERRED-COLLECT (A/B gate): default on. When enabled, run_detokenize_collect issues the
+        # D2H copy without waiting and hands a copy_event to the consumer (emitter thread in sync
+        # mode), so the vocoder wait leaves the scheduler critical path. Falls back to the old
+        # synchronous snapshot for watermark / decoder-cache / disaggregation paths.
+        self._defer_collect = os.environ.get("VOX_DEFER_COLLECT", "1") != "0"
 
         # Initialize CUDA graphs after parent initialization
         original_nvtx_enable = self.nvtx_enabled
@@ -119,7 +138,8 @@ class CudaGraphWorker(ModelWorker):
         # sort in decreasing order to the cuda graph for largest batch is captured first and the smaller
         # shapes can reuse the memory
         self.cuda_graph_batch_sizes = [2**i for i in range(int(np.log2(self.max_batch_size)) + 1)][::-1]
-        self.cuda_graph_seq_len_buckets = [1024][::-1]
+        # self.cuda_graph_seq_len_buckets = [1024][::-1]
+        self.cuda_graph_seq_len_buckets = [128, 256, 512, 1024][::-1]
         self.prefill_graph_batch_size = 64
         self.cuda_graph_pool = torch.cuda.graph_pool_handle()
         self.depth_unrolled_graph_pool = torch.cuda.graph_pool_handle()
@@ -1683,45 +1703,57 @@ class CudaGraphWorker(ModelWorker):
         request_chunk_mapping = ctx.request_chunk_mapping
         actual_batch_size = ctx.actual_batch_size
 
-        # Block the CPU only on the vocoder stream's completion event. This replaces the old
-        # device-wide torch.cuda.synchronize() (which would have drained the decode too).
-        with self.nvtx_range("detok_wait_vocoder"):
-            ctx.done_event.synchronize()
+        # DEFERRED-COLLECT: defer the GPU-completion wait off the scheduler thread when the target
+        # path applies (Orpheus single-GPU, no watermark, no decoder cache). The D2H copy and the
+        # next step's graph.replay() are both on self.vocoder_stream, so stream ordering alone
+        # guarantees copy(N) drains detokenize_output before replay(N+1) overwrites it — no CPU
+        # block is needed to protect the GPU buffer. We hand the consumer a copy_event to wait on
+        # before reading audio_np's values (emitter thread in sync mode), so the vocoder wait
+        # overlaps the next decode instead of stalling the scheduler.
+        defer = (
+            self._defer_collect
+            and self.cuda_graph_buffers["detokenize_cache"] is None
+            and self.detokenizer_device == self.device
+            and not self.needs_watermarking
+        )
 
-        audio_tensors = self.cuda_graph_buffers["detokenize_output"][:actual_batch_size]
-
-        # Copy back updated decoder caches to each request (no-op for Orpheus: cache is None)
-        if self.cuda_graph_buffers["detokenize_cache"] is not None:
-            for i, (req_idx, _chunk_idx) in enumerate(request_chunk_mapping):
-                req = requests[req_idx]
-                req.decoder_cache.copy_from(self.cuda_graph_buffers["detokenize_cache"][i : i + 1])
-
-        if self.needs_watermarking:
-            for i in range(audio_tensors.shape[0]):
-                audio_tensors[i, 0] = self.run_watermark(audio_tensors[i, 0], orig_sr=24000)
-
-        # A2: do ONE device-to-host copy for the whole batch (vs N per-request .cpu() calls).
-        # B3: this snapshot is the only audio work that must stay on the scheduler thread — it has
-        # to run before the next step overwrites detokenize_output. audio_np_batch is an owned host
-        # array, so the emitter thread can safely convert/send it after this returns.
-        # PINNED-D2H OPT: copy into a pre-allocated PINNED host buffer on the vocoder stream,
-        # not into a fresh pageable allocation via .cpu(). Two effects:
-        #   (a) pinned destination lets cudaMemcpyAsync(non_blocking=True) actually be async —
-        #       the API returns ~µs instead of blocking on the staged pageable copy;
-        #   (b) issuing on vocoder_stream avoids the default-stream drain that .cpu() previously
-        #       paid waiting for the in-flight LM decode replay to finish.
-        # The previous version (pageable + default-stream) spent ~5.7 ms/call × 58/s ≈ 23 s of
-        # the 70 s window blocked here. We rotate a 4-slot pinned ring so the emitter thread may
-        # still be reading slot N when subsequent collects write later slots.
+        # Rotate a pinned ring slot for the D2H snapshot (one copy for the whole batch).
         slot = self._audio_pinned_idx
         self._audio_pinned_idx = (self._audio_pinned_idx + 1) % len(self._audio_pinned_ring)
         host_buf = self._audio_pinned_ring[slot][:actual_batch_size]
-        with torch.cuda.stream(self.vocoder_stream):
-            host_buf.copy_(audio_tensors, non_blocking=True)
-        # Only the just-queued copy is pending on vocoder_stream (done_event.synchronize above
-        # drained the prior SNAC replay). This sync therefore costs only the copy itself.
-        self.vocoder_stream.synchronize()
-        audio_np_batch = host_buf.numpy()
+        audio_tensors = self.cuda_graph_buffers["detokenize_output"][:actual_batch_size]
+
+        if defer:
+            # No CPU wait. Issue the copy on vocoder_stream (ordered behind the SNAC replay there)
+            # and record a completion event; the emitter thread synchronizes on it before reading.
+            copy_event = torch.cuda.Event()
+            with torch.cuda.stream(self.vocoder_stream):
+                host_buf.copy_(audio_tensors, non_blocking=True)
+                copy_event.record(self.vocoder_stream)
+            audio_np_batch = host_buf.numpy()  # view; VALUES invalid until copy_event fires
+        else:
+            # Legacy synchronous snapshot (watermark / decoder-cache / disaggregation fallback).
+            copy_event = None
+            # Block the CPU only on the vocoder stream's completion event.
+            with self.nvtx_range("detok_wait_vocoder"):
+                ctx.done_event.synchronize()
+
+            # Copy back updated decoder caches to each request (no-op for Orpheus: cache is None)
+            if self.cuda_graph_buffers["detokenize_cache"] is not None:
+                for i, (req_idx, _chunk_idx) in enumerate(request_chunk_mapping):
+                    req = requests[req_idx]
+                    req.decoder_cache.copy_from(self.cuda_graph_buffers["detokenize_cache"][i : i + 1])
+
+            if self.needs_watermarking:
+                for i in range(audio_tensors.shape[0]):
+                    audio_tensors[i, 0] = self.run_watermark(audio_tensors[i, 0], orig_sr=24000)
+
+            with torch.cuda.stream(self.vocoder_stream):
+                host_buf.copy_(audio_tensors, non_blocking=True)
+            # Only the just-queued copy is pending on vocoder_stream (done_event.synchronize above
+            # drained the prior SNAC replay). This sync therefore costs only the copy itself.
+            self.vocoder_stream.synchronize()
+            audio_np_batch = host_buf.numpy()
 
         # Build per-chunk emit metadata. trim_len/done_all read mutable request state, so they are
         # computed HERE (scheduler thread) to stay consistent with the decode task that mutates
@@ -1756,4 +1788,6 @@ class CudaGraphWorker(ModelWorker):
                 req.done_all = True
 
         self.nvtx_range_pop()  # detokenize_collect
-        return CollectedAudio(audio_np=audio_np_batch, chunks=chunks)
+        return CollectedAudio(
+            audio_np=audio_np_batch, chunks=chunks, copy_event=copy_event, pinned_slot=slot
+        )

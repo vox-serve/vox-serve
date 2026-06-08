@@ -145,7 +145,20 @@ class Scheduler:
         # self._b3_offload_emit = os.environ.get("VOX_B3_OFFLOAD", "1") != "0"
         self._b3_offload_emit = True
         if not self.async_scheduling and self._b3_offload_emit:
-            self._emit_queue: "queue.Queue" = queue.Queue(maxsize=16)
+            # DEFERRED-COLLECT: the queued CollectedAudio holds a numpy view into a pinned-ring
+            # slot whose copy may still be in flight; the slot is reused after ring_depth collects.
+            # Keep maxsize small and coupled to the ring depth so a slot is never overwritten while
+            # a still-queued item references it (worst-case live views = maxsize + 1 emitting +
+            # 1 just-produced). With the scheduler no longer synchronizing each detok step, this
+            # bounded queue is also what throttles run-ahead (the role the per-step vocoder sync
+            # used to play). maxsize 4 against ring depth 6 satisfies maxsize + 2 <= ring_depth.
+            emit_queue_maxsize = 4
+            ring_depth = getattr(self.model_worker, "_audio_pinned_ring_depth", emit_queue_maxsize + 2)
+            assert emit_queue_maxsize + 2 <= ring_depth, (
+                f"emit queue maxsize {emit_queue_maxsize} + 2 must be <= pinned ring depth {ring_depth} "
+                "to prevent pinned-slot reuse while a queued CollectedAudio still references it"
+            )
+            self._emit_queue: "queue.Queue" = queue.Queue(maxsize=emit_queue_maxsize)
             self._emit_thread = threading.Thread(target=self._emit_worker_loop, name="vox-emit", daemon=True)
             self._emit_thread.start()
 
@@ -440,6 +453,12 @@ class Scheduler:
             # collected audio into req.output_audio here, then stream it via _send_responses_async
             # exactly as before. The byte conversion is shared with the sync emitter (_chunk_to_bytes).
             if collected is not None:
+                # DEFERRED-COLLECT: async has no emitter thread, so the copy_event must be awaited
+                # on this (event-loop) thread before reading audio_np. This keeps async correct but
+                # unoptimized — the overlap win is sync-only for now (async is not the benchmarked
+                # path). No-op when copy_event is None (synchronous fallback).
+                if collected.copy_event is not None:
+                    collected.copy_event.synchronize()
                 for req, i, trim_len in collected.chunks:
                     req.output_audio.put(self._chunk_to_bytes(collected.audio_np[i], trim_len))
 
@@ -714,6 +733,14 @@ class Scheduler:
         self.model_worker.nvtx_range_push("emit")
         try:
             if collected is not None:
+                # DEFERRED-COLLECT: the GPU->host copy was issued without a CPU wait on the
+                # scheduler thread; block on its completion HERE (emitter thread) before reading
+                # audio_np's values, so the vocoder wait overlaps the scheduler's next decode
+                # instead of stalling it. detok_finalize_wait should sit under the decode bar in
+                # nsys. No-op when copy_event is None (synchronous fallback path).
+                if collected.copy_event is not None:
+                    with self.model_worker.nvtx_range("detok_finalize_wait"):
+                        collected.copy_event.synchronize()
                 for req, i, trim_len in collected.chunks:
                     audio_bytes = self._chunk_to_bytes(collected.audio_np[i], trim_len)
                     if req.is_streaming:
