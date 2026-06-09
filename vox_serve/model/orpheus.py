@@ -465,20 +465,32 @@ class OrpheusModel(BaseLM):
         # Eager, GPU-resident bookkeeping (no device sync): feed the next decode and append the
         # output token. The EOS token is appended here for every request and popped one step later
         # by the worker's apply_deferred_stops (deferred path) before any detokenize selection sees it.
-        for i, req in enumerate(requests):
-            req.input_tokens = output_ids[i : i + 1]
-            req.lm_output_tokens.append(output_ids[i : i + 1])
-            req.lm_output_audio_tokens.append(output_ids[i : i + 1])
+        #
+        # HOST-COST OPT: the original code created the per-request views inline as
+        #   output_ids[i:i+1]  (x3 per request) + repetition_cache[i]  (x1 per request),
+        # i.e. ~4 ATen indexing dispatches PER REQUEST. That O(batch) host cost dominated the
+        # `sampling` range: its floor scaled ~linearly (~16 us/request -> ~3 ms at batch ~160 in
+        # the nsys trace) and ballooned further under GIL/allocator contention with the vocoder
+        # stream. split()/unbind() materialize ALL per-row views in a single C++ call, so the
+        # Python loop below is left with only cheap list/attr assignments. The rows are still
+        # views aliasing output_ids' / repetition_cache's storage exactly as before (output_ids[i:i+1]
+        # was already a view), so downstream in-place mutation/aliasing semantics are unchanged.
+        token_rows = output_ids.split(1, dim=0)  # batch x (1, n_codebooks) views, one dispatch
+        rep_rows = repetition_cache.unbind(0) if repetition_cache is not None else None
 
-        # Host-only max_tokens termination (position-based, no device sync).
-        for req in requests:
+        for i, req in enumerate(requests):
+            row = token_rows[i]
+            req.input_tokens = row
+            req.lm_output_tokens.append(row)
+            req.lm_output_audio_tokens.append(row)
+
+            # Host-only max_tokens termination (position-based, no device sync).
             if req.next_position_id > self.max_tokens:
                 req.done_lm_generation = True
                 req.finish_reason = "max_tokens_reached"
 
-        if repetition_cache is not None:
-            for i, req in enumerate(requests):
-                req.repetition_cache = repetition_cache[i]
+            if rep_rows is not None:
+                req.repetition_cache = rep_rows[i]
 
         # EOS detection as a GPU-resident boolean mask (no torch.nonzero, no host read).
         stop_mask = output_ids[:, 0] == self.stop_token_id
