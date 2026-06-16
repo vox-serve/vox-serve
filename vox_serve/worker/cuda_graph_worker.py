@@ -318,6 +318,23 @@ class CudaGraphWorker(ModelWorker):
         prefill_position_ids_buffer = torch.zeros(
             max_seq_len, dtype=torch.int32, device=self.device
         )
+
+        # HOST-SYNC OPT: pinned host ring buffer for position_ids. prepare_lm_inputs writes the
+        # per-step positions here (pure CPU) and the decode/prefill copy sites H2D them with
+        # non_blocking=True. This replaces the per-step `torch.tensor(list, device=cuda)` whose
+        # PAGEABLE H2D forced a cudaStreamSynchronize that drained the in-flight decode
+        # (~5.8ms/step measured = the dominant 16rps bottleneck; the host then could not run ahead
+        # of the GPU). Ring depth comfortably exceeds the ~1-step run-ahead (bounded by the
+        # deferred-stop event sync), so a slot is reused only long after its async copy completed.
+        # Sized to cover both decode (<= max_batch_size) and prefill (<= max_seq_len) lengths.
+        self._use_pinned_pos_ids = os.environ.get("VOX_PINNED_POS_IDS", "1") != "0"
+        if self._use_pinned_pos_ids:
+            pos_ring_len = max(self.max_batch_size, max_seq_len)
+            self._pos_pinned_ring = [
+                torch.empty(pos_ring_len, dtype=torch.int32, pin_memory=True)
+                for _ in range(8)
+            ]
+            self._pos_pinned_idx = 0
         prefill_input_features_buffer = torch.zeros(
             max_seq_len, self.model.hidden_size,
             dtype=torch.bfloat16, device=self.device
@@ -1107,7 +1124,8 @@ class CudaGraphWorker(ModelWorker):
 
         # Copy inputs to CUDA graph buffers
         self.cuda_graph_buffers["prefill_input_ids"][:actual_seq_len].copy_(input_ids)
-        self.cuda_graph_buffers["prefill_position_ids"][:actual_seq_len].copy_(position_ids)
+        # non_blocking H2D: position_ids is pinned (see prepare_lm_inputs) -> async, no stream drain.
+        self.cuda_graph_buffers["prefill_position_ids"][:actual_seq_len].copy_(position_ids, non_blocking=True)
 
         if self.model.needs_input_features:
             self.cuda_graph_buffers["prefill_input_features"][:actual_seq_len].copy_(input_features)
@@ -1233,7 +1251,10 @@ class CudaGraphWorker(ModelWorker):
         graph = self.cuda_graphs_lm_decode[padded_batch_size]
 
         self.cuda_graph_buffers["input_ids"][:actual_batch_size].copy_(input_ids)
-        self.cuda_graph_buffers["position_ids"][:actual_batch_size].copy_(position_ids)
+        # non_blocking H2D: position_ids is a pinned host tensor (see prepare_lm_inputs), so this
+        # copy is genuinely async on the default stream and ordered before graph.replay() below —
+        # no stream drain. (Harmless no-op flag when position_ids is already device-resident.)
+        self.cuda_graph_buffers["position_ids"][:actual_batch_size].copy_(position_ids, non_blocking=True)
 
         # Copy input_masks and input_features as single tensors to CUDA graph buffers
         if self.model.needs_input_masks:

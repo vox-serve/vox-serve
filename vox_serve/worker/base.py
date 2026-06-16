@@ -358,7 +358,23 @@ class ModelWorker:
 
         # Allocate tensors for GPU computation
         input_ids = torch.cat(input_ids_list, dim=0)
-        position_ids = torch.tensor(position_ids_list, device=self.device, dtype=torch.int32)
+        # HOST-SYNC OPT: do NOT build `torch.tensor(position_ids_list, device=cuda)` here. That
+        # creates a PAGEABLE host tensor whose immediate free forces a cudaStreamSynchronize that
+        # drains the in-flight decode (~5.8ms/step = the dominant 16rps bottleneck, serializing
+        # CPU<->GPU each step). Instead stage the positions into a pre-pinned ring buffer (pure CPU
+        # write, no sync) and let the graph copy sites H2D them with non_blocking=True. The ring slot
+        # rotates so the NEXT step's prep cannot overwrite a slot whose async copy has not run yet
+        # (run-ahead is bounded to ~1 step by the deferred-stop event sync). Falls back to the old
+        # pageable path when no pinned ring is present (eager / non-CUDA-graph worker).
+        pos_ring = getattr(self, "_pos_pinned_ring", None)
+        n_pos = len(position_ids_list)
+        if pos_ring is not None and n_pos <= pos_ring[0].shape[0]:
+            buf = pos_ring[self._pos_pinned_idx]
+            self._pos_pinned_idx = (self._pos_pinned_idx + 1) % len(pos_ring)
+            buf.numpy()[:n_pos] = position_ids_list
+            position_ids = buf[:n_pos]
+        else:
+            position_ids = torch.tensor(position_ids_list, device=self.device, dtype=torch.int32)
 
         # Prepare input_masks and input_features as single tensors
         if self.model.needs_input_masks and input_masks_list:
@@ -433,7 +449,9 @@ class ModelWorker:
         paged_kv_indices = lm_inputs["paged_kv_indices"]
         paged_kv_last_page_len = lm_inputs["paged_kv_last_page_len"]
         input_ids = lm_inputs["input_ids"]
-        position_ids = lm_inputs["position_ids"]
+        # position_ids may now be a pinned host tensor (see prepare_lm_inputs); ensure device for the
+        # eager (non-CUDA-graph) forward. No-op when already device-resident.
+        position_ids = lm_inputs["position_ids"].to(self.device, non_blocking=True)
         input_features = lm_inputs["input_features"]
         input_masks = lm_inputs["input_masks"]
         repetition_cache = lm_inputs["repetition_cache"]
@@ -519,7 +537,9 @@ class ModelWorker:
         paged_kv_indices = lm_inputs["paged_kv_indices"]
         paged_kv_last_page_len = lm_inputs["paged_kv_last_page_len"]
         input_ids = lm_inputs["input_ids"]
-        position_ids = lm_inputs["position_ids"]
+        # position_ids may now be a pinned host tensor (see prepare_lm_inputs); ensure device for the
+        # eager (non-CUDA-graph) forward. No-op when already device-resident.
+        position_ids = lm_inputs["position_ids"].to(self.device, non_blocking=True)
         input_features = lm_inputs["input_features"]
         input_masks = lm_inputs["input_masks"]
         repetition_cache = lm_inputs["repetition_cache"]
