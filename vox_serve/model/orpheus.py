@@ -1,3 +1,4 @@
+import os
 from typing import Any, List
 
 import torch
@@ -249,6 +250,19 @@ class OrpheusModel(BaseLM):
                 enable_torch_compile=enable_torch_compile,
             ).eval().to(self.audio_decoder_device)
 
+            # Vocoder perf flags (A/B-gated). Both run before the detokenize CUDA
+            # graph is captured (worker init happens after this), so the captured
+            # graph holds the folded / bf16 kernels.
+            #   VOX_FOLD_WEIGHTNORM: materialize weight_norm into raw conv weights so
+            #     the per-chunk weight_norm recompute is dropped from the graph.
+            #   VOX_VOCODER_BF16: run SNAC in the LM dtype (bf16) instead of FP32; the
+            #     detokenize graph's final copy_ upcasts the bf16 audio into the FP32
+            #     output buffer, so nothing downstream of the graph changes.
+            if os.environ.get("VOX_FOLD_WEIGHTNORM", "1") != "0":
+                self.audio_decoder.remove_weight_norm()
+            if os.environ.get("VOX_VOCODER_BF16", "1") != "0":
+                self.audio_decoder.to(dtype)
+
         self._num_attention_heads = self.model.config.num_attention_heads
         self._num_key_value_heads = self.model.config.num_key_value_heads
         self._num_hidden_layers = self.model.config.num_hidden_layers
@@ -256,6 +270,11 @@ class OrpheusModel(BaseLM):
         # self.vocab_size = self.model.config.vocab_size
 
         self.stop_token_id = 128258
+
+        # Deferred-EOS A/B flag (VOX_DEFER_EOS, default ON): when set, sampling() returns the GPU
+        # stop-mask for the worker to async-copy + apply one step later, eliminating the per-step
+        # torch.nonzero device sync. Set VOX_DEFER_EOS=0 for the legacy inline path.
+        self._defer_eos = os.environ.get("VOX_DEFER_EOS", "1") != "0"
 
         self.default_sampling_config = SamplingConfig(
             top_k=None,
@@ -443,38 +462,57 @@ class OrpheusModel(BaseLM):
                 sampling_params.repetition_window,
             )
 
+        # Eager, GPU-resident bookkeeping (no device sync): feed the next decode and append the
+        # output token. The EOS token is appended here for every request and popped one step later
+        # by the worker's apply_deferred_stops (deferred path) before any detokenize selection sees it.
+        #
+        # HOST-COST OPT: the original code created the per-request views inline as
+        #   output_ids[i:i+1]  (x3 per request) + repetition_cache[i]  (x1 per request),
+        # i.e. ~4 ATen indexing dispatches PER REQUEST. That O(batch) host cost dominated the
+        # `sampling` range: its floor scaled ~linearly (~16 us/request -> ~3 ms at batch ~160 in
+        # the nsys trace) and ballooned further under GIL/allocator contention with the vocoder
+        # stream. split()/unbind() materialize ALL per-row views in a single C++ call, so the
+        # Python loop below is left with only cheap list/attr assignments. The rows are still
+        # views aliasing output_ids' / repetition_cache's storage exactly as before (output_ids[i:i+1]
+        # was already a view), so downstream in-place mutation/aliasing semantics are unchanged.
+        token_rows = output_ids.split(1, dim=0)  # batch x (1, n_codebooks) views, one dispatch
+        rep_rows = repetition_cache.unbind(0) if repetition_cache is not None else None
+
         for i, req in enumerate(requests):
-            req.input_tokens = output_ids[i : i + 1]
+            row = token_rows[i]
+            req.input_tokens = row
+            req.lm_output_tokens.append(row)
+            req.lm_output_audio_tokens.append(row)
 
-        async def update_req_states():
-            stop_mask = output_ids[:, 0] == self.stop_token_id
-            stop_indices = torch.nonzero(stop_mask, as_tuple=True)[0]
+            # Host-only max_tokens termination (position-based, no device sync).
+            if req.next_position_id > self.max_tokens:
+                req.done_lm_generation = True
+                req.finish_reason = "max_tokens_reached"
 
-            for i, req in enumerate(requests):
-                req.lm_output_tokens.append(output_ids[i : i + 1])
-                req.lm_output_audio_tokens.append(output_ids[i : i + 1])
+            if rep_rows is not None:
+                req.repetition_cache = rep_rows[i]
 
-            # Remove from stop requests
-            for idx in stop_indices:
-                req = requests[idx.item()]
-                # Remove the EOS token from lm_output_audio_tokens
-                req.lm_output_audio_tokens.pop()
+        # EOS detection as a GPU-resident boolean mask (no torch.nonzero, no host read).
+        stop_mask = output_ids[:, 0] == self.stop_token_id
+
+        if self._defer_eos:
+            # Deferred path: hand the GPU mask back. The worker async-copies it to a pinned host
+            # buffer + records a CUDA event; the scheduler applies the stop at the top of the next
+            # step (apply_deferred_stops), so the per-step device sync is gone.
+            return output_ids, stop_mask
+
+        # Legacy inline path (VOX_DEFER_EOS=0): detect + apply stops synchronously now, preserving
+        # the original torch.nonzero device-sync behavior for A/B comparison.
+        stop_indices = torch.nonzero(stop_mask, as_tuple=True)[0]
+        for idx in stop_indices:
+            req = requests[idx.item()]
+            # Remove the EOS token from lm_output_audio_tokens
+            req.lm_output_audio_tokens.pop()
+            if not req.done_lm_generation:
                 req.done_lm_generation = True
                 req.finish_reason = "stop_id_encountered"
 
-            for req in requests:
-                if req.next_position_id > self.max_tokens:
-                    req.done_lm_generation = True
-                    req.finish_reason = "max_tokens_reached"
-
-            if repetition_cache is not None:
-                # Update repetition cache in requests
-                for i, req in enumerate(requests):
-                    req.repetition_cache = repetition_cache[i]
-
-        task = update_req_states()
-
-        return output_ids, task
+        return output_ids, None
 
     def _turn_token_into_id(self, output_ids):
         """Modoel's output ids to audio ids"""

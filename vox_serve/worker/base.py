@@ -1,3 +1,5 @@
+import contextlib
+from dataclasses import dataclass
 import queue
 from typing import Coroutine, List, Optional
 
@@ -9,6 +11,23 @@ from ..flashinfer_utils import FlashInferDecodeWrapper, FlashInferPrefillWrapper
 from ..model import load_model
 from ..requests import LMInputs, Request
 from ..utils import get_logger
+
+
+@dataclass
+class DeferredStopHandle:
+    """A deferred-EOS stop: a pinned host copy of the GPU stop-mask plus the CUDA event that
+    signals the copy is complete. Produced by ModelWorker._make_stop_handle in the step that
+    generated the tokens and consumed by apply_deferred_stops one step later.
+
+    audio_lens captures len(req.lm_output_audio_tokens) per request AT BUILD TIME (right after the
+    EOS token was appended). apply_deferred_stops truncates back to audio_lens[i]-1, which removes
+    the EOS token AND any optimistic over-generation token(s) appended between build and apply in
+    the carried-batch pipeline (where a stopped request gets one extra decode before its stop is
+    applied). A plain pop() would remove the over-gen token and wrongly leave the EOS token."""
+    requests: List[Request]
+    host_mask: torch.Tensor
+    event: torch.cuda.Event
+    audio_lens: List[int]
 
 
 class ModelWorker:
@@ -94,6 +113,15 @@ class ModelWorker:
 
         # Tensor to store offset values for each client
         self.offsets = torch.zeros(self.max_batch_size, dtype=torch.int32, device=self.device)
+
+        # Deferred-EOS: rotating pinned host buffers holding the GPU stop-mask. EOS detection
+        # becomes a fixed-size async copy (+ CUDA event) read one step later, replacing the
+        # per-step torch.nonzero device sync. 2 slots (prev/cur) suffice for a 1-step defer.
+        self._stop_mask_pinned_ring = [
+            torch.empty(self.max_batch_size, dtype=torch.bool, pin_memory=True)
+            for _ in range(2)
+        ]
+        self._stop_mask_pinned_idx = 0
 
         # Use CLI-provided values or defaults
         self.max_num_pages = max_num_pages
@@ -338,7 +366,23 @@ class ModelWorker:
 
         # Allocate tensors for GPU computation
         input_ids = torch.cat(input_ids_list, dim=0)
-        position_ids = torch.tensor(position_ids_list, device=self.device, dtype=torch.int32)
+        # HOST-SYNC OPT: do NOT build `torch.tensor(position_ids_list, device=cuda)` here. That
+        # creates a PAGEABLE host tensor whose immediate free forces a cudaStreamSynchronize that
+        # drains the in-flight decode (~5.8ms/step = the dominant 16rps bottleneck, serializing
+        # CPU<->GPU each step). Instead stage the positions into a pre-pinned ring buffer (pure CPU
+        # write, no sync) and let the graph copy sites H2D them with non_blocking=True. The ring slot
+        # rotates so the NEXT step's prep cannot overwrite a slot whose async copy has not run yet
+        # (run-ahead is bounded to ~1 step by the deferred-stop event sync). Falls back to the old
+        # pageable path when no pinned ring is present (eager / non-CUDA-graph worker).
+        pos_ring = getattr(self, "_pos_pinned_ring", None)
+        n_pos = len(position_ids_list)
+        if pos_ring is not None and n_pos <= pos_ring[0].shape[0]:
+            buf = pos_ring[self._pos_pinned_idx]
+            self._pos_pinned_idx = (self._pos_pinned_idx + 1) % len(pos_ring)
+            buf.numpy()[:n_pos] = position_ids_list
+            position_ids = buf[:n_pos]
+        else:
+            position_ids = torch.tensor(position_ids_list, device=self.device, dtype=torch.int32)
 
         # Prepare input_masks and input_features as single tensors
         if self.model.needs_input_masks and input_masks_list:
@@ -413,7 +457,9 @@ class ModelWorker:
         paged_kv_indices = lm_inputs["paged_kv_indices"]
         paged_kv_last_page_len = lm_inputs["paged_kv_last_page_len"]
         input_ids = lm_inputs["input_ids"]
-        position_ids = lm_inputs["position_ids"]
+        # position_ids may now be a pinned host tensor (see prepare_lm_inputs); ensure device for the
+        # eager (non-CUDA-graph) forward. No-op when already device-resident.
+        position_ids = lm_inputs["position_ids"].to(self.device, non_blocking=True)
         input_features = lm_inputs["input_features"]
         input_masks = lm_inputs["input_masks"]
         repetition_cache = lm_inputs["repetition_cache"]
@@ -475,13 +521,17 @@ class ModelWorker:
             if getattr(self.prefill_wrapper, "qo_indptr", None) is not None:
                 logits = logits[self.prefill_wrapper.qo_indptr[:-1] - 1]
 
-            output_ids, task = self.model.sampling(
+            output_ids, second = self.model.sampling(
                 logits=logits,
                 requests=requests,
                 repetition_cache=repetition_cache,
             )
 
-            return task
+            # Deferred-EOS: a tensor return is the GPU stop-mask -> build an async handle. A
+            # non-tensor (legacy coroutine / None) is passed through unchanged.
+            if torch.is_tensor(second):
+                return self._make_stop_handle(requests, second)
+            return second
 
     def run_lm_decode(self, requests: List[Request], lm_inputs: LMInputs) -> Optional[Coroutine]:
         """
@@ -495,7 +545,9 @@ class ModelWorker:
         paged_kv_indices = lm_inputs["paged_kv_indices"]
         paged_kv_last_page_len = lm_inputs["paged_kv_last_page_len"]
         input_ids = lm_inputs["input_ids"]
-        position_ids = lm_inputs["position_ids"]
+        # position_ids may now be a pinned host tensor (see prepare_lm_inputs); ensure device for the
+        # eager (non-CUDA-graph) forward. No-op when already device-resident.
+        position_ids = lm_inputs["position_ids"].to(self.device, non_blocking=True)
         input_features = lm_inputs["input_features"]
         input_masks = lm_inputs["input_masks"]
         repetition_cache = lm_inputs["repetition_cache"]
@@ -546,13 +598,17 @@ class ModelWorker:
                 input_masks=input_masks,
             )
 
-            output_ids, task = self.model.sampling(
+            output_ids, second = self.model.sampling(
                 logits=logits,
                 requests=requests,
                 repetition_cache=repetition_cache,
             )
 
-            return task
+            # Deferred-EOS: a tensor return is the GPU stop-mask -> build an async handle. A
+            # non-tensor (legacy coroutine / None) is passed through unchanged.
+            if torch.is_tensor(second):
+                return self._make_stop_handle(requests, second)
+            return second
 
     def run_lm_depth(
         self,
@@ -752,24 +808,94 @@ class ModelWorker:
 
     def nvtx_range_push(self, name: str):
         """
-        Push an NVTX range with CUDA synchronization if profiling is enabled.
-        Does nothing if NVTX profiling is disabled.
+        Push an NVTX range if profiling is enabled. Does nothing if NVTX is disabled.
 
         Args:
             name: Name of the NVTX range
         """
         if self.nvtx_enabled:
-            torch.cuda.synchronize()
+            # OVERLAP OPT: removed the torch.cuda.synchronize() that used to precede the
+            # marker. The sync only existed to stretch the CPU-side NVTX range so it visually
+            # bracketed the GPU kernels — but it serializes the CPU/GPU and drains every
+            # stream, which would erase the decode/vocoder overlap we now want to measure.
+            # NVTX ranges are CPU-thread markers; kernel timing comes from CUPTI hardware
+            # timestamps regardless, and kernels are attributed to a range via correlationId.
+            # torch.cuda.synchronize()
             torch.cuda.nvtx.range_push(name)
 
     def nvtx_range_pop(self):
         """
-        Pop an NVTX range with CUDA synchronization if profiling is enabled.
-        Does nothing if NVTX profiling is disabled.
+        Pop an NVTX range if profiling is enabled. Does nothing if NVTX is disabled.
         """
         if self.nvtx_enabled:
-            torch.cuda.synchronize()
+            # OVERLAP OPT: removed the torch.cuda.synchronize() here for the same reason as
+            # in nvtx_range_push — it would serialize the streams and hide the overlap.
+            # torch.cuda.synchronize()
             torch.cuda.nvtx.range_pop()
+
+    @contextlib.contextmanager
+    def nvtx_range(self, name: str):
+        """Exception-safe NVTX range as a context manager.
+
+        Use this to label CPU-only phases (e.g. the scheduler's per-step host work) so they
+        stop showing up as dark/unattributed gaps between GPU kernels in nsys. Like
+        nvtx_range_push/pop, this is a pure CPU-thread marker and adds NO cuda synchronize, so
+        it does not perturb the decode/vocoder overlap. No-op when NVTX is disabled.
+        """
+        self.nvtx_range_push(name)
+        try:
+            yield
+        finally:
+            self.nvtx_range_pop()
+
+    def nvtx_mark(self, name: str):
+        """Emit an instantaneous NVTX marker (a labeled vertical line in nsys).
+
+        Handy as a per-step delimiter (e.g. "host_step_begin") so step boundaries and cadence
+        are readable without wrapping the whole loop body in a range. No-op when NVTX is off.
+        """
+        if self.nvtx_enabled:
+            torch.cuda.nvtx.mark(name)
+
+    def _make_stop_handle(self, requests: List[Request], stop_mask: torch.Tensor) -> "DeferredStopHandle":
+        """Async-copy the GPU stop-mask into a rotating pinned host buffer and record a CUDA event
+        on the current stream. Returns a DeferredStopHandle applied at the top of the next step.
+        Non-blocking: the copy is enqueued and the event signals its completion."""
+        slot = self._stop_mask_pinned_idx
+        self._stop_mask_pinned_idx = (slot + 1) % len(self._stop_mask_pinned_ring)
+        host_mask = self._stop_mask_pinned_ring[slot][: len(requests)]
+        host_mask.copy_(stop_mask, non_blocking=True)
+        event = torch.cuda.Event()
+        event.record()
+        # Snapshot the audio-token length per request now (EOS token already appended this step), so
+        # apply_deferred_stops can truncate exactly to the pre-EOS length even if the carried-batch
+        # pipeline appends an optimistic over-generation token before the stop is applied. Pure host
+        # read; absolute indices are stable (the list is append-only + tail-truncated).
+        audio_lens = [len(req.lm_output_audio_tokens) for req in requests]
+        return DeferredStopHandle(
+            requests=requests, host_mask=host_mask, event=event, audio_lens=audio_lens
+        )
+
+    def apply_deferred_stops(self, handle: "Optional[DeferredStopHandle]") -> None:
+        """Apply a deferred EOS stop produced in the previous step. The event is already complete a
+        step later, so synchronize() is ~us. For each set bit: truncate lm_output_audio_tokens back
+        to the pre-EOS length captured at build time (removing the EOS token AND any optimistic
+        over-generation token appended since, in the carried-batch pipeline) so detokenize never
+        emits them, then finalize the request. Idempotent with the host-side max_tokens
+        termination (truncation still runs; finalize is guarded)."""
+        if handle is None:
+            return
+        handle.event.synchronize()
+        host_mask = handle.host_mask
+        audio_lens = handle.audio_lens
+        for i, req in enumerate(handle.requests):
+            if host_mask[i]:
+                # audio_lens[i] = length right after the EOS token was appended; the EOS token sits
+                # at index audio_lens[i]-1. Truncate there to drop it plus any over-gen tail.
+                del req.lm_output_audio_tokens[audio_lens[i] - 1:]
+                if not req.done_lm_generation:
+                    req.done_lm_generation = True
+                    req.finish_reason = "stop_id_encountered"
 
     def free_kv_cache(self, request: Request):
         """

@@ -11,6 +11,7 @@ import torch.nn.functional as F
 from einops import rearrange
 from torch import nn
 from torch.nn.utils.parametrizations import weight_norm
+from torch.nn.utils.parametrize import is_parametrized, remove_parametrizations
 
 from ..utils import get_logger
 
@@ -439,6 +440,22 @@ class SNAC(nn.Module):
         z_q = self.quantizer.from_codes(codes)
         audio_hat = self.decoder(z_q)
         return audio_hat
+
+    def remove_weight_norm(self):
+        """
+        Fold weight_norm parametrizations into the raw conv weights.
+
+        Every WNConv1d/WNConvTranspose1d carries a live parametrization that
+        recomputes weight = g * v / ||v|| on every forward, which is otherwise
+        baked into the detokenize CUDA graph and replayed every chunk. Materialize
+        the weight once (leave_parametrized=True keeps the computed values, so this
+        is mathematically a no-op) and drop the parametrization. Must be called
+        before the SNAC decode graph is captured.
+        """
+        for module in self.modules():
+            if is_parametrized(module, "weight"):
+                remove_parametrizations(module, "weight", leave_parametrized=True)
+        return self
 
     @classmethod
     def from_config(cls, config_path, enable_torch_compile=False):
