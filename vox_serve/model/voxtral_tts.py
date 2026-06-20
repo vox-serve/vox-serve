@@ -33,7 +33,6 @@ from torch import nn
 from ..flashinfer_utils import (
     FlashInferPrefillWrapper,
     FlashInferWrapper,
-    apply_rope_pos_ids,
     rms_norm,
 )
 from ..requests import Request
@@ -1033,6 +1032,15 @@ class VoxtralTTSModel(BaseLM):
 
         cfg_alpha = self._cfg_alpha_per_req(requests, batch_size, device, dtype)
 
+        # DESIGN NOTE: the audio head (CFG + ODE) runs here in sampling() rather than
+        # forward(), so it falls outside the worker's decode CUDA graph and has to
+        # carry its own captured graph (self._acoustic_graph) + its own cfg_alpha
+        # plumbing (cfg_alpha is per-request sampling state, not part of forward()'s
+        # LMInputs). This works but is bespoke to this model. If/when a second
+        # inline-audio-head model lands, revisit: either standardize a captured
+        # "audio head" stage in the worker, or move the head into forward() and let
+        # the existing decode graph + a forward-threaded cfg cover it. Today the
+        # split keeps the generic worker from knowing about CFG/ODE/RNG internals.
         # ---- dispatch: captured acoustic CUDA graph, else eager ----
         use_graph = (
             self._acoustic_graph is not None

@@ -235,6 +235,16 @@ class CudaGraphWorker(ModelWorker):
 
         # Inline-audio-head models (e.g. Voxtral-TTS) can opt into a captured
         # acoustic-head CUDA graph reusing this worker's graph pool.
+        #
+        # DESIGN NOTE: this exists only because the worker's decode graph captures
+        # forward() but NOT sampling(), and Voxtral's audio head lives in sampling().
+        # So the model must self-capture a second graph here. If the head were folded
+        # into forward(), the existing decode graph would absorb it and this hook +
+        # the whole AcousticHeadCudaGraph could go away (one replay instead of two).
+        # We keep the split to avoid coupling the generic worker to one model's
+        # sampler/CFG/RNG internals -- but if more inline-audio-head models appear,
+        # consider standardizing this: either capture sampling() generically or
+        # define a first-class "audio head" stage with cfg threaded through it.
         if hasattr(self.model, "enable_acoustic_graph"):
             self.model.enable_acoustic_graph(self.cuda_graph_pool, self.cuda_graph_batch_sizes)
 

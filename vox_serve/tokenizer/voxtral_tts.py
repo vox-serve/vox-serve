@@ -16,8 +16,8 @@ from typing import Union, get_args, get_origin
 
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
+from torch import nn
 from torch.nn import RMSNorm
 
 from ..utils import get_logger
@@ -1028,7 +1028,7 @@ class VoxtralTTSAudioTokenizer(nn.Module):
 
         # Track the encoder's downsampling effect on the sliding-window so the
         # decoder windows match the original construction order.
-        for idx, stride in enumerate(args.encoder_convs_strides):
+        for _idx, stride in enumerate(args.encoder_convs_strides):
             if args.half_attn_window_upon_downsampling and stride > 1:
                 assert stride == 2, "only supporting 2x downsampling"
                 cur_window_size = cur_window_size // 2

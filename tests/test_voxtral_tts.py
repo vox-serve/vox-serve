@@ -62,7 +62,9 @@ def test_t3_acoustic_head_diversity(model) -> None:
     """
     torch.manual_seed(0)
     B = 8
-    hid = torch.randn(B, model.config.hidden_size, device=model.device, dtype=model.dtype) * (110.0 / model.config.hidden_size ** 0.5)
+    hid = torch.randn(
+        B, model.config.hidden_size, device=model.device, dtype=model.dtype
+    ) * (110.0 / model.config.hidden_size ** 0.5)
     cfg_alpha = torch.full((B,), 1.2, device=model.device, dtype=model.dtype)
     audio_codes = model.acoustic_transformer(llm_hidden=hid, cfg_alpha=cfg_alpha)
     sem = audio_codes[:, 0].tolist()
