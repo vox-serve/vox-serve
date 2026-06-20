@@ -153,11 +153,19 @@ class ModelWorker:
     def _prepare_attention_wrappers(self):
         self.flashinfer_buffer = torch.empty(256 * 1024 * 1024, dtype=torch.uint8, device=self.device)
 
+        # ``n_state`` is consumed by the FlashInfer wrapper only to derive
+        # ``head_dim = n_state // n_qo_head``. For models where
+        # ``num_attention_heads * head_dim != hidden_size`` (Voxtral has
+        # 32 * 128 = 4096 vs hidden_size 3072), passing hidden_size yields a
+        # WRONG head_dim and silently corrupts attention. Use the actual
+        # attention-state size.
+        attn_state_size = self.model.num_attention_heads * self.model.head_dim
+
         self.prefill_wrapper = FlashInferPrefillWrapper(
             attn_buffer=self.flashinfer_buffer,
             n_qo_head=self.model.num_attention_heads,
             n_kv_head=self.model.num_key_value_heads,
-            n_state=self.model.hidden_size,
+            n_state=attn_state_size,
             page_size=self.page_size,
             use_cuda_graph=False,
         )
@@ -165,7 +173,7 @@ class ModelWorker:
             attn_buffer=self.flashinfer_buffer,
             n_qo_head=self.model.num_attention_heads,
             n_kv_head=self.model.num_key_value_heads,
-            n_state=self.model.hidden_size,
+            n_state=attn_state_size,
             page_size=self.page_size,
             use_cuda_graph=False,
         )
@@ -299,7 +307,7 @@ class ModelWorker:
                 paged_kv_indices.extend(req.kv_pages)
                 paged_kv_last_page_len.append(req.kv_last_page_len)
 
-                req.next_position_id = len(req.input_tokens) + 1
+                req.next_position_id = len(req.input_tokens) + self.model.first_decode_position_offset
                 req.done_lm_prefill = True
 
             else:
@@ -666,6 +674,16 @@ class ModelWorker:
                 # remove the padded audio
                 trim_len = int(audio_int16.shape[1] * (last_chunk_len - 0.5) / self.detokenize_interval)
                 audio_int16 = audio_int16[:, :trim_len]
+
+            # TTFA first-chunk: when the model pre-seeded N silence frames at the
+            # head of lm_output_audio_tokens, drop the leading silence samples
+            # from the PCM. See BaseLM.first_chunk_frames.
+            first_chunk_frames = getattr(self.model, "first_chunk_frames", None)
+            if decode_idx == 0 and first_chunk_frames is not None:
+                n_silence = self.detokenize_interval - first_chunk_frames
+                samples_per_frame = self.model.output_audio_length // self.detokenize_interval
+                prefix_samples = n_silence * samples_per_frame
+                audio_int16 = audio_int16[:, prefix_samples:]
 
             audio_bytes = audio_int16.tobytes()
             req.output_audio.put(audio_bytes)

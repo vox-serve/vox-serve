@@ -21,6 +21,7 @@ import zmq
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
+from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
 from .utils import get_global_log_level, get_logger, set_global_log_level
@@ -907,6 +908,63 @@ async def generate(
 
             cleanup_thread = threading.Thread(target=delayed_cleanup, daemon=True)
             cleanup_thread.start()
+
+
+# ============================================================================
+# OpenAI-compatible /v1/audio/speech endpoint (raw PCM streaming)
+# ============================================================================
+
+
+class AudioSpeechRequest(BaseModel):
+    """Request body for the OpenAI-compatible ``/v1/audio/speech`` endpoint.
+
+    Mirrors the payload sent by ``benchmarking/bench/adapters/voxtral.py``:
+    ``{model, input, voice, language, response_format, stream, extra_params}``.
+    ``extra_params`` may carry ``cfg_alpha`` (classifier-free guidance scale).
+    """
+
+    model: Optional[str] = None
+    input: str
+    voice: Optional[str] = None
+    language: Optional[str] = None
+    response_format: Optional[str] = "pcm"
+    stream: Optional[bool] = True
+    extra_params: Optional[Dict] = None
+
+
+@app.post("/v1/audio/speech")
+async def audio_speech(req: AudioSpeechRequest):
+    """Generate speech and stream raw int16 PCM (no WAV header).
+
+    Reuses the existing streaming machinery (``async_stream_chunks``); the worker
+    already emits int16 PCM bytes, so unlike the ``/generate`` WAV route this
+    endpoint forwards them verbatim with ``media_type="audio/pcm"``.
+    """
+    if api_server is None:
+        raise HTTPException(status_code=503, detail="Server not ready")
+
+    model_kwargs = {
+        "voice": req.voice,
+        "language": req.language,
+        "cfg_alpha": (req.extra_params or {}).get("cfg_alpha"),
+    }
+
+    try:
+        request_id = api_server.start_streaming_request(req.input, None, model_kwargs)
+
+        async def audio_stream():
+            async for chunk in api_server.async_stream_chunks(request_id):
+                yield chunk
+
+        return StreamingResponse(
+            audio_stream(),
+            media_type="audio/pcm",
+            headers={"Cache-Control": "no-cache"},
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 # ============================================================================
