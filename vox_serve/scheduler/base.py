@@ -12,6 +12,7 @@ import zmq
 import zmq.asyncio
 
 from ..requests import Request
+from ..sampling import SamplingConfig
 from ..utils import get_logger
 from ..worker import CudaGraphWorker, DeferredStopHandle, ModelWorker
 
@@ -806,6 +807,10 @@ class Scheduler:
                 is_pressing=request_dict.get("is_streaming", False), # at first, streaming requests are pressing
                 model_kwargs=request_dict.get("model_kwargs", {}),
             )
+
+            cfg_alpha = new_request.model_kwargs.get("cfg_alpha")
+            if cfg_alpha is not None:
+                new_request.sampling_config = SamplingConfig(cfg_scale=float(cfg_alpha))
 
             self.logger.debug("new_request=%s", new_request)
             return new_request
