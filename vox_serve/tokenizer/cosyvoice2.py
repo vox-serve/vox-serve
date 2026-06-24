@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from functools import lru_cache
 from typing import List, Optional, OrderedDict, Tuple, Union
 
@@ -28,54 +28,17 @@ from .hifigan import ConvRNNF0Predictor, HiFTGenerator, HiFTGeneratorCache
 from .s3 import ModelConfig as S3ModelConfig
 from .s3 import S3TokenizerV2
 
-
-@dataclass
-class CosyVoice2DecoderCache(DecoderCache):
-    """Cache tensors used by CosyVoice2Decoder.
-
-    Simplified structure using FlowEncoderCache, FlowDecoderCache, and HiFTGeneratorCache.
-    """
-    # Flow encoder and decoder caches
-    flow_encoder_cache: Optional[FlowEncoderCache] = None
-    flow_decoder_cache: Optional[FlowDecoderCache] = None
-
-    # HiFT (vocoder) cache - now stores the complete HiFTGeneratorCache object
-    hift_cache: Optional[HiFTGeneratorCache] = None
-
-
-def fade_in_out(fade_in_mel: torch.Tensor, fade_out_mel: torch.Tensor, window: torch.Tensor):
-    """perform fade_in_out in tensor style"""
-    mel_overlap_len = int(window.shape[0] / 2)
-    fade_in_mel = fade_in_mel.clone()
-    fade_in_mel[..., :mel_overlap_len] = (
-        fade_in_mel[..., :mel_overlap_len] * window[:mel_overlap_len]
-        + fade_out_mel[..., -mel_overlap_len:] * window[mel_overlap_len:]
-    )
-    return fade_in_mel
-
-
-class AttrDict(dict):
-    def __init__(self, *args, **kwargs):
-        super(AttrDict, self).__init__(*args, **kwargs)
-        self.__dict__ = self
-
-
-def drop_invalid_tokens(x):
-    assert len(x.shape) <= 2 and x.shape[0] == 1, "only batch size of one allowed for now"
-    return x[x < SPEECH_VOCAB_SIZE]
-
-
-@lru_cache(100)
-def get_resampler(src_sr, dst_sr, device):
-    return ta.transforms.Resample(src_sr, dst_sr).to(device)
-
-
-# Sampling rate of the inputs to S3TokenizerV2
+# Sampling rate constants
 S3_SR = 16_000
 S3_HOP = 160  # 100 frames/sec
 S3_TOKEN_HOP = 640  # 25 tokens/sec
 S3_TOKEN_RATE = 25
 SPEECH_VOCAB_SIZE = 6561
+
+
+@lru_cache(100)
+def get_resampler(src_sr, dst_sr, device):
+    return ta.transforms.Resample(src_sr, dst_sr).to(device)
 
 
 class S3Tokenizer(S3TokenizerV2):
@@ -142,8 +105,6 @@ class S3Tokenizer(S3TokenizerV2):
     ) -> Tuple[torch.Tensor, torch.LongTensor]:
         """
         NOTE: mel-spec has a hop size of 160 points (100 frame/sec).
-        FIXME: this class inherits `nn.Module` but doesn't accept `torch.Tensor`
-        and handles a list of wavs one by one, which is unexpected.
 
         Args
         ----
@@ -216,16 +177,6 @@ def pad_list(xs, pad_value):
 
     Returns:
         Tensor: Padded tensor (B, Tmax, `*`).
-
-    Examples:
-        >>> x = [torch.ones(4), torch.ones(2), torch.ones(1)]
-        >>> x
-        [tensor([1., 1., 1., 1.]), tensor([1., 1.]), tensor([1.])]
-        >>> pad_list(x, 0)
-        tensor([[1., 1., 1., 1.],
-                [1., 1., 0., 0.],
-                [1., 0., 0., 0.]])
-
     """
     n_batch = len(xs)
     max_len = max(x.size(0) for x in xs)
@@ -617,18 +568,6 @@ def spectral_normalize_torch(magnitudes):
 def load_audio(file: str, sr: int = 16000):
     """
     Open an audio file and read as mono waveform, resampling as necessary
-
-    Parameters
-    ----------
-    file: str
-        The audio file to open
-
-    sr: int
-        The sample rate to resample the audio if necessary
-
-    Returns
-    -------
-    A torch.Tensor containing the audio waveform, in float32 dtype.
     """
     audio, sample_rate = torchaudio.load(file)
     if sample_rate != sr:
@@ -641,13 +580,6 @@ def load_audio(file: str, sr: int = 16000):
 def _mel_filters(device, n_mels: int) -> torch.Tensor:
     """
     load the mel filterbank matrix for projecting STFT into a Mel spectrogram.
-    Allows decoupling librosa dependency; saved using:
-
-        np.savez_compressed(
-            "mel_filters.npz",
-            mel_80=librosa.filters.mel(sr=16000, n_fft=400, n_mels=80),
-            mel_128=librosa.filters.mel(sr=16000, n_fft=400, n_mels=128),
-        )
     """
     assert n_mels in {80, 128}, f"Unsupported n_mels: {n_mels}"
 
@@ -668,27 +600,7 @@ def log_mel_spectrogram(
     device: Optional[Union[str, torch.device]] = None,
 ):
     """
-    Compute the log-Mel spectrogram of
-
-    Parameters
-    ----------
-    audio: Union[str, np.ndarray, torch.Tensor], shape = (*)
-        The path to audio or either a NumPy array or Tensor containing the
-        audio waveform in 16 kHz
-
-    n_mels: int
-        The number of Mel-frequency filters (80 or 128)
-
-    padding: int
-        Number of zero samples to pad to the right
-
-    device: Optional[Union[str, torch.device]]
-        If given, the audio tensor is moved to this device before STFT
-
-    Returns
-    -------
-    torch.Tensor, shape = (128, n_frames)
-        A Tensor that contains the Mel spectrogram
+    Compute the log-Mel spectrogram of audio
     """
     if not torch.is_tensor(audio):
         if isinstance(audio, str):
@@ -731,6 +643,7 @@ def padding(data: List[torch.Tensor]):
     return padded_feats.transpose(1, 2), feats_lengths
 
 
+# Global caches for mel spectrogram computation
 mel_basis = {}
 hann_window = {}
 
@@ -771,42 +684,158 @@ def mel_spectrogram(
     return spec
 
 
+def fade_in_out(fade_in_mel: torch.Tensor, fade_out_mel: torch.Tensor, window: torch.Tensor):
+    """Perform fade_in_out in tensor style for smooth audio chunk transitions."""
+    mel_overlap_len = int(window.shape[0] / 2)
+    fade_in_mel = fade_in_mel.clone()
+    fade_in_mel[..., :mel_overlap_len] = (
+        fade_in_mel[..., :mel_overlap_len] * window[:mel_overlap_len]
+        + fade_out_mel[..., -mel_overlap_len:] * window[mel_overlap_len:]
+    )
+    return fade_in_mel
+
+
+# =============================================================================
+# CosyVoice2 / Chatterbox Decoder
+# =============================================================================
+
+
+@dataclass
+class CosyVoice2DecoderCache(DecoderCache):
+    """Cache tensors used by CosyVoice2Decoder.
+
+    Simplified structure using FlowEncoderCache, FlowDecoderCache, and HiFTGeneratorCache.
+    """
+    # Flow encoder and decoder caches
+    flow_encoder_cache: Optional[FlowEncoderCache] = None
+    flow_decoder_cache: Optional[FlowDecoderCache] = None
+
+    # HiFT (vocoder) cache - now stores the complete HiFTGeneratorCache object
+    hift_cache: Optional[HiFTGeneratorCache] = None
+
+    # Speaker embedding tensor for voice cloning (copied by copy_from for CUDA graph compatibility)
+    # Shape: (1, embedding_dim) where embedding_dim is typically 192 for CAMPPlus x-vector
+    speaker_embedding: Optional[torch.Tensor] = None
+
+    # Per-request reference audio features for voice cloning (metadata, not copied)
+    # Note: This is kept for backward compatibility but speaker_embedding is preferred
+    ref_dict: Optional[dict] = None
+
+    # Per-request position offset components (for Chatterbox model)
+    # Note: These are metadata, not copied by copy_from()
+    cond_length: Optional[int] = None
+    text_length: Optional[int] = None
+
+    def shapes_compatible_with(self, other: "CosyVoice2DecoderCache") -> bool:
+        """Check if this cache's tensor shapes are compatible with another cache for copy_from.
+
+        Returns True if all tensor shapes match, False otherwise.
+        This is used to detect when CUDA graph execution should fall back to eager mode.
+        """
+        def _check_tensor_shapes(a, b) -> bool:
+            if a is None and b is None:
+                return True
+            if a is None or b is None:
+                return False
+            if torch.is_tensor(a) and torch.is_tensor(b):
+                return a.shape == b.shape
+            return True
+
+        def _check_cache_shapes(cache_a, cache_b) -> bool:
+            if cache_a is None and cache_b is None:
+                return True
+            if cache_a is None or cache_b is None:
+                return False
+            # Check all tensor fields in the cache
+            for field in fields(cache_a):
+                val_a = getattr(cache_a, field.name)
+                val_b = getattr(cache_b, field.name)
+                if torch.is_tensor(val_a) and torch.is_tensor(val_b):
+                    if val_a.shape != val_b.shape:
+                        return False
+            return True
+
+        # Check flow encoder cache shapes
+        if not _check_cache_shapes(self.flow_encoder_cache, other.flow_encoder_cache):
+            return False
+
+        # Check flow decoder cache shapes
+        if not _check_cache_shapes(self.flow_decoder_cache, other.flow_decoder_cache):
+            return False
+
+        # Check hift cache shapes
+        if not _check_cache_shapes(self.hift_cache, other.hift_cache):
+            return False
+
+        # Check speaker embedding shape
+        if not _check_tensor_shapes(self.speaker_embedding, other.speaker_embedding):
+            return False
+
+        return True
+
+    def copy_from(self, src: "CosyVoice2DecoderCache") -> None:
+        """Copy tensor caches from source, preserving metadata fields."""
+        if type(self) is not type(src):
+            raise TypeError(f"Cannot copy from {type(src)} to {type(self)}")
+
+        # Copy tensor-based cache fields
+        if self.flow_encoder_cache is not None and src.flow_encoder_cache is not None:
+            self.flow_encoder_cache.copy_from(src.flow_encoder_cache)
+        if self.flow_decoder_cache is not None and src.flow_decoder_cache is not None:
+            self.flow_decoder_cache.copy_from(src.flow_decoder_cache)
+        if self.hift_cache is not None and src.hift_cache is not None:
+            self.hift_cache.copy_from(src.hift_cache)
+
+        # Copy speaker embedding tensor (critical for voice cloning with CUDA graphs)
+        if self.speaker_embedding is not None and src.speaker_embedding is not None:
+            self.speaker_embedding.copy_(src.speaker_embedding)
+
+        # Metadata fields (ref_dict, cond_length, text_length) are intentionally NOT copied
+        # They should be preserved on the destination cache
+
+
 class CosyVoice2Decoder(nn.Module):
     """
-    The decoder of CosyVoice2 is a concat of token-to-mel (CFM) and a mel-to-waveform (HiFiGAN) modules.
+    Unified streaming decoder for CosyVoice2 and Chatterbox models.
+
+    The decoder consists of:
+    - Token-to-mel (CFM flow model)
+    - Mel-to-waveform (HiFiGAN vocoder)
+
+    Supports two caching modes:
+    - shared_prompt_cache_mode=True: Prefix sharing mode - single static cache shared across requests
+    - shared_prompt_cache_mode=False: Sliding window mode - per-request evolving caches
     """
 
     S3GEN_SR = 24000
     MAX_CACHE_LEN = 128  # Maximum attention cache length for sliding window
     PREFIX_LEN = 16  # Number of prefix tokens to keep for attention sink approach
 
-    def __init__(self, model_path, device, shared_prompt_cache_mode=False):
+    def __init__(
+        self,
+        device,
+        shared_prompt_cache_mode: bool = False,
+        # Option 1: Load from HuggingFace (CosyVoice2 style)
+        model_path: str = None,
+        # Option 2: Skip weight loading, load externally (Chatterbox style)
+        load_weights: bool = True,
+    ):
+        """Initialize the decoder.
+
+        Args:
+            device: Device to run the decoder on
+            shared_prompt_cache_mode: If True, use prefix sharing mode (single static cache).
+                                     If False, use sliding window mode (per-request caches).
+            model_path: HuggingFace repo ID to download weights from (CosyVoice2 style)
+            load_weights: If True, load weights from model_path. If False, weights must be
+                         loaded externally via load_state_dict (Chatterbox style).
+        """
         super().__init__()
         self.device = device
         self.shared_prompt_cache_mode = shared_prompt_cache_mode
-        audio_tokenizer_path = hf_hub_download(
-            repo_id=model_path,
-            filename="speech_tokenizer_v2.onnx",
-            revision=None,
-        )
-        spk_encoder_path = hf_hub_download(
-            repo_id=model_path,
-            filename="campplus.onnx",
-            revision=None,
-        )
-        flow_path = hf_hub_download(
-            repo_id=model_path,
-            filename="flow.pt",
-            revision=None,
-        )
-        hift_path = hf_hub_download(
-            repo_id=model_path,
-            filename="hift.pt",
-            revision=None,
-        )
-        self.tokenizer = S3Tokenizer(audio_tokenizer_path)
         self.mel_extractor = mel_spectrogram
 
+        # Build the flow model architecture
         encoder = UpsampleConformerEncoder(
             output_size=512,
             attention_heads=8,
@@ -831,13 +860,9 @@ class CosyVoice2Decoder(nn.Module):
             spk_emb_dim=80,
             estimator=estimator,
         )
-
         self.flow = CausalMaskedDiffWithXvec(encoder=encoder, decoder=decoder)
-        self.flow.load_state_dict(torch.load(flow_path, map_location="cpu", weights_only=True), strict=True)
-        self.flow.to(self.device).to(torch.bfloat16).eval()
 
-        self.resamplers = {}
-
+        # Build the HiFiGAN vocoder
         f0_predictor = ConvRNNF0Predictor()
         self.hift = HiFTGenerator(
             sampling_rate=self.S3GEN_SR,
@@ -848,6 +873,35 @@ class CosyVoice2Decoder(nn.Module):
             f0_predictor=f0_predictor,
             device=self.device,
         )
+
+        # Load weights if model_path is provided
+        if load_weights and model_path is not None:
+            self._load_weights_from_hf(model_path)
+
+        # Initialize cache-related buffers
+        self.mel_cache_len = 6
+        self.source_cache_len = int(self.mel_cache_len * 480)
+        self.speech_window = torch.from_numpy(np.hamming(2 * self.source_cache_len)).to(self.device)
+
+    def _load_weights_from_hf(self, model_path: str):
+        """Load weights from HuggingFace (CosyVoice2 style)."""
+        flow_path = hf_hub_download(
+            repo_id=model_path,
+            filename="flow.pt",
+            revision=None,
+        )
+        hift_path = hf_hub_download(
+            repo_id=model_path,
+            filename="hift.pt",
+            revision=None,
+        )
+
+        self.flow.load_state_dict(
+            torch.load(flow_path, map_location="cpu", weights_only=True),
+            strict=True,
+        )
+        self.flow.to(self.device).to(torch.bfloat16).eval()
+
         hift_state_dict = {
             k.replace("generator.", ""): v
             for k, v in torch.load(hift_path, map_location="cpu", weights_only=True).items()
@@ -855,19 +909,66 @@ class CosyVoice2Decoder(nn.Module):
         self.hift.load_state_dict(hift_state_dict, strict=True)
         self.hift.to(self.device).eval()
 
-        self.mel_cache_len = 6
-        self.source_cache_len = int(self.mel_cache_len * 480)
-        self.speech_window = torch.from_numpy(np.hamming(2 * self.source_cache_len)).to(self.device)
+    def load_state_dict_split(self, flow_state_dict: dict, hift_state_dict: dict, strict: bool = False):
+        """Load weights from pre-loaded state dicts (Chatterbox style).
+
+        Args:
+            flow_state_dict: State dict for the flow model
+            hift_state_dict: State dict for the HiFiGAN vocoder
+            strict: Whether to strictly enforce that the keys in state_dict match
+        """
+        self.flow.load_state_dict(flow_state_dict, strict=strict)
+        self.flow.to(self.device).to(torch.bfloat16).eval()
+
+        self.hift.load_state_dict(hift_state_dict, strict=strict)
+        self.hift.to(self.device).eval()
+
+    # Minimum token length required for proper cache initialization
+    # Below this, the cache will be too small for CUDA graphs
+    MIN_PROMPT_TOKEN_LEN = 128  # ~5.1 seconds at 25 tokens/sec
 
     def init_cache(self, ref_dict: dict) -> CosyVoice2DecoderCache:
-        """Initialize cache for streaming inference by processing speech tokens."""
+        """Initialize cache for streaming inference by processing speech tokens.
+
+        Args:
+            ref_dict: Reference audio features dict. Supports both key naming conventions:
+                - CosyVoice2 style: prompt_speech_token, prompt_speech_token_len
+                - Chatterbox style: prompt_token, prompt_token_len
+
+        Returns:
+            CosyVoice2DecoderCache with flow caches trimmed to fixed size using
+            attention sink + sliding window approach.
+
+        Raises:
+            ValueError: If reference audio is too short (< MIN_PROMPT_TOKEN_LEN tokens).
+                       Caller should fall back to default audio conditioning.
+        """
+        # Support both key naming conventions
+        prompt_token_key = (
+            "prompt_speech_token" if "prompt_speech_token" in ref_dict else "prompt_token"
+        )
+        prompt_token_len_key = (
+            "prompt_speech_token_len" if "prompt_speech_token_len" in ref_dict else "prompt_token_len"
+        )
+
+        raw_tokens = ref_dict[prompt_token_key].to(self.device)
+        raw_len = raw_tokens.shape[1]
+
+        # Check minimum length requirement
+        if raw_len < self.MIN_PROMPT_TOKEN_LEN:
+            raise ValueError(
+                f"Reference audio too short: {raw_len} tokens (minimum {self.MIN_PROMPT_TOKEN_LEN} required, "
+                f"~{self.MIN_PROMPT_TOKEN_LEN / 25:.1f} seconds)"
+            )
+
+        # Use original tokens with 3 extra appended (as per original implementation)
         prompt_speech_tokens = torch.cat([
-            ref_dict["prompt_speech_token"],
-            ref_dict["prompt_speech_token"][:, :3],
-        ], dim=1).to(self.device)
+            raw_tokens,
+            raw_tokens[:, :3],
+        ], dim=1)
         prompt_speech_token_len = torch.ones(
             1, device=self.device, dtype=torch.long
-        ) * (ref_dict["prompt_speech_token_len"] + 3)
+        ) * (ref_dict[prompt_token_len_key] + 3)
 
         # Initialize empty caches
         empty_encoder_cache = FlowEncoderCache()
@@ -877,14 +978,16 @@ class CosyVoice2Decoder(nn.Module):
             prompt_mels, flow_encoder_cache, flow_decoder_cache = self.flow.forward_chunk(
                 token=prompt_speech_tokens,
                 token_len=prompt_speech_token_len,
-                prompt_feat=ref_dict["prompt_feat"],
+                prompt_feat=ref_dict["prompt_feat"].to(torch.bfloat16),
                 prompt_feat_len=ref_dict["prompt_feat_len"],
-                embedding=ref_dict["embedding"],
+                embedding=ref_dict["embedding"].to(torch.bfloat16),
                 encoder_cache=empty_encoder_cache,
                 decoder_cache=empty_decoder_cache,
                 last_chunk=False,
             )
 
+        # Apply attention sink + sliding window trimming to fixed size
+        # This ensures consistent cache shapes for CUDA graph compatibility
         if flow_encoder_cache.conformer_att_cache is not None:
             cache_len = flow_encoder_cache.conformer_att_cache.shape[3]
             max_len = self.MAX_CACHE_LEN // 2
@@ -893,34 +996,49 @@ class CosyVoice2Decoder(nn.Module):
                 suffix = flow_encoder_cache.conformer_att_cache[:, :, :, -(max_len - self.PREFIX_LEN // 2):, :]
                 flow_encoder_cache.conformer_att_cache = torch.cat([prefix, suffix], dim=3)
 
-            print(f"flow_encoder_cache.conformer_att_cache.shape: {flow_encoder_cache.conformer_att_cache.shape}")
-
         if flow_encoder_cache.up_conformer_att_cache is not None:
             cache_len = flow_encoder_cache.up_conformer_att_cache.shape[3]
             if cache_len > self.MAX_CACHE_LEN:
                 prefix = flow_encoder_cache.up_conformer_att_cache[:, :, :, :self.PREFIX_LEN, :]
                 suffix = flow_encoder_cache.up_conformer_att_cache[:, :, :, -(self.MAX_CACHE_LEN - self.PREFIX_LEN):, :]
                 flow_encoder_cache.up_conformer_att_cache = torch.cat([prefix, suffix], dim=3)
-            print(f"flow_encoder_cache.up_conformer_att_cache.shape: {flow_encoder_cache.up_conformer_att_cache.shape}")
+
         if flow_decoder_cache.att_cache is not None:
             cache_len = flow_decoder_cache.att_cache.shape[5]
             if cache_len > self.MAX_CACHE_LEN:
                 prefix = flow_decoder_cache.att_cache[:, :, :, :, :, :self.PREFIX_LEN, :]
                 suffix = flow_decoder_cache.att_cache[:, :, :, :, :, -(self.MAX_CACHE_LEN - self.PREFIX_LEN):, :]
                 flow_decoder_cache.att_cache = torch.cat([prefix, suffix], dim=5)
-            print(f"flow_decoder_cache.att_cache.shape: {flow_decoder_cache.att_cache.shape}")
+
         initial_mel_cache = prompt_mels[:, :, -self.mel_cache_len:]
+
+        # Generate proper source and speech cache from initial_mel_cache
+        # This ensures the first generated chunk has valid cache values for smooth transition
+        with torch.no_grad():
+            initial_mel_float = initial_mel_cache.to(torch.float32)
+            # Generate source signal from mel via F0 prediction
+            f0 = self.hift.f0_predictor(initial_mel_float)
+            s = self.hift.f0_upsamp(f0[:, None]).transpose(1, 2)
+            s, _, _ = self.hift.m_source(s)
+            initial_source = s.transpose(1, 2)
+            # Generate speech from mel + source
+            initial_speech = self.hift.decode(x=initial_mel_float, s=initial_source)
 
         hift_cache = HiFTGeneratorCache(
             mel_cache=initial_mel_cache,
-            source_cache=torch.zeros(1, 1, self.source_cache_len, device=self.device, dtype=torch.float32),
-            speech_cache=torch.zeros(1, self.source_cache_len, device=self.device, dtype=torch.bfloat16),
+            source_cache=initial_source[:, :, -self.source_cache_len:].to(torch.float32),
+            speech_cache=initial_speech[:, -self.source_cache_len:].to(torch.bfloat16),
         )
+
+        # Extract speaker embedding as a proper tensor for CUDA graph compatibility
+        speaker_embedding = ref_dict["embedding"].clone()
 
         return CosyVoice2DecoderCache(
             flow_encoder_cache=flow_encoder_cache,
             flow_decoder_cache=flow_decoder_cache,
             hift_cache=hift_cache,
+            speaker_embedding=speaker_embedding,
+            ref_dict=ref_dict,
         )
 
     @torch.inference_mode()
@@ -1004,12 +1122,19 @@ class CosyVoice2Decoder(nn.Module):
             flow_encoder_cache_input = decoder_cache.flow_encoder_cache
             flow_decoder_cache_input = decoder_cache.flow_decoder_cache
 
+        # Use speaker_embedding from cache if available (CUDA graph compatible),
+        # otherwise fall back to ref_dict (shared prompt cache mode)
+        if decoder_cache.speaker_embedding is not None:
+            embedding = decoder_cache.speaker_embedding.to(torch.bfloat16)
+        else:
+            embedding = ref_dict["embedding"].to(torch.bfloat16)
+
         output_mels, new_flow_encoder_cache, new_flow_decoder_cache = self.flow.forward_chunk(
             token=speech_tokens,
             token_len=speech_token_lens,
             prompt_feat=torch.zeros(1, 0, 80, device=self.device, dtype=torch.bfloat16),
             prompt_feat_len=0,
-            embedding=ref_dict["embedding"],
+            embedding=embedding,
             encoder_cache=flow_encoder_cache_input,
             decoder_cache=flow_decoder_cache_input,
             last_chunk=last_chunk,
@@ -1047,8 +1172,16 @@ class CosyVoice2Decoder(nn.Module):
 
         # HiFT forward pass with caching
         output_mels = output_mels.to(torch.float32).to(self.device)
+
+        # Get source cache for continuity (expand if needed in shared prompt mode)
+        if self.shared_prompt_cache_mode and batch_size > 1:
+            source_cache_input = decoder_cache.hift_cache.source_cache.expand(batch_size, -1, -1)
+        else:
+            source_cache_input = decoder_cache.hift_cache.source_cache
+
         output_wavs, source = self.hift.forward_chunk(
             output_mels,
+            cache_source=source_cache_input,
         )
 
         # For fade_in_out, expand hift_cache if needed (in shared prompt mode)
@@ -1090,23 +1223,41 @@ class CosyVoice2Decoder(nn.Module):
         ref_dict: Optional[dict] = None,
         finalize: bool = False,
     ):
+        """Non-streaming decode (without caching).
+
+        Args:
+            speech_tokens: Token sequence to decode
+            speech_token_lens: Length of token sequence
+            ref_dict: Reference audio features dict. Supports both key naming conventions:
+                - CosyVoice2 style: prompt_speech_token, prompt_speech_token_len
+                - Chatterbox style: prompt_token, prompt_token_len
+            finalize: Whether this is the final chunk
+        """
         if len(speech_tokens.shape) == 1:
             speech_tokens = speech_tokens.unsqueeze(0)
 
+        # Support both key naming conventions
+        prompt_token_key = (
+            "prompt_speech_token" if "prompt_speech_token" in ref_dict else "prompt_token"
+        )
+        prompt_token_len_key = (
+            "prompt_speech_token_len" if "prompt_speech_token_len" in ref_dict else "prompt_token_len"
+        )
+
         speech_tokens = torch.concat(
-            [ref_dict["prompt_speech_token"].repeat(speech_tokens.size(0), 1), speech_tokens],
+            [ref_dict[prompt_token_key].repeat(speech_tokens.size(0), 1), speech_tokens],
             dim=1,
         )
         speech_token_lens = torch.ones(speech_tokens.size(0), device=self.device, dtype=torch.long) * (
-            ref_dict["prompt_speech_token_len"] + speech_token_lens
+            ref_dict[prompt_token_len_key] + speech_token_lens
         )
 
         output_mels, _ = self.flow(
             token=speech_tokens,
             token_len=speech_token_lens,
-            prompt_feat=ref_dict["prompt_feat"],
+            prompt_feat=ref_dict["prompt_feat"].to(torch.bfloat16),
             prompt_feat_len=ref_dict["prompt_feat_len"],
-            embedding=ref_dict["embedding"],
+            embedding=ref_dict["embedding"].to(torch.bfloat16),
             streaming=True,
             finalize=finalize,
         )
