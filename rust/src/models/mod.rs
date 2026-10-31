@@ -11,9 +11,19 @@ use std::sync::Arc;
 use anyhow::{anyhow, bail, Result};
 use serde_json::Value;
 
+mod chatterbox;
+mod cosyvoice2;
+mod cosyvoice3;
+mod csm;
 mod features;
+mod glm_voice;
+mod higgs_tts;
 mod python;
+mod qwen3_tts;
+mod step_audio_2;
 mod template;
+mod voxtral_tts;
+mod zonos;
 
 pub use features::{FeatureLease, FeaturePool};
 
@@ -181,6 +191,16 @@ pub fn load(meta: &Value, prompt_builder: Option<&str>) -> Result<Model> {
     let prompts: Box<dyn PromptBuilder> = match builder {
         "template" => Box::new(template::Template::new(meta)?),
         "python" => Box::new(python::Python::new(meta)),
+        "chatterbox" => Box::new(chatterbox::Chatterbox::new(meta)?),
+        "cosyvoice2" => Box::new(cosyvoice2::CosyVoice2::new(meta)?),
+        "cosyvoice3" => Box::new(cosyvoice3::CosyVoice3::new(meta)?),
+        "csm" => Box::new(csm::Csm::new(meta)?),
+        "glm_voice" => Box::new(glm_voice::GlmVoice::new(meta)?),
+        "higgs_tts" => Box::new(higgs_tts::HiggsTts::new(meta)?),
+        "qwen3_tts" => Box::new(qwen3_tts::Qwen3Tts::new(meta)?),
+        "step_audio_2" => Box::new(step_audio_2::StepAudio2::new(meta)?),
+        "voxtral_tts" => Box::new(voxtral_tts::VoxtralTts::new(meta)?),
+        "zonos" => Box::new(zonos::Zonos::new(meta)?),
         other => bail!("unknown prompt builder {other:?}"),
     };
     let ts = &meta["text_stream"];
