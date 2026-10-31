@@ -9,13 +9,12 @@ from huggingface_hub import hf_hub_download
 from torch import nn
 from torch.nn import functional as F
 
-from ..encoder.glm import GLMVoiceEncoder
-from ..flashinfer_utils import FlashInferWrapper, apply_rope_pos_ids, rms_norm
-from ..requests import Request
-from ..sampling import Sampler, SamplingConfig
-from ..tokenizer.glm import GLMAudioDecoder
-from ..utils import get_logger, load_hf_safetensor_state_dict
-from .base import BaseLM, PreprocessOutput
+from ...encoder.glm import GLMVoiceEncoder
+from ...flashinfer_utils import FlashInferWrapper, apply_rope_pos_ids, rms_norm
+from ...sampling import SamplingConfig
+from ...tokenizer.glm import GLMAudioDecoder
+from ...utils import get_logger, load_hf_safetensor_state_dict
+from ..base import BaseLM
 
 
 @dataclass
@@ -394,11 +393,6 @@ class GLMVoiceModel(BaseLM):
         return self._hidden_size
 
     @property
-    def supports_audio_input(self) -> bool:
-        """Indicates if the model accepts audio input."""
-        return True
-
-    @property
     def detokenize_interval(self) -> int:
         """Interval at which to detokenize outputs."""
         return 25
@@ -431,9 +425,6 @@ class GLMVoiceModel(BaseLM):
     def vocab_size(self) -> int:
         """Vocabulary size of the model."""
         return self.config.vocab_size
-
-    def is_stop_id(self, token_ids: List[int]) -> bool:
-        return token_ids[0] in self.stop_token_ids
 
     def _load_tokenizer(self, tokenizer_path):
         """Load tokenizer from local path or HuggingFace hub"""
@@ -481,115 +472,6 @@ class GLMVoiceModel(BaseLM):
         text_input += f"<|user|>\n{user_input}<|assistant|>streaming_transcription\n"
 
         return text_input
-
-    def preprocess(
-        self,
-        prompt: str | None = None,
-        audio_path: str | None = None,
-    ) -> PreprocessOutput:
-        """Prepare the prompt for the model, formatting it according to GLMVoice specifications."""
-        text_input = self._format_prompt(
-            input_mode="audio" if audio_path is not None else "text",
-            prompt=prompt,
-            audio_path=audio_path,
-        )
-        input_ids = self.text_tokenizer(text_input, return_tensors="pt").input_ids
-        input_ids = input_ids.view(-1, 1)  # add codebook dimension
-
-        # Create repetition cache if repetition penalty is enabled
-        repetition_cache = None
-        config = self.default_sampling_config
-        if (
-            config.repetition_penalty is not None
-            and config.repetition_window is not None
-            and config.repetition_penalty != 1.0
-        ):
-            repetition_cache = torch.zeros(
-                config.repetition_window if config.repetition_window > 0 else 1,
-                self.n_codebooks,
-                self.vocab_size,
-                dtype=torch.bool,
-                device=self.device,
-            )
-
-        return PreprocessOutput(input_tokens=input_ids, repetition_cache=repetition_cache)
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        position_ids: torch.Tensor,
-        attn_wrapper: FlashInferWrapper,
-        kv_cache: torch.Tensor,
-        **kwargs: Any,
-    ) -> torch.Tensor:
-        """Forward pass through the model."""
-        # remove codebook dimension
-        inputs_embeds = self.model.embed_tokens(input_ids[:, 0])
-
-        logits = self.model(
-            inputs_embeds=inputs_embeds,
-            position_ids=position_ids,
-            attn_wrapper=attn_wrapper,
-            kv_cache=kv_cache,
-        )
-
-        return logits[:, None, :]  # add codebook dimension
-
-    def sampling(
-        self,
-        logits: torch.Tensor,
-        requests: List[Request],
-        sampling_params: SamplingConfig | None = None,
-        repetition_cache: torch.Tensor | None = None,
-        cfg_scale: float | None = None,
-        **kwargs,
-    ) -> torch.Tensor:
-        if sampling_params is None:
-            sampling_params = self.default_sampling_config
-
-        if repetition_cache is not None:
-            logits = Sampler.apply_repetition_penalty(logits, repetition_cache, sampling_params.repetition_penalty)
-
-        output_ids = Sampler.run_sampling(logits.view(-1, self.vocab_size), config=sampling_params)
-        output_ids = output_ids.view(logits.shape[0], logits.shape[1])
-
-        if repetition_cache is not None:
-            Sampler.update_repetition_penalty_cache(
-                repetition_cache,
-                output_ids,
-                sampling_params.repetition_window,
-            )
-
-        for i, req in enumerate(requests):
-            req.input_tokens = output_ids[i : i + 1]
-
-        async def update_req_states():
-            stop_mask = (
-                (output_ids[:, 0] == self.stop_token_ids[0])
-                | (output_ids[:, 0] == self.stop_token_ids[1])
-                | (output_ids[:, 0] == self.stop_token_ids[2])
-            )
-            audio_mask = output_ids[:, 0] >= self.audio_offset
-
-            for i, req in enumerate(requests):
-                req.lm_output_tokens.append(output_ids[i : i + 1])
-                if audio_mask[i] and not stop_mask[i]:
-                    req.lm_output_audio_tokens.append(output_ids[i : i + 1])
-                if stop_mask[i]:
-                    req.done_lm_generation = True
-                    req.finish_reason = "stop_id_encountered"
-                if req.next_position_id > self.max_tokens:
-                    req.done_lm_generation = True
-                    req.finish_reason = "max_tokens_reached"
-
-            if repetition_cache is not None:
-                # Update repetition cache in requests
-                for i, req in enumerate(requests):
-                    req.repetition_cache = repetition_cache[i]
-
-        task = update_req_states()
-
-        return output_ids, task
 
     def postprocess(self, token_ids: torch.Tensor):
         audio_tensor = self.audio_decoder(token_ids[:, :, 0] - self.audio_offset, self.detokenize_token_len)

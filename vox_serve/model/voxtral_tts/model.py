@@ -23,26 +23,23 @@ Interface contract: ``voxtral_contract.md`` (FROZEN).
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, List, Tuple
+from typing import TYPE_CHECKING, Tuple
 
 import torch
 from torch import nn
 from torch.cuda import CUDAGraph
 
 if TYPE_CHECKING:
-    from ..tokenizer.voxtral_tts import FlowMatchingAudioTransformer
+    from ...tokenizer.voxtral_tts import FlowMatchingAudioTransformer
 
-from ..flashinfer_utils import (
-    FlashInferPrefillWrapper,
+from ...flashinfer_utils import (
     FlashInferWrapper,
     rms_norm,
 )
-from ..requests import Request
-from ..sampling import SamplingConfig
-from ..utils import get_logger
-from .base import BaseLM, PreprocessOutput
+from ...sampling import SamplingConfig
+from ...utils import get_logger
+from ..base import BaseLM
 
 logger = get_logger(__name__)
 
@@ -511,7 +508,7 @@ class VoxtralTTSModel(BaseLM):
         # ----- acoustic transformer + audio tokenizer (P1's modules) -----
         # Imported here (function-local) so this module can still be imported and
         # smoke-tested before P1's file merges. Resolves at merge time (Wave 2).
-        from ..tokenizer.voxtral_tts import (  # noqa: PLC0415
+        from ...tokenizer.voxtral_tts import (  # noqa: PLC0415
             FlowMatchingAudioTransformer,
             VoxtralTTSAudioTokenizer,
         )
@@ -679,54 +676,9 @@ class VoxtralTTSModel(BaseLM):
         return self._num_attention_heads * self.config.head_dim
 
     @property
-    def embedding_hidden_size(self) -> int:
-        # Residual-stream width: voice-reference input_features and the backbone
-        # hidden states are this wide (3072), narrower than ``hidden_size`` (4096).
-        return self.config.hidden_size
-
-    @property
     def head_dim(self) -> int:
         # Explicit head_dim from params.json (128), not hidden_size // n_heads.
         return self.config.head_dim
-
-    @property
-    def has_inline_audio_head(self) -> bool:
-        """Voxtral's audio codes come from the inline acoustic head, not the backbone."""
-        return True
-
-    @property
-    def first_decode_position_offset(self) -> int:
-        """Voxtral matches vllm-omni's standard pipeline: first decode position = L, not L+1.
-
-        Gap fix vs the vox-serve historical convention (which adds +1 for CosyVoice2/CSM/
-        Zonos/Orpheus/Qwen3-TTS). Without this override the RoPE phase rotates one step
-        ahead every decode, causing the hidden state to drift into a bias-dominated
-        subspace — symptom is preserved norm (~120) but semantic-codebook argmax
-        collapsing to a near-constant token. (Diagnosis: vllm-omni first decode is at
-        position L; vox-serve worker added +1.)
-        """
-        return 0
-
-    @property
-    def use_repetition_penalty(self) -> bool:
-        """Voxtral semantic selection is pure argmax -- never apply repetition penalty.
-
-        Gap fix #2/#11: vllm-omni's voxtral module never wires a repetition penalty,
-        and the default ``SamplingConfig`` has ``repetition_penalty=None``.
-        """
-        return False
-
-    @property
-    def supports_audio_input(self) -> bool:
-        return True
-
-    @property
-    def needs_input_features(self) -> bool:
-        return True
-
-    @property
-    def needs_input_masks(self) -> bool:
-        return True
 
     @property
     def detokenize_interval(self) -> int:
@@ -768,444 +720,13 @@ class VoxtralTTSModel(BaseLM):
     def vocab_size(self) -> int:
         return 131072
 
-    def audio_decoder_initial_cache(self, batch_size: int):
-        """Per-batch left-context ring buffer for the Voxtral-TTS waveform decoder.
-
-        ``BaseLM.audio_decoder_initial_cache`` returns ``None``; with ``None`` the
-        cuda_graph_worker detok-graph path skips per-request cache threading and
-        ``postprocess`` falls back to a single shared ``_fallback_decoder_cache``
-        ring buffer, which cross-contaminates requests under batched CUDA-graph
-        replay. Returning a real per-batch ``VoxtralTTSDecoderCache`` fixes that.
-
-        ``preprocess`` builds the per-request ``(25, n_codebooks)`` variant; this
-        is the batched ``(batch_size, 25, n_codebooks)`` version the worker manages.
-        """
-        from ..tokenizer.voxtral_tts import VoxtralTTSDecoderCache  # noqa: PLC0415
-
-        return VoxtralTTSDecoderCache(
-            left_ctx=torch.zeros(
-                batch_size,
-                25,
-                self.n_codebooks,
-                device=self.audio_decoder_device,
-                dtype=torch.int64,
-            )
-        )
-
     # ------------------------------------------------------------------
     # BaseLM methods
     # ------------------------------------------------------------------
 
-    def is_stop_id(self, token_ids: List[int]) -> bool:
-        """Stop is signalled by the fake-EOS path, not by a token id in the stream.
-
-        The semantic codebook (codebook 0) emitting ``[END_AUDIO]`` is the stop
-        condition; that is handled in ``sampling``'s coroutine. Here we just check
-        codebook 0 for the end-audio marker for completeness.
-        """
-        return len(token_ids) > 0 and token_ids[0] == _END_AUDIO_TOKEN_ID
-
-    def _resolve_voice(self, kwargs: dict) -> tuple[str, torch.Tensor]:
-        """Resolve the voice name + embedding from request kwargs, with a logged fallback.
-
-        Returns ``(voice_name, embedding)`` where ``embedding`` is the per-position
-        speaker reference sequence shaped ``(num_audio_tokens, hidden_size)``.
-        """
-        voice = kwargs.get("voice", None)
-        if isinstance(voice, list) and voice:
-            voice = voice[0]
-        if voice is None or voice not in self.voice_to_embedding:
-            if not self.voice_to_embedding:
-                raise RuntimeError("VoxtralTTSModel: no voice embeddings loaded")
-            fallback = next(iter(self.voice_to_embedding.keys()))
-            if voice is not None:
-                self.logger.warning(
-                    "Voxtral voice %r not in registry; falling back to %r", voice, fallback
-                )
-            else:
-                self.logger.warning("Voxtral no voice specified; falling back to %r", fallback)
-            voice = fallback
-        return voice, self.voice_to_embedding[voice].to(self.device).clone().detach()
-
-    @torch.no_grad()
-    def preprocess(
-        self,
-        prompt: str | None = None,
-        audio_path: str | None = None,
-        **kwargs: Any,
-    ) -> PreprocessOutput:
-        """Tokenize the prompt and scatter the voice embedding onto audio-token slots.
-
-        Mirrors ``cosyvoice2.py:924-1006``. ``input_features`` carries the voice
-        embedding at every position where ``input_ids == audio_token_id`` (24); the
-        backbone embeds text tokens normally everywhere else and overwrites with
-        ``input_features`` where ``input_masks`` is true.
-        """
-        assert audio_path is None, "audio_path is not supported yet for this model"
-        assert prompt is not None, "prompt is required for VoxtralTTSModel"
-
-        # Resolve the voice: name + per-position speaker reference sequence
-        # shaped (num_audio_tokens, hidden_size).
-        voice_name, voice_emb = self._resolve_voice(kwargs)
-        voice_emb = voice_emb.to(self.device, dtype=self.dtype)
-        if voice_emb.dim() == 1:
-            voice_emb = voice_emb.unsqueeze(0)  # (1, hidden)
-
-        # Authoritative TTS prompt layout via mistral-common's encode_speech_request
-        # (matches vllm-omni's examples/.../voxtral_tts/end2end.py). Produces:
-        #   [BOS] [BEGIN_AUDIO] [AUDIO]*N [NEXT_AUDIO_TEXT] <text> [REPEAT_AUDIO_TEXT] [BEGIN_AUDIO]
-        # where N == voice_num_audio_tokens for the chosen voice (== voice_emb.shape[0]).
-        from mistral_common.protocol.speech.request import SpeechRequest  # noqa: PLC0415
-
-        tokenized = self.text_tokenizer.instruct_tokenizer.encode_speech_request(
-            SpeechRequest(input=prompt, voice=voice_name)
-        )
-        token_ids = list(tokenized.tokens)
-
-        # input_ids is (seq_len, n_codebooks): the text token id sits in codebook
-        # 0, the rest are zero padding. The worker batches prefill and decode
-        # requests together via ``torch.cat(dim=0)``, so the prefill input must
-        # have the same codebook width as the (B, n_codebooks) audio frames
-        # produced during decode. ``forward`` discriminates prefill vs decode by
-        # attention-wrapper type and reads only column 0 for the prefill path.
-        input_ids = torch.zeros(
-            len(token_ids), self.n_codebooks, dtype=torch.int32, device=self.device
-        )
-        input_ids[:, 0] = torch.tensor(token_ids, dtype=torch.int32, device=self.device)
-        seq_len = input_ids.shape[0]
-
-        # input_features: voice reference scattered onto [AUDIO]-token positions
-        # (one row per placeholder, in order).
-        input_features = torch.zeros(seq_len, self.config.hidden_size, device=self.device, dtype=self.dtype)
-        audio_mask_1d = input_ids[:, 0] == self.audio_token_id  # (seq_len,)
-        if audio_mask_1d.any():
-            input_features[audio_mask_1d] = voice_emb[: int(audio_mask_1d.sum())]
-
-        # input_masks: 1 where the backbone should use input_features (audio slots)
-        input_masks = torch.zeros(seq_len, self.n_codebooks, device=self.device, dtype=torch.bool)
-        input_masks[audio_mask_1d, :] = True
-
-        # No repetition penalty for Voxtral (gap fix #2/#11).
-        repetition_cache = None
-
-        # model-private left-context ring buffer (contract section 3.1). Built via
-        # ``audio_decoder_initial_cache`` so the per-request cache has the same
-        # batched ``(1, 25, n_codebooks)`` shape as the worker's detok-graph cache
-        # buffer -- the CUDA-graph worker threads ``req.decoder_cache`` in/out of
-        # that buffer and ``copy_from`` requires matching shapes (mirrors
-        # ``cosyvoice2.py``'s ``preprocess``).
-        decoder_cache = self.audio_decoder_initial_cache(batch_size=1)
-
-        return PreprocessOutput(
-            input_tokens=input_ids,
-            repetition_cache=repetition_cache,
-            input_masks=input_masks,
-            input_features=input_features,
-            decoder_cache=decoder_cache,
-        )
-
-    def _embed_audio_frame(self, input_ids: torch.Tensor) -> torch.Tensor:
-        """Embed a previously-generated 37-codebook audio frame.
-
-        Mirrors vllm-omni's ``VoxtralTTSAudioTokenizer.encode_tokens`` /
-        ``MultiVocabEmbeddings``: each codebook is shifted by its per-codebook
-        base offset into the shared ``audio_codebook_embeddings`` table, looked
-        up, and the 37 per-codebook embeddings are summed
-        (``input_embedding_concat_type == "sum"``).
-
-        ``input_ids`` is ``(B, n_codebooks)`` -- 1 semantic + 36 acoustic codes,
-        each already in the special-token-inclusive codebook range emitted by the
-        acoustic head. Returns ``(B, hidden_size)``.
-        """
-        offsets = self._audio_codebook_offsets.to(input_ids.device)  # (n_codebooks,)
-        shifted = input_ids.long() + offsets[None, :]  # (B, n_codebooks)
-        table_size = self.model.audio_codebook_embeddings.weight.shape[0]
-        shifted = shifted.clamp(0, table_size - 1)
-        # (B, n_codebooks, hidden_size) -> sum over codebooks -> (B, hidden_size)
-        per_codebook = self.model.audio_codebook_embeddings(shifted)
-        return per_codebook.sum(dim=1)
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        position_ids: torch.Tensor,
-        attn_wrapper: FlashInferWrapper,
-        kv_cache: torch.Tensor,
-        input_masks: torch.Tensor,
-        input_features: torch.Tensor,
-        **kwargs: Any,
-    ) -> torch.Tensor:
-        """Embed the model input, run the backbone, return hidden states.
-
-        Two input regimes, distinguished by the *attention wrapper type* (mirrors
-        the prefill-vs-decode embedding split in ``csm.py`` / ``cosyvoice2.py``):
-
-        * **Prefill** (``attn_wrapper`` is a ``FlashInferPrefillWrapper``) --
-          ``input_ids`` holds the text prompt. Codebook 0 carries the text token
-          id; it is embedded via the backbone's text ``embed_tokens`` table and
-          the per-position voice reference (``input_features``) is scattered onto
-          the ``[AUDIO]``-token slots where ``input_masks`` is true.
-        * **Decode** (``attn_wrapper`` is a ``FlashInferDecodeWrapper``) --
-          ``input_ids`` is ``(B, n_codebooks)``: the previously generated
-          37-codebook audio frame. It is embedded via the backbone's
-          ``audio_codebook_embeddings`` table with per-codebook offsets and summed
-          across codebooks (so the backbone actually "hears" the audio it just
-          produced and can track progress toward end-of-speech).
-
-        The regime is keyed off ``type(attn_wrapper)`` rather than
-        ``input_ids.shape[1]``: under CUDA graphs the worker's prefill
-        ``input_ids`` buffer is allocated ``n_codebooks``-wide (the prefill text
-        ids are broadcast across all 37 columns), so the codebook-dimension test
-        is ambiguous. The wrapper type is a capture-time-static signal -- the
-        prefill graph is always captured with a ``FlashInferPrefillWrapper`` and
-        the decode graph with a ``FlashInferDecodeWrapper`` -- so this branch is
-        resolved correctly at graph-capture trace time in both eager and
-        CUDA-graph modes.
-
-        Returns hidden states with a codebook dimension added (``[:, None, :]``)
-        so the worker's logits-buffer plumbing stays uniform; the actual audio
-        decoding happens in ``sampling`` via the inline acoustic head.
-        """
-        if isinstance(attn_wrapper, FlashInferPrefillWrapper):
-            # prefill step: codebook 0 holds the text token id; embed via the
-            # text table, then overwrite audio-token slots with the voice
-            # reference carried in input_features.
-            inputs_embeds = self.model.embed_tokens(
-                input_ids[:, 0].clamp(0, self.model.embed_tokens.weight.shape[0] - 1)
-            )
-            inputs_embeds = torch.where(input_masks[:, :1], input_features, inputs_embeds)
-        else:
-            # decode step: previously generated 37-codebook audio frame
-            inputs_embeds = self._embed_audio_frame(input_ids)
-
-        hidden_states = self.model(
-            inputs_embeds=inputs_embeds,
-            position_ids=position_ids,
-            attn_wrapper=attn_wrapper,
-            kv_cache=kv_cache,
-        )
-
-        return hidden_states[:, None, :]  # add codebook dimension
-
-    def _cfg_alpha_per_req(self, requests: List[Request], batch_size: int, device, dtype) -> torch.Tensor:
-        """Build a ``(B,)`` per-request cfg_alpha tensor (default 1.2)."""
-        default = self.default_sampling_config.cfg_scale or 1.2
-        values = []
-        for req in requests:
-            cfg = None
-            if req.sampling_config is not None:
-                cfg = req.sampling_config.cfg_scale
-            values.append(cfg if cfg is not None else default)
-        return torch.tensor(values[:batch_size], device=device, dtype=dtype)
-
-    def sampling(
-        self,
-        logits: torch.Tensor,
-        requests: List[Request],
-        sampling_params: SamplingConfig | None = None,
-        repetition_cache: torch.Tensor | None = None,
-        cfg_scale: float | None = None,
-        **kwargs: Any,
-    ) -> Tuple[torch.Tensor, Any]:
-        """Inline-audio-head sampling: semantic argmax + acoustic ODE.
-
-        Same return contract as ``cosyvoice2.py:1035-1091`` (gap fix #4):
-        ``(output_ids, task_coroutine)``. There is NO FlashInfer sampler call -- the
-        eager path runs its own semantic argmax + acoustic Euler ODE through
-        ``self.acoustic_transformer`` (gap fix #3). If a captured acoustic CUDA
-        graph is available for this batch size it is dispatched through instead.
-
-        ``backbone_hidden_states`` is read from ``kwargs`` -- the worker passes it
-        for inline-audio-head models.
-        """
-        if sampling_params is None:
-            sampling_params = self.default_sampling_config
-
-        # The worker passes the backbone hidden states for inline-audio-head models.
-        backbone_hidden_states = kwargs.get("backbone_hidden_states", None)
-        if backbone_hidden_states is None:
-            # ``logits`` here is actually the hidden state tensor from forward()
-            # shaped (B, 1, hidden_size); fall back to it.
-            backbone_hidden_states = logits.reshape(logits.shape[0], -1)
-        else:
-            backbone_hidden_states = backbone_hidden_states.reshape(backbone_hidden_states.shape[0], -1)
-
-        batch_size = backbone_hidden_states.shape[0]
-        device = backbone_hidden_states.device
-        dtype = backbone_hidden_states.dtype
-
-        cfg_alpha = self._cfg_alpha_per_req(requests, batch_size, device, dtype)
-
-        # DESIGN NOTE: the audio head (CFG + ODE) runs here in sampling() rather than
-        # forward(), so it falls outside the worker's decode CUDA graph and has to
-        # carry its own captured graph (self._acoustic_graph) + its own cfg_alpha
-        # plumbing (cfg_alpha is per-request sampling state, not part of forward()'s
-        # LMInputs). This works but is bespoke to this model. If/when a second
-        # inline-audio-head model lands, revisit: either standardize a captured
-        # "audio head" stage in the worker, or move the head into forward() and let
-        # the existing decode graph + a forward-threaded cfg cover it. Today the
-        # split keeps the generic worker from knowing about CFG/ODE/RNG internals.
-        # ---- dispatch: captured acoustic CUDA graph, else eager ----
-        use_graph = (
-            self._acoustic_graph is not None
-            and getattr(self._acoustic_graph, "_get_padded_size", None) is not None
-            and self._acoustic_graph._get_padded_size(batch_size) is not None
-        )
-        if use_graph:
-            audio_codes, fake_eos = self._acoustic_graph(backbone_hidden_states, cfg_alpha)
-        else:
-            audio_codes, fake_eos = self._eager_acoustic_step(backbone_hidden_states, cfg_alpha)
-
-        # output_ids shaped (B, 37)
-        output_ids = audio_codes.to(torch.int64)
-
-        # Mirror cosyvoice2: stage next-step inputs back onto each request.
-        for i, req in enumerate(requests):
-            req.input_tokens = output_ids[i : i + 1]
-            if req.input_features is not None:
-                req.input_features = req.input_features[:1].zero_()
-            if req.input_masks is not None:
-                req.input_masks = req.input_masks[:1].zero_()
-
-        # Pre-computed once per call: number of zero-coded silence frames to
-        # prepend at the start of each request's audio stream so the first
-        # detokenize chunk fires after ``first_chunk_frames`` real frames
-        # (TTFA optimization; see ``BaseLM.first_chunk_frames``).
-        n_silence_prefill = 0
-        if self.first_chunk_frames is not None:
-            n_silence_prefill = self.detokenize_interval - self.first_chunk_frames
-
-        async def update_req_states():
-            for i, req in enumerate(requests):
-                req.lm_output_tokens.append(output_ids[i : i + 1])
-                if bool(fake_eos[i]):
-                    req.done_lm_generation = True
-                    req.finish_reason = "stop_id_encountered"
-                else:
-                    # gap fix #10: lm_output_audio_tokens entries are (1, n_codebooks)
-                    if n_silence_prefill > 0 and len(req.lm_output_audio_tokens) == 0:
-                        # TTFA pre-seed: codec maps code 0 to silence via the
-                        # (x - 2).clamp(min=0) shift in postprocess.
-                        silence = torch.zeros_like(output_ids[i : i + 1])
-                        for _ in range(n_silence_prefill):
-                            req.lm_output_audio_tokens.append(silence)
-                    req.lm_output_audio_tokens.append(output_ids[i : i + 1])
-                if req.next_position_id is not None and req.next_position_id > self.max_tokens:
-                    req.done_lm_generation = True
-                    req.finish_reason = "max_tokens_reached"
-
-        return output_ids, update_req_states()
-
-    @torch.no_grad()
-    def _eager_acoustic_step(
-        self,
-        backbone_hidden_states: torch.Tensor,
-        cfg_alpha: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Eager semantic argmax + acoustic ODE.
-
-        Delegates to ``self.acoustic_transformer.forward`` (P1's module) per the
-        contract: it consumes ``(B, hidden_size)`` hidden states + ``cfg_alpha`` and
-        returns ``audio_codes: (B, n_codebooks)`` int. ``fake_eos`` is derived from
-        codebook 0 (``[END_AUDIO]``).
-        """
-        audio_codes = self.acoustic_transformer(
-            llm_hidden=backbone_hidden_states,
-            cfg_alpha=cfg_alpha,
-        )
-        fake_eos = audio_codes[:, 0] == _END_AUDIO_TOKEN_ID
-
-        if os.environ.get("VOXTRAL_DEBUG_FRAMES"):
-            step = getattr(self, "_dbg_step", 0)
-            if step < 8 or step % 200 == 0:
-                row = audio_codes[0]
-                h = backbone_hidden_states[0]
-                self.logger.info(
-                    "[DBG step=%d] sem(cb0)=%d acoustic[min/max/uniq]=%d/%d/%d "
-                    "hid[norm/min/max]=%.3f/%.3f/%.3f",
-                    step, int(row[0]), int(row[1:].min()), int(row[1:].max()),
-                    int(row[1:].unique().numel()),
-                    float(h.float().norm()), float(h.float().min()), float(h.float().max()),
-                )
-            self._dbg_step = step + 1
-
-        return audio_codes, fake_eos.bool()
-
-    @torch.no_grad()
-    def postprocess(self, token_ids: torch.Tensor, decoder_cache=None) -> torch.Tensor:
-        """Decode a chunk of audio codes to a waveform.
-
-        Mirrors ``cosyvoice2.py:1093-1117``. ``token_ids`` is ``(B, 25, 37)``; it is
-        prepended with the 25-frame left-context ring buffer to give ``(B, 50, 37)``,
-        decoded through the audio tokenizer, and the leading ``25 * 1920 = 48000``
-        context samples are trimmed. The ring buffer is updated in place
-        (graph-safe) from the last 25 frames of this chunk.
-        """
-        from ..tokenizer.voxtral_tts import VoxtralTTSDecoderCache  # noqa: PLC0415
-
-        # The eager ``ModelWorker.run_detokenize`` path calls ``postprocess`` without
-        # threading the per-request ``decoder_cache``. Fall back to a model-side
-        # ring buffer keyed by batch size (correct for the batch-1 eager path).
-        if decoder_cache is None:
-            batch = token_ids.shape[0]
-            if getattr(self, "_fallback_decoder_cache", None) is None or (
-                self._fallback_decoder_cache.left_ctx.shape[0] != batch
-            ):
-                self._fallback_decoder_cache = VoxtralTTSDecoderCache(
-                    left_ctx=torch.zeros(
-                        batch, 25, self.n_codebooks,
-                        device=self.audio_decoder_device, dtype=torch.int64,
-                    )
-                )
-            decoder_cache = self._fallback_decoder_cache
-
-        token_ids = token_ids.to(decoder_cache.left_ctx.device, dtype=decoder_cache.left_ctx.dtype)
-
-        # (B, 50, 37): [left_ctx | new chunk]
-        full = torch.cat([decoder_cache.left_ctx, token_ids], dim=1)
-
-        # Critical: the acoustic head emits codes in special-tokens-inclusive
-        # space (EMPTY=0, END=1, real codes = 2..N+1). The waveform quantizer
-        # (`MistralAudioCodebook`) expects codes in raw space [0..N-1]. vllm-omni
-        # does `audio_tokens = codes[:cut] - 2` before decode
-        # (voxtral_tts_audio_tokenizer.py:1058-1061). Mirror that. Clamp to 0 so
-        # the all-zero left_ctx (representing pre-generation silence) and any
-        # stray EMPTY/END within don't wrap into the codebook tail.
-        shifted = (full.to(torch.int64) - len(_AUDIO_SPECIAL_TOKENS)).clamp(min=0)
-
-        # audio tokenizer wants (B, n_codebooks, T)
-        audio = self.audio_tokenizer.decode(shifted.transpose(1, 2), dtype=self.dtype)
-
-        # trim leading context samples
-        trim = 25 * self.downsample_factor  # 48000
-        audio = audio[..., trim:]
-
-        # update the ring buffer in place from the last 25 frames (graph-safe)
-        new_cache = VoxtralTTSDecoderCache(left_ctx=full[:, -25:, :].contiguous())
-        decoder_cache.copy_from(new_cache)
-
-        # audio is (B, 1, T) from the mono tokenizer; ensure channel dim present
-        if audio.dim() == 2:
-            audio = audio[:, None, :]
-        # decode runs in bf16 to match conv weights; the worker consumes the
-        # waveform via .numpy(), which requires fp32.
-        return audio.float()
-
     # ------------------------------------------------------------------
     # Phase-4 acoustic CUDA graph hook
     # ------------------------------------------------------------------
-
-    def enable_acoustic_graph(self, graph_pool, capture_sizes) -> None:
-        """Construct + capture the acoustic-head CUDA graph (Phase-4 hook)."""
-        self._acoustic_graph = AcousticHeadCudaGraph(
-            flow_transformer=self.acoustic_transformer,
-            graph_pool=graph_pool,
-            capture_sizes=list(capture_sizes),
-            device=torch.device(self.device),
-            dtype=self.dtype,
-            hidden_dim=self.config.hidden_size,
-        )
-
 
 # ---------------------------------------------------------------------------
 # Acoustic-head CUDA graph (was vox_serve/model/voxtral_tts_acoustic_graph.py)

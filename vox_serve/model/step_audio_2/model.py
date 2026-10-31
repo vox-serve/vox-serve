@@ -10,13 +10,12 @@ from torch import nn
 from torch.nn import functional as F
 from torch.nn.utils.rnn import pad_sequence
 
-from ..encoder.step_audio_2 import StepAudio2Encoder
-from ..flashinfer_utils import FlashInferWrapper, apply_rope_pos_ids, rms_norm
-from ..requests import Request
-from ..sampling import Sampler, SamplingConfig
-from ..tokenizer.step_audio_2 import StepAudio2Decoder, StepAudio2DecoderCache
-from ..utils import get_logger, load_hf_safetensor_state_dict
-from .base import BaseLM, PreprocessOutput
+from ...encoder.step_audio_2 import StepAudio2Encoder
+from ...flashinfer_utils import FlashInferWrapper, apply_rope_pos_ids, rms_norm
+from ...sampling import SamplingConfig
+from ...tokenizer.step_audio_2 import StepAudio2Decoder
+from ...utils import get_logger, load_hf_safetensor_state_dict
+from ..base import BaseLM
 
 
 @dataclass
@@ -362,21 +361,6 @@ class StepAudio2Model(BaseLM):
         return self._hidden_size
 
     @property
-    def supports_audio_input(self) -> bool:
-        """Indicates if the model accepts audio input."""
-        return True
-
-    @property
-    def needs_input_features(self) -> bool:
-        """Indicates if the model requires input_features."""
-        return True
-
-    @property
-    def needs_input_masks(self) -> bool:
-        """Indicates if the model requires input_masks."""
-        return True
-
-    @property
     def detokenize_interval(self) -> int:
         """Interval at which to detokenize outputs."""
         return 28
@@ -409,9 +393,6 @@ class StepAudio2Model(BaseLM):
     def vocab_size(self) -> int:
         """Vocabulary size of the model."""
         return self.config.text_config.vocab_size
-
-    def is_stop_id(self, token_ids: List[int]) -> bool:
-        return token_ids[0] == self.stop_token_id
 
     def _load_tokenizer(self, tokenizer_path):
         """Load tokenizer from local path or HuggingFace hub"""
@@ -572,172 +553,3 @@ class StepAudio2Model(BaseLM):
 
         return prompt_ids, mels, mel_lengths
 
-    def preprocess(
-        self,
-        prompt: str | None = None,
-        audio_path: str | None = None,
-    ) -> PreprocessOutput:
-        """Prepare the prompt for the model, formatting it according to StepAudio2 specifications."""
-        prompt_ids, mels, mel_lengths = self._format_prompt(
-            input_mode="audio" if audio_path is not None else "text",
-            prompt=prompt,
-            audio_path=audio_path,
-        )
-        input_ids = prompt_ids.view(-1, 1)  # add codebook dimension
-
-        input_features = torch.zeros(
-            input_ids.shape[0],
-            self.hidden_size,
-            device=self.device,
-            dtype=self.dtype,
-        )
-        input_masks = torch.zeros(
-            input_ids.shape[0],
-            self.n_codebooks,
-            device=self.device,
-            dtype=torch.bool,
-        )
-
-        if mels is not None:
-            out, feat_lens = self.model.encoder(mels, mel_lengths)
-            out = self.model.adapter(out)
-            feat_lens = (feat_lens - 1) // 2 + 1
-            insert_location = torch.nonzero(input_ids == 151688)
-            insert_location[:, 0] += 1
-            for idx in range(len(insert_location)):
-                s, _ = insert_location[idx]
-                input_features[s : s + feat_lens[idx], :] = out[idx, : feat_lens[idx]]
-                input_masks[s : s + feat_lens[idx], :] = 1
-
-        # Create repetition cache if repetition penalty is enabled
-        repetition_cache = None
-        config = self.default_sampling_config
-        if (
-            config.repetition_penalty is not None
-            and config.repetition_window is not None
-            and config.repetition_penalty != 1.0
-        ):
-            repetition_cache = torch.zeros(
-                config.repetition_window if config.repetition_window > 0 else 1,
-                self.n_codebooks,
-                self.vocab_size,
-                dtype=torch.bool,
-                device=self.device,
-            )
-
-        # Initial decoder cache for this request (default cache), sized for batch 1
-        decoder_cache = self.audio_decoder_initial_cache(batch_size=1)
-
-        return PreprocessOutput(
-            input_tokens=input_ids,
-            repetition_cache=repetition_cache,
-            input_masks=input_masks,
-            input_features=input_features,
-            decoder_cache=decoder_cache,
-        )
-
-    def audio_decoder_initial_cache(self, batch_size: int):
-        base_cache = self._audio_decoder_initial_cache
-
-        return StepAudio2DecoderCache(
-            spk_emb=base_cache.spk_emb.repeat(batch_size, 1).contiguous(),
-            conformer_cnn_cache=base_cache.conformer_cnn_cache.repeat(batch_size, 1, 1).contiguous(),
-            conformer_att_cache=base_cache.conformer_att_cache.repeat(batch_size, 1, 1, 1, 1).contiguous(),
-            estimator_cnn_cache=base_cache.estimator_cnn_cache.repeat(batch_size, 1, 1, 1, 1, 1).contiguous(),
-            estimator_att_cache=base_cache.estimator_att_cache.repeat(batch_size, 1, 1, 1, 1, 1, 1).contiguous(),
-            hift_mel_cache=base_cache.hift_mel_cache.repeat(batch_size, 1, 1).contiguous(),
-            hift_source_cache=base_cache.hift_source_cache.repeat(batch_size, 1, 1).contiguous(),
-            hift_speech_cache=base_cache.hift_speech_cache.repeat(batch_size, 1).contiguous(),
-        )
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        position_ids: torch.Tensor,
-        attn_wrapper: FlashInferWrapper,
-        kv_cache: torch.Tensor,
-        input_masks: torch.Tensor,
-        input_features: torch.Tensor,
-        **kwargs: Any,
-    ) -> torch.Tensor:
-        """Forward pass through the model."""
-        # remove codebook dimension
-        inputs_embeds = self.model.embed_tokens(input_ids[:, 0])
-
-        inputs_embeds = torch.where(input_masks, input_features, inputs_embeds)
-
-        logits = self.model(
-            inputs_embeds=inputs_embeds,
-            position_ids=position_ids,
-            attn_wrapper=attn_wrapper,
-            kv_cache=kv_cache,
-        )
-
-        return logits[:, None, :]  # add codebook dimension
-
-    def sampling(
-        self,
-        logits: torch.Tensor,
-        requests: List[Request],
-        sampling_params: SamplingConfig | None = None,
-        repetition_cache: torch.Tensor | None = None,
-        cfg_scale: float | None = None,
-        **kwargs,
-    ) -> torch.Tensor:
-        if sampling_params is None:
-            sampling_params = self.default_sampling_config
-
-        if repetition_cache is not None:
-            logits = Sampler.apply_repetition_penalty(logits, repetition_cache, sampling_params.repetition_penalty)
-
-        output_ids = Sampler.run_sampling(logits.view(-1, self.vocab_size), config=sampling_params)
-        output_ids = output_ids.view(logits.shape[0], logits.shape[1])
-
-        if repetition_cache is not None:
-            Sampler.update_repetition_penalty_cache(
-                repetition_cache,
-                output_ids,
-                sampling_params.repetition_window,
-            )
-
-        for i, req in enumerate(requests):
-            req.input_tokens = output_ids[i : i + 1]
-
-            req.input_features = req.input_features[:1].zero_()
-            req.input_masks = req.input_masks[:1].zero_()
-
-        async def update_req_states():
-            stop_mask = output_ids[:, 0] == self.stop_token_id
-            audio_mask = output_ids[:, 0] >= self.audio_offset
-
-            for i, req in enumerate(requests):
-                req.lm_output_tokens.append(output_ids[i : i + 1])
-                if audio_mask[i] and not stop_mask[i]:
-                    req.lm_output_audio_tokens.append(output_ids[i : i + 1])
-                if stop_mask[i]:
-                    req.done_lm_generation = True
-                    req.finish_reason = "stop_id_encountered"
-                if req.next_position_id > self.max_tokens:
-                    req.done_lm_generation = True
-                    req.finish_reason = "max_tokens_reached"
-
-            if repetition_cache is not None:
-                # Update repetition cache in requests
-                for i, req in enumerate(requests):
-                    req.repetition_cache = repetition_cache[i]
-
-        task = update_req_states()
-
-        return output_ids, task
-
-    def postprocess(self, token_ids: torch.Tensor, decoder_cache: StepAudio2DecoderCache):
-        audio_tensor, new_decoder_cache = self.audio_decoder(token_ids[:, :, 0] - self.audio_offset, decoder_cache)
-        decoder_cache.spk_emb[:] = new_decoder_cache.spk_emb
-        decoder_cache.conformer_cnn_cache[:] = new_decoder_cache.conformer_cnn_cache
-        decoder_cache.conformer_att_cache[:] = new_decoder_cache.conformer_att_cache
-        decoder_cache.estimator_cnn_cache[:] = new_decoder_cache.estimator_cnn_cache
-        decoder_cache.estimator_att_cache[:] = new_decoder_cache.estimator_att_cache
-        decoder_cache.hift_mel_cache[:] = new_decoder_cache.hift_mel_cache
-        decoder_cache.hift_source_cache[:] = new_decoder_cache.hift_source_cache
-        decoder_cache.hift_speech_cache[:] = new_decoder_cache.hift_speech_cache
-        return audio_tensor[:, None, :]  # add channel dimension

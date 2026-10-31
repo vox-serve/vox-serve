@@ -1,15 +1,13 @@
-from typing import Any, List
 
 import torch
 from torch import nn
 from transformers import LlamaConfig, LlamaPreTrainedModel
 from transformers.activations import ACT2FN
 
-from ..flashinfer_utils import FlashInferWrapper, apply_rope_pos_ids, rms_norm
-from ..requests import Request
-from ..sampling import Sampler, SamplingConfig
-from ..tokenizer.snac import SNAC
-from .base import BaseLM, PreprocessOutput
+from ...flashinfer_utils import FlashInferWrapper, apply_rope_pos_ids, rms_norm
+from ...sampling import SamplingConfig
+from ...tokenizer.snac import SNAC
+from ..base import BaseLM
 
 
 class OrpheusRMSNorm(nn.Module):
@@ -330,151 +328,11 @@ class OrpheusModel(BaseLM):
         """Vocabulary size of the model."""
         return self.model.config.vocab_size
 
-    def is_stop_id(self, token_ids: List[int]) -> bool:
-        return token_ids[0] == self.stop_token_id
-
     def _load_tokenizer(self, tokenizer_path):
         """Load tokenizer from local path or HuggingFace hub"""
         from transformers import AutoTokenizer
 
         return AutoTokenizer.from_pretrained(tokenizer_path)
-
-    def _validate_voice(self, voice):
-        """Validate if the given voice is supported by the model."""
-        if voice and voice not in self.available_voices:
-            raise ValueError(f"Voice {voice} is not available for model {self.model_name}")
-
-    def _orpheus_format_prompt(self, prompt, voice="tara", model_type="larger"):
-        if model_type == "smaller":
-            if voice:
-                return f"<custom_token_3>{prompt}[{voice}]<custom_token_4><custom_token_5>"
-            else:
-                return f"<custom_token_3>{prompt}<custom_token_4><custom_token_5>"
-        elif voice:
-            adapted_prompt = f"{voice}: {prompt}"
-            prompt_tokens = self.text_tokenizer(adapted_prompt, return_tensors="pt")
-            start_token = torch.tensor([[128259]], dtype=torch.int64)
-            end_tokens = torch.tensor([[128009, 128260, 128261, 128257]], dtype=torch.int64)
-            all_input_ids = torch.cat([start_token, prompt_tokens.input_ids, end_tokens], dim=1)
-            # prompt_string = self.text_tokenizer.decode(all_input_ids[0])
-            return all_input_ids
-        else:
-            prompt_tokens = self.text_tokenizer(prompt, return_tensors="pt")
-            start_token = torch.tensor([[128259]], dtype=torch.int64)
-            end_tokens = torch.tensor([[128009, 128260, 128261, 128257]], dtype=torch.int64)
-            all_input_ids = torch.cat([start_token, prompt_tokens.input_ids, end_tokens], dim=1)
-            # prompt_string = self.text_tokenizer.decode(all_input_ids[0])
-            return prompt_tokens
-
-    def preprocess(
-        self,
-        prompt: str = None,
-        audio_path: str = None,
-        voice="tara",
-        model_type="larger",
-    ) -> PreprocessOutput:
-        """Prepare the prompt for the model, formatting it according to Orpheus specifications."""
-        assert audio_path is None
-        self._validate_voice(voice)
-        input_ids = self._orpheus_format_prompt(prompt, voice, model_type)
-        input_ids = input_ids.view(-1, 1)  # add codebook dimension
-
-        # Create repetition cache if repetition penalty is enabled
-        repetition_cache = None
-        config = self.default_sampling_config
-        if (config.repetition_penalty is not None and
-            config.repetition_window is not None and
-            config.repetition_penalty != 1.0):
-            repetition_cache = torch.zeros(
-                config.repetition_window if config.repetition_window > 0 else 1,
-                self.n_codebooks,
-                self.vocab_size,
-                dtype=torch.bool,
-                device=self.device,
-            )
-
-        return PreprocessOutput(input_tokens=input_ids, repetition_cache=repetition_cache)
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        position_ids: torch.Tensor,
-        attn_wrapper: FlashInferWrapper,
-        kv_cache: torch.Tensor,
-        **kwargs: Any,
-    ) -> torch.Tensor:
-        """Forward pass through the model."""
-        # remove codebook dimension
-        inputs_embeds = self.model.embed_tokens(input_ids[:, 0])
-
-        logits = self.model(
-            inputs_embeds=inputs_embeds,
-            position_ids=position_ids,
-            attn_wrapper=attn_wrapper,
-            kv_cache=kv_cache,
-        )
-
-        return logits[:, None, :]  # add codebook dimension
-
-    def sampling(
-        self,
-        logits: torch.Tensor,
-        requests: List[Request],
-        sampling_params: SamplingConfig | None = None,
-        repetition_cache: torch.Tensor | None = None,
-        cfg_scale: float | None = None,
-        **kwargs,
-    ) -> torch.Tensor:
-        if sampling_params is None:
-            sampling_params = self.default_sampling_config
-
-        if repetition_cache is not None:
-            logits = Sampler.apply_repetition_penalty(
-                logits, repetition_cache, sampling_params.repetition_penalty
-            )
-
-        output_ids = Sampler.run_sampling(logits.view(-1, self.vocab_size), config=sampling_params)
-        output_ids = output_ids.view(logits.shape[0], logits.shape[1])
-
-        if repetition_cache is not None:
-            Sampler.update_repetition_penalty_cache(
-                repetition_cache,
-                output_ids,
-                sampling_params.repetition_window,
-            )
-
-        for i, req in enumerate(requests):
-            req.input_tokens = output_ids[i : i + 1]
-
-        async def update_req_states():
-            stop_mask = output_ids[:, 0] == self.stop_token_id
-            stop_indices = torch.nonzero(stop_mask, as_tuple=True)[0]
-
-            for i, req in enumerate(requests):
-                req.lm_output_tokens.append(output_ids[i : i + 1])
-                req.lm_output_audio_tokens.append(output_ids[i : i + 1])
-
-            # Remove from stop requests
-            for idx in stop_indices:
-                req = requests[idx.item()]
-                # Remove the EOS token from lm_output_audio_tokens
-                req.lm_output_audio_tokens.pop()
-                req.done_lm_generation = True
-                req.finish_reason = "stop_id_encountered"
-
-            for req in requests:
-                if req.next_position_id > self.max_tokens:
-                    req.done_lm_generation = True
-                    req.finish_reason = "max_tokens_reached"
-
-            if repetition_cache is not None:
-                # Update repetition cache in requests
-                for i, req in enumerate(requests):
-                    req.repetition_cache = repetition_cache[i]
-
-        task = update_req_states()
-
-        return output_ids, task
 
     def _turn_token_into_id(self, output_ids):
         """Modoel's output ids to audio ids"""

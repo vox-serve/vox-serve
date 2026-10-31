@@ -1,4 +1,4 @@
-from typing import Any, List, Optional, Tuple
+from typing import Tuple
 
 import torch
 import torch.nn.functional as F
@@ -9,12 +9,11 @@ from torch import nn
 from transformers import AutoTokenizer, CsmConfig, CsmDepthDecoderConfig, CsmPreTrainedModel, LlamaConfig
 from transformers.activations import ACT2FN
 
-from ..flashinfer_utils import FlashInferWrapper, apply_rope_pos_ids, rms_norm
-from ..requests import Request
-from ..sampling import Sampler, SamplingConfig
-from ..tokenizer.mimi import MimiDecoder
-from ..utils import get_logger
-from .base import BaseLMWithDepth, PreprocessOutput
+from ...flashinfer_utils import FlashInferWrapper, apply_rope_pos_ids, rms_norm
+from ...sampling import SamplingConfig
+from ...tokenizer.mimi import MimiDecoder
+from ...utils import get_logger
+from ..base import BaseLMWithDepth
 
 
 class CsmRMSNorm(nn.Module):
@@ -485,63 +484,14 @@ class CSMModel(BaseLMWithDepth):
         return self._hidden_size
 
     @property
-    def depth_num_attention_heads(self) -> int:
-        """Number of attention heads in the model."""
-        return self._depth_num_attention_heads
-
-    @property
-    def depth_num_key_value_heads(self) -> int:
-        """Number of key-value heads in the model."""
-        return self._depth_num_key_value_heads
-
-    @property
-    def depth_num_hidden_layers(self) -> int:
-        """Number of hidden layers in the model."""
-        return self._depth_num_hidden_layers
-
-    @property
-    def depth_hidden_size(self) -> int:
-        """Hidden size of the model."""
-        return self._depth_hidden_size
-
-    @property
-    def depth_head_dim(self) -> int:
-        """Head dimension in the depth transformer."""
-        return getattr(
-            self.model.config.depth_decoder_config,
-            "head_dim",
-            self._depth_hidden_size // self._depth_num_attention_heads,
-        )
-
-    @property
     def depth_vocab_size(self) -> int:
         """Vocabulary size of the depth transformer output."""
         return self.model.config.depth_decoder_config.vocab_size
 
     @property
-    def needs_watermarking(self) -> bool:
-        """Indicates if the model requires watermarking."""
-        return True
-
-    @property
-    def watermarker_type(self) -> str:
-        """Indicates the watermarker type to use."""
-        return "silentcipher"
-
-    @property
-    def needs_input_masks(self) -> bool:
-        """Indicates if the model requires input_masks."""
-        return True
-
-    @property
     def embed_text_tokens(self):
         """Embedding layer for text tokens."""
         return self.model.embed_text_tokens
-
-    @property
-    def embed_audio_tokens_all(self):
-        """Embedding layer for audio tokens, all codebooks at a time."""
-        return self.model.backbone_model.embed_tokens
 
     def embed_audio_tokens_single(self, ids, i):
         """Embed audio tokens for a specific codebook."""
@@ -690,211 +640,6 @@ class CSMModel(BaseLMWithDepth):
     def vocab_size(self) -> int:
         """Vocabulary size of the model."""
         return self.model.config.vocab_size
-
-    def is_stop_id(self, token_ids: List[int]) -> int:
-        # index -2 since we want to check the final audio codebook before text stream
-        return token_ids[-2] == self.stop_token_id
-
-    def preprocess(self, prompt: str = None, audio_path: str = None, speaker=0, context=None) -> PreprocessOutput:
-        """Prepare the prompt for the model, formatting it according to CSM specifications."""
-        # TODO: add reference context to API argument
-        assert audio_path is None
-        prompt_tokens, prompt_tokens_mask = self._tokenize_text_segment(prompt, speaker)
-        if context is None:
-            prompt_tokens = torch.cat(self.default_context["tokens"] + [prompt_tokens], dim=0)
-            prompt_tokens_mask = torch.cat(self.default_context["tokens_mask"] + [prompt_tokens_mask], dim=0)
-
-        # Create repetition cache if repetition penalty is enabled
-        repetition_cache = None
-        config = self.default_sampling_config
-        if (config.repetition_penalty is not None and
-            config.repetition_window is not None and
-            config.repetition_penalty != 1.0):
-            repetition_cache = torch.zeros(
-                config.repetition_window if config.repetition_window > 0 else 1,
-                self.n_codebooks,
-                self.vocab_size,
-                dtype=torch.bool,
-                device=self.device,
-            )
-
-        return PreprocessOutput(
-            input_tokens=prompt_tokens,
-            input_masks=prompt_tokens_mask,
-            repetition_cache=repetition_cache
-        )
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        position_ids: torch.Tensor,
-        attn_wrapper: FlashInferWrapper,
-        kv_cache: torch.Tensor,
-        input_masks: torch.Tensor,
-        **kwargs: Any,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Forward pass through the backbone model."""
-        text_embeds = self.embed_text_tokens(input_ids[:, -1:])
-        audio_embeds = self.embed_audio_tokens_all(input_ids[:, :-1])
-        inputs_embeds = torch.cat([audio_embeds, text_embeds], dim=1)  # [bs, 33, 2048]
-
-        # input_masks = torch.cat(input_masks, dim=0)  # [bs, 33]
-        inputs_embeds = inputs_embeds * input_masks[:, :, None]
-        inputs_embeds = inputs_embeds.sum(dim=1)
-
-        backbone_logits, backbone_last_hidden = self.model.forward_backbone(
-            inputs_embeds=inputs_embeds,
-            position_ids=position_ids,
-            attn_wrapper=attn_wrapper,
-            kv_cache=kv_cache,
-        )
-
-        # add codebook dimension
-        return backbone_logits[:, None, :], backbone_last_hidden
-
-    def sampling(
-        self,
-        logits: torch.Tensor,
-        hidden_states: torch.Tensor,
-        requests: List[Request],
-        sampling_params: SamplingConfig | None = None,
-        repetition_cache: torch.Tensor | None = None,
-        cfg_scale: float | None = None,
-        **kwargs: Any,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Sample the first audio codebook from the backbone transoformer logits.
-        The initial input for the depth transformer is concatenation of last hidden state and embedding for codebook 0,
-        which essentially is the prefill with sequence length of 2.
-        """
-        if sampling_params is None:
-            sampling_params = self.default_sampling_config
-
-        assert logits.shape[1] == 1, "Logits should have shape [bs, 1, vocab_size]"
-
-        if repetition_cache is not None:
-            logits = Sampler.apply_repetition_penalty(
-                logits, repetition_cache, sampling_params.repetition_penalty
-            )
-
-        # there are 33 codebooks (32 audio + 1 text), but the output from backbone transformer is single codebook
-        # so here we allocate output_ids for all codebooks but do sampling only for the first one
-        output_ids = Sampler.run_sampling(logits.view(-1, self.vocab_size), config=sampling_params)
-        output_ids = output_ids.view(logits.shape[0], logits.shape[1])
-        output_ids = output_ids.repeat(1, self.n_codebooks)  # [bs, 33]
-
-        if repetition_cache is not None:
-            Sampler.update_repetition_penalty_cache(
-                repetition_cache,
-                output_ids,
-                sampling_params.repetition_window,
-            )
-
-        c0_embed = self.embed_audio_tokens_single(output_ids[:, 0], 0)
-        hidden_for_depth = torch.cat([hidden_states[:, None, :], c0_embed[:, None, :]], dim=1) # (bs, 2, hidden_size)
-
-        for i, req in enumerate(requests):
-            req.input_tokens = torch.zeros(1, self.n_codebooks, dtype=torch.long, device=self.device)
-            req.input_tokens[0, 0] = output_ids[i, 0].item()
-
-            req.input_masks = torch.ones(self.n_codebooks, dtype=torch.bool, device=self.device)[None, :]
-            req.input_masks[:, -1] = False  # only the audio streams are used in decode phase
-
-            # no additional logic for CSM model
-            req.lm_output_tokens.append(output_ids[i : i + 1])
-            if not self.is_stop_id(output_ids[i].tolist()):
-                # Don't add the EOS token to lm_output_audio_tokens
-                req.lm_output_audio_tokens.append(output_ids[i : i + 1])
-            elif req.next_position_id > self.max_tokens:
-                req.done_lm_generation = True
-                req.finish_reason = "max_tokens_reached"
-            else:
-                req.done_lm_generation = True
-                req.finish_reason = "stop_id_encountered"
-
-        return output_ids, hidden_for_depth
-
-    def depth_forward(
-        self,
-        hidden_states: torch.Tensor,
-        position_ids: torch.Tensor,
-        attn_wrapper: FlashInferWrapper,
-        kv_cache: torch.Tensor,
-        **kwargs,
-    ) -> torch.Tensor:
-        depth_logits = self.model.forward_depth(
-            inputs_embeds=hidden_states,
-            position_ids=position_ids,
-            attn_wrapper=attn_wrapper,
-            kv_cache=kv_cache,
-        )
-
-        # We don't do this here since prefill is also captured in cuda graph
-        # for depth transformer
-        # if getattr(attn_wrapper, "qo_indptr", None) is not None:
-        #     depth_logits = depth_logits[attn_wrapper.qo_indptr[:-1] - 1]
-
-        return depth_logits
-
-    def depth_forward_unrolled(
-        self,
-        hidden_states: torch.Tensor,
-        position_ids: torch.Tensor,
-        kv_cache: torch.Tensor,
-        cache_pos: int,
-        **kwargs,
-    ) -> torch.Tensor:
-        return self.model.forward_depth_unrolled(
-            inputs_embeds=hidden_states,
-            position_ids=position_ids,
-            kv_cache=kv_cache,
-            cache_pos=cache_pos,
-        )
-
-    def depth_sampling(
-        self,
-        logits: torch.Tensor,
-        i_iteration: int,
-        requests: List[Request],
-        sampling_params: SamplingConfig | None = None,
-        cfg_scale: float | None = None,
-        **kwargs,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        if sampling_params is None:
-            sampling_params = self.default_sampling_config
-
-        output_ids = Sampler.run_sampling(logits, config=sampling_params)
-        ci_embed = self.embed_audio_tokens_single(output_ids, i_iteration)
-
-        for i, req in enumerate(requests):
-            token_id = output_ids[i].item()
-            req.input_tokens[0, i_iteration] = token_id
-            req.lm_output_tokens[-1][0, i_iteration] = token_id
-            req.lm_output_audio_tokens[-1][0, i_iteration] = token_id
-
-        return output_ids, ci_embed
-
-    def depth_sampling_gpu(
-        self,
-        logits: torch.Tensor,
-        i_iteration: int,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        output_ids = Sampler.run_sampling(logits, config=self.default_sampling_config)
-        ci_embed = self.embed_audio_tokens_single(output_ids, i_iteration)
-        return output_ids, ci_embed
-
-    def depth_update_requests(
-        self,
-        all_output_ids: torch.Tensor,
-        requests: List[Request],
-        embed_accum: Optional[torch.Tensor] = None,
-    ) -> None:
-        for i in range(1, self.depth_n_codebooks):
-            for j, req in enumerate(requests):
-                token_id = int(all_output_ids[j, i].item())
-                req.input_tokens[0, i] = token_id
-                req.lm_output_tokens[-1][0, i] = token_id
-                req.lm_output_audio_tokens[-1][0, i] = token_id
 
     def postprocess(self, token_ids: torch.Tensor) -> torch.Tensor:
         # token_ids: (batch_size, interval, 33)

@@ -2,7 +2,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from functools import cache
-from typing import Any, Iterable, List, Literal
+from typing import Any, Iterable, Literal
 
 import inflect
 import safetensors
@@ -13,13 +13,12 @@ from phonemizer.backend import EspeakBackend
 from torch import nn
 from torch.nn import functional as F
 
-from ..encoder.zonos import ZonosSpeakerEmbeddingLDA
-from ..flashinfer_utils import FlashInferWrapper, apply_rope_pos_ids
-from ..requests import Request
-from ..sampling import Sampler, SamplingConfig
-from ..tokenizer.dac import DAC
-from ..utils import get_logger
-from .base import BaseLM, PreprocessOutput
+from ...encoder.zonos import ZonosSpeakerEmbeddingLDA
+from ...flashinfer_utils import FlashInferWrapper, apply_rope_pos_ids
+from ...sampling import SamplingConfig
+from ...tokenizer.dac import DAC
+from ...utils import get_logger
+from ..base import BaseLM
 
 
 @dataclass
@@ -659,21 +658,8 @@ class ZonosModel(BaseLM):
         """Vocabulary size of the model."""
         return 1025
 
-    @property
-    def needs_input_features(self) -> bool:
-        """Indicates if the model requires input_features."""
-        return True
-
-    @property
-    def needs_input_masks(self) -> bool:
-        """Indicates if the model requires input_masks."""
-        return True
-
-    def is_stop_id(self, token_ids: List[int]) -> bool:
-        return token_ids[0] == self.eos_token_id
-
     def _get_default_speaker_embedding(self) -> torch.Tensor:
-        from ..utils import download_github_file
+        from ...utils import download_github_file
 
         try:
             wav, sr = torchaudio.load(download_github_file("Zyphra", "Zonos", "assets/exampleaudio.mp3"))
@@ -759,9 +745,6 @@ class ZonosModel(BaseLM):
 
         return cond_dict
 
-    def _prepare_conditioning(self, cond_dict: dict, uncond_dict: dict | None = None) -> torch.Tensor:
-        return self.model.prefix_conditioner(cond_dict)[0]
-
         # TODO: uncond_dict for generation with CFG
 
         # if uncond_dict is None:
@@ -772,152 +755,6 @@ class ZonosModel(BaseLM):
         #         self.model.prefix_conditioner(uncond_dict),
         #     ]
         # )
-
-    def preprocess(self, prompt: str = None, audio_path: str = None) -> PreprocessOutput:
-        """Prepare the prompt for the model, formatting it according to Orpheus specifications."""
-        # TODO: add API support for custom voice
-        assert audio_path is None
-        cond_dict = self._make_cond_dict(text=prompt)
-        input_features = self._prepare_conditioning(cond_dict)
-
-        prefix_tokens = torch.cat(
-            [
-                torch.zeros(input_features.shape[0], self.n_codebooks, dtype=torch.long),
-                torch.full((1, self.n_codebooks), self.masked_token_id, dtype=torch.long),
-            ],
-            dim=0,
-        )
-
-        # Create expanded input_features to match token sequence length
-        # Repeat each feature embedding for all positions except the last one
-        seq_len = prefix_tokens.shape[0]
-        expanded_features = torch.zeros(
-            seq_len, input_features.shape[-1],
-            device=input_features.device,
-            dtype=input_features.dtype
-        )
-        expanded_features[:-1] = input_features.squeeze(0)  # Fill all positions except last with features
-
-        # Create input mask for feature positions (all positions except the last one)
-        input_mask = torch.ones(seq_len, dtype=torch.bool, device=input_features.device)
-        input_mask[-1] = False  # Last position should not be filled with features
-        input_mask = input_mask[:, None].expand(-1, self.n_codebooks) # Expand for n_codebooks
-
-        # Create repetition cache if repetition penalty is enabled
-        repetition_cache = None
-        config = self.default_sampling_config
-        if (config.repetition_penalty is not None and
-            config.repetition_window is not None and
-            config.repetition_penalty != 1.0):
-            repetition_cache = torch.zeros(
-                config.repetition_window if config.repetition_window > 0 else 1,
-                self.n_codebooks,
-                self.vocab_size,
-                dtype=torch.bool,
-                device=self.device,
-            )
-
-        return PreprocessOutput(
-            input_tokens=prefix_tokens,
-            input_features=expanded_features,
-            input_masks=input_mask,
-            repetition_cache=repetition_cache
-        )
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        position_ids: torch.Tensor,
-        attn_wrapper: FlashInferWrapper,
-        kv_cache: torch.Tensor,
-        input_features: torch.Tensor | None = None,
-        input_masks: torch.Tensor | None = None,
-        **kwargs: Any,
-    ) -> torch.Tensor:
-        """Forward pass through the model."""
-        inputs_embeds = self.model.embed_tokens(input_ids)
-
-        # for prefill requests, except for the last token, replace embeddings with input_features
-        inputs_embeds = torch.where(input_masks[:, :1], input_features, inputs_embeds)
-
-        logits = self.model(
-            inputs_embeds=inputs_embeds,
-            position_ids=position_ids,
-            attn_wrapper=attn_wrapper,
-            kv_cache=kv_cache,
-        )
-        logits += self.logit_bias
-
-        return logits
-
-    def sampling(
-        self,
-        logits: torch.Tensor,
-        requests: List[Request],
-        sampling_params: SamplingConfig | None = None,
-        repetition_cache: torch.Tensor | None = None,
-        cfg_scale: float | None = None,
-    ) -> torch.Tensor:
-        if sampling_params is None:
-            sampling_params = self.default_sampling_config
-
-        if repetition_cache is not None:
-            logits = Sampler.apply_repetition_penalty(
-                logits, repetition_cache, sampling_params.repetition_penalty
-            )
-
-        output_ids = Sampler.run_sampling(logits.view(-1, self.vocab_size), config=sampling_params)
-        output_ids = output_ids.view(logits.shape[0], logits.shape[1])
-
-        if repetition_cache is not None:
-            Sampler.update_repetition_penalty_cache(
-                repetition_cache,
-                output_ids,
-                sampling_params.repetition_window,
-            )
-
-        for i, req in enumerate(requests):
-            # mask part of the output tokens for the first n_codebooks - 1 tokens
-            # use len(req.lm_output_tokens) + 1 since the output is not yet appended
-            if len(req.lm_output_tokens) + 1 < self.n_codebooks:
-                # for j in range(len(req.lm_output_tokens) + 1, self.n_codebooks):
-                #     output_ids[i, j] = self.masked_token_id
-                output_ids[i, len(req.lm_output_tokens) + 1 :] = self.masked_token_id
-
-            req.input_tokens = output_ids[i : i + 1]
-            # for decode phase, input_features are not used
-            req.input_features = req.input_features[:1].zero_()
-            req.input_masks = req.input_masks[:1].zero_()
-
-        async def update_req_states():
-            stop_mask = output_ids[:, 0] == self.eos_token_id
-            stop_indices = torch.nonzero(stop_mask, as_tuple=True)[0]
-
-            for i, req in enumerate(requests):
-                req.lm_output_tokens.append(output_ids[i : i + 1])
-                req.lm_output_audio_tokens.append(output_ids[i : i + 1])
-
-            # Remove from stop requests
-            for idx in stop_indices:
-                req = requests[idx.item()]
-                # Remove the EOS token from lm_output_audio_tokens
-                req.lm_output_audio_tokens.pop()
-                req.done_lm_generation = True
-                req.finish_reason = "stop_id_encountered"
-
-            for req in requests:
-                if req.next_position_id > self.max_tokens:
-                    req.done_lm_generation = True
-                    req.finish_reason = "max_tokens_reached"
-
-            if repetition_cache is not None:
-                # Update repetition cache in requests
-                for i, req in enumerate(requests):
-                    req.repetition_cache = repetition_cache[i]
-
-        task = update_req_states()
-
-        return output_ids, task
 
     def postprocess(self, token_ids: torch.Tensor):
         interval = token_ids.shape[1]

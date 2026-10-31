@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from functools import partial
-from typing import Any, List, Optional, Union
+from typing import Optional, Union
 
 import librosa
 import onnxruntime
@@ -12,15 +12,12 @@ from torch import nn
 from torch.nn import functional as F
 from transformers import AutoTokenizer
 
-from ..flashinfer_utils import FlashInferWrapper, apply_rope_pos_ids, rms_norm
-from ..requests import Request
-from ..sampling import Sampler, SamplingConfig
-from ..tokenizer.cosyvoice2 import CosyVoice2Decoder, CosyVoice2DecoderCache
-from ..tokenizer.cosyvoice_flow import FlowDecoderCache, FlowEncoderCache
-from ..tokenizer.hifigan import HiFTGeneratorCache
-from ..tokenizer.s3 import S3TokenizerV2
-from ..utils import download_audio_from_url, get_logger
-from .base import BaseLM, PreprocessOutput
+from ...flashinfer_utils import FlashInferWrapper, apply_rope_pos_ids, rms_norm
+from ...sampling import SamplingConfig
+from ...tokenizer.cosyvoice2 import CosyVoice2Decoder, CosyVoice2DecoderCache
+from ...tokenizer.s3 import S3TokenizerV2
+from ...utils import download_audio_from_url, get_logger
+from ..base import BaseLM
 
 
 @dataclass
@@ -416,141 +413,6 @@ class CosyVoice2Model(BaseLM):
         if not self.use_detokenizer_cache:
             self._shared_prompt_cache = self._audio_decoder_initial_cache
 
-    def _expand_flow_encoder_cache(self, cache: FlowEncoderCache, batch_size: int) -> FlowEncoderCache:
-        """Expand flow encoder cache to match the given batch size."""
-        if batch_size == 1:
-            # return a deep copy so per-request cache state is isolated
-            return FlowEncoderCache(
-                conformer_att_cache=cache.conformer_att_cache.clone()
-                if cache.conformer_att_cache is not None
-                else None,
-                conformer_cnn_cache=cache.conformer_cnn_cache.clone()
-                if cache.conformer_cnn_cache is not None
-                else None,
-                up_conformer_att_cache=cache.up_conformer_att_cache.clone()
-                if cache.up_conformer_att_cache is not None
-                else None,
-                up_conformer_cnn_cache=cache.up_conformer_cnn_cache.clone()
-                if cache.up_conformer_cnn_cache is not None
-                else None,
-            )
-
-        # Expand conformer attention caches (batch dimension is typically dim 0)
-        new_conformer_att_cache = None
-        if cache.conformer_att_cache is not None and cache.conformer_att_cache.numel() > 0:
-            new_conformer_att_cache = cache.conformer_att_cache.repeat(
-                batch_size, *[1] * (cache.conformer_att_cache.dim() - 1)
-            )
-
-        # Expand conformer CNN caches (batch dimension is typically dim 0)
-        new_conformer_cnn_cache = None
-        if cache.conformer_cnn_cache is not None and cache.conformer_cnn_cache.numel() > 0:
-            new_conformer_cnn_cache = cache.conformer_cnn_cache.repeat(
-                batch_size, *[1] * (cache.conformer_cnn_cache.dim() - 1)
-            )
-
-        # Expand up-sampling conformer attention caches
-        new_up_conformer_att_cache = None
-        if cache.up_conformer_att_cache is not None and cache.up_conformer_att_cache.numel() > 0:
-            new_up_conformer_att_cache = cache.up_conformer_att_cache.repeat(
-                batch_size, *[1] * (cache.up_conformer_att_cache.dim() - 1)
-            )
-
-        # Expand up-sampling conformer CNN caches
-        new_up_conformer_cnn_cache = None
-        if cache.up_conformer_cnn_cache is not None and cache.up_conformer_cnn_cache.numel() > 0:
-            new_up_conformer_cnn_cache = cache.up_conformer_cnn_cache.repeat(
-                batch_size, *[1] * (cache.up_conformer_cnn_cache.dim() - 1)
-            )
-
-        return FlowEncoderCache(
-            conformer_att_cache=new_conformer_att_cache,
-            conformer_cnn_cache=new_conformer_cnn_cache,
-            up_conformer_att_cache=new_up_conformer_att_cache,
-            up_conformer_cnn_cache=new_up_conformer_cnn_cache,
-        )
-
-    def _expand_flow_decoder_cache(self, cache: FlowDecoderCache, batch_size: int) -> FlowDecoderCache:
-        """Expand flow decoder cache to match the given batch size."""
-        if batch_size == 1:
-            # IMPORTANT: return a deep copy so per-request cache state is isolated.
-            return FlowDecoderCache(
-                cnn_cache=[
-                    [(layer_cache.clone() if layer_cache is not None else None) for layer_cache in timestep_cache]
-                    for timestep_cache in cache.cnn_cache
-                ]
-                if cache.cnn_cache is not None
-                else None,
-                att_cache=cache.att_cache.clone() if cache.att_cache is not None else None,
-            )
-
-        # Expand CNN cache: List[List[torch.Tensor]] where inner tensors have shape (batch, 2, channels, 2)
-        # We need to repeat along the batch dimension (dim 0)
-        new_cnn_cache = None
-        if cache.cnn_cache is not None:
-            new_cnn_cache = [
-                [
-                    layer_cache.repeat(batch_size, 1, 1, 1) if layer_cache is not None else None
-                    for layer_cache in timestep_cache
-                ]
-                for timestep_cache in cache.cnn_cache
-            ]
-
-        # Expand attention cache: (batch, 2, n_timesteps, n_layers, num_heads, seq_len, 2*head_dim)
-        # batch dimension is at index 0, CFG dimension (2) is at index 1
-        # We need to repeat along the batch dimension only
-        new_att_cache = None
-        if cache.att_cache is not None:
-            new_att_cache = cache.att_cache.repeat(batch_size, 1, 1, 1, 1, 1, 1)
-
-        return FlowDecoderCache(
-            cnn_cache=new_cnn_cache,
-            att_cache=new_att_cache,
-        )
-
-    def audio_decoder_initial_cache(self, batch_size: int):
-        """Create initial decoder cache for the given batch size.
-
-        When use_detokenizer_cache=False (prompt caching mode):
-            Returns None - the shared prompt cache is stored in self._shared_prompt_cache
-            and will be used directly in postprocess() without worker management.
-
-        When use_detokenizer_cache=True (per-request caching mode):
-            Returns a per-request copy of the cache that the worker will manage and update.
-        """
-        if not self.use_detokenizer_cache:
-            # Prompt caching mode: return None so worker doesn't manage the cache
-            # The shared prompt cache is stored in self._shared_prompt_cache
-            return None
-
-        base_cache = self._audio_decoder_initial_cache
-
-        # Expand flow caches to match the batch size
-        expanded_encoder_cache = self._expand_flow_encoder_cache(base_cache.flow_encoder_cache, batch_size)
-        expanded_decoder_cache = self._expand_flow_decoder_cache(base_cache.flow_decoder_cache, batch_size)
-
-        # Expand HiFT cache
-        expanded_hift_cache = None
-        if base_cache.hift_cache is not None:
-            expanded_hift_cache = HiFTGeneratorCache(
-                mel_cache=base_cache.hift_cache.mel_cache.repeat(batch_size, 1, 1)
-                if base_cache.hift_cache.mel_cache is not None
-                else None,
-                source_cache=base_cache.hift_cache.source_cache.repeat(batch_size, 1, 1)
-                if base_cache.hift_cache.source_cache is not None
-                else None,
-                speech_cache=base_cache.hift_cache.speech_cache.repeat(batch_size, 1)
-                if base_cache.hift_cache.speech_cache is not None
-                else None,
-            )
-
-        # Clone cache tensors for the given batch size
-        return CosyVoice2DecoderCache(
-            flow_encoder_cache=expanded_encoder_cache,
-            flow_decoder_cache=expanded_decoder_cache,
-            hift_cache=expanded_hift_cache,
-        ).to(self.audio_decoder_device)
-
     @property
     def n_codebooks(self):
         """Number of codebooks in the model."""
@@ -575,21 +437,6 @@ class CosyVoice2Model(BaseLM):
     def hidden_size(self) -> int:
         """Hidden size of the model."""
         return self._hidden_size
-
-    @property
-    def supports_audio_input(self) -> bool:
-        """Indicates if the model accepts audio input."""
-        return True
-
-    @property
-    def needs_input_features(self) -> bool:
-        """Indicates if the model requires input_features."""
-        return True
-
-    @property
-    def needs_input_masks(self) -> bool:
-        """Indicates if the model requires input_masks."""
-        return True
 
     @property
     def detokenize_interval(self) -> int:
@@ -624,9 +471,6 @@ class CosyVoice2Model(BaseLM):
     def vocab_size(self) -> int:
         """Vocabulary size of the model."""
         return self.config.speech_token_size + 3
-
-    def is_stop_id(self, token_ids: List[int]) -> bool:
-        return token_ids[0] in self.stop_token_ids
 
     def _load_tokenizer(self, tokenizer_path):
         self.allowed_special = "all"
@@ -919,176 +763,6 @@ class CosyVoice2Model(BaseLM):
             "prompt_speech_token_len": speech_token_len,
             "embedding": embedding.to(torch.bfloat16).to(self.audio_decoder_device),
         }
-
-    @torch.no_grad()
-    def preprocess(
-        self,
-        prompt: str | None = None,
-        audio_path: str | None = None,
-    ) -> PreprocessOutput:
-        assert audio_path is None, "audio_path is not supported yet for this model"
-
-        prompt = self._text_normalize(prompt, split=False, text_frontend=True)
-        prompt_ids = self._extract_text_token(prompt)
-
-        input_ids = torch.concat(
-            [
-                torch.tensor([[self.sos]], dtype=torch.int32, device=self.device),
-                self.default_speaker_ref_dict["ref_text_ids"],
-                prompt_ids,
-                torch.tensor([[self.task_id]], dtype=torch.int32, device=self.device),
-                self.default_speaker_ref_dict["prompt_speech_token"],
-            ],
-            dim=1,
-        ).view(-1, 1)  # add codebook dimension
-
-        # 1. Embed SOS token using llm_embedding
-        sos_emb = self.model.llm_embedding.weight[self.sos].unsqueeze(0)  # (1, hidden_size)
-
-        # 2. Embed text tokens (ref_text_ids + prompt_ids)
-        ref_text_ids = self.default_speaker_ref_dict["ref_text_ids"][0]  # (ref_text_len,)
-        prompt_ids_flat = prompt_ids[0]  # (prompt_len,)
-        all_text_ids = torch.concat([ref_text_ids, prompt_ids_flat], dim=0)  # (ref_text_len + prompt_len,)
-        text_embeds = self.model.llm.model.model.embed_tokens(all_text_ids)  # (ref_text_len + prompt_len, hidden_size)
-
-        # 3. Embed task_id token
-        task_id_emb = self.model.llm_embedding.weight[self.task_id].unsqueeze(0)  # (1, hidden_size)
-
-        # 4. Embed speech tokens using speech_embedding
-        speech_token_ids = self.default_speaker_ref_dict["prompt_speech_token"][0]  # (speech_len,)
-        speech_embeds = self.model.speech_embedding(speech_token_ids)  # (speech_len, hidden_size)
-
-        # 5. Concatenate all embeddings in the correct order: [sos, text, task_id, speech]
-        input_features = torch.concat(
-            [
-                sos_emb,
-                text_embeds,
-                task_id_emb,
-                speech_embeds,
-            ],
-            dim=0,
-        )  # (total_len, hidden_size)
-
-        # Create input_masks: 1 for text/special tokens, 0 for speech tokens
-        input_masks = torch.ones(
-            input_ids.shape[0],
-            self.n_codebooks,
-            device=self.device,
-            dtype=torch.bool,
-        )
-        input_masks[-self.default_speaker_ref_dict["prompt_speech_token_len"] :, :] = 1
-
-        # Create repetition cache if repetition penalty is enabled
-        repetition_cache = None
-        config = self.default_sampling_config
-        if (
-            config.repetition_penalty is not None
-            and config.repetition_window is not None
-            and config.repetition_penalty != 1.0
-        ):
-            repetition_cache = torch.zeros(
-                config.repetition_window if config.repetition_window > 0 else 1,
-                self.n_codebooks,
-                self.vocab_size,
-                dtype=torch.bool,
-                device=self.device,
-            )
-
-        # Initial decoder cache for this request (default cache), sized for batch 1
-        decoder_cache = self.audio_decoder_initial_cache(batch_size=1)
-
-        return PreprocessOutput(
-            input_tokens=input_ids,
-            repetition_cache=repetition_cache,
-            input_masks=input_masks,
-            input_features=input_features,
-            decoder_cache=decoder_cache,
-        )
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        position_ids: torch.Tensor,
-        attn_wrapper: FlashInferWrapper,
-        kv_cache: torch.Tensor,
-        input_masks: torch.Tensor,
-        input_features: torch.Tensor,
-        **kwargs: Any,
-    ) -> torch.Tensor:
-        """Forward pass through the model."""
-        # remove codebook dimension
-        inputs_embeds = self.model.embed_tokens_speech(
-            input_ids[:, 0].clamp(0, self.model.speech_embedding.weight.shape[0] - 1),
-        )
-
-        inputs_embeds = torch.where(input_masks, input_features, inputs_embeds)
-
-        logits = self.model(
-            inputs_embeds=inputs_embeds,
-            position_ids=position_ids,
-            attn_wrapper=attn_wrapper,
-            kv_cache=kv_cache,
-        )
-
-        return logits[:, None, :]  # add codebook dimension
-
-    def sampling(
-        self,
-        logits: torch.Tensor,
-        requests: List[Request],
-        sampling_params: SamplingConfig | None = None,
-        repetition_cache: torch.Tensor | None = None,
-        cfg_scale: float | None = None,
-        **kwargs,
-    ) -> torch.Tensor:
-        if sampling_params is None:
-            sampling_params = self.default_sampling_config
-
-        if repetition_cache is not None:
-            logits = Sampler.apply_repetition_penalty(logits, repetition_cache, sampling_params.repetition_penalty)
-
-        output_ids = Sampler.run_sampling(logits.view(-1, self.vocab_size), config=sampling_params)
-        output_ids = output_ids.view(logits.shape[0], logits.shape[1])
-
-        if repetition_cache is not None:
-            Sampler.update_repetition_penalty_cache(
-                repetition_cache,
-                output_ids,
-                sampling_params.repetition_window,
-            )
-
-        for i, req in enumerate(requests):
-            req.input_tokens = output_ids[i : i + 1]
-
-            req.input_features = req.input_features[:1].zero_()
-            req.input_masks = req.input_masks[:1].zero_()
-
-        async def update_req_states():
-            stop_mask = (
-                (output_ids[:, 0] == self.stop_token_ids[0])
-                | (output_ids[:, 0] == self.stop_token_ids[1])
-                | (output_ids[:, 0] == self.stop_token_ids[2])
-            )
-
-            for i, req in enumerate(requests):
-                req.lm_output_tokens.append(output_ids[i : i + 1])
-                if not stop_mask[i]:
-                    req.lm_output_audio_tokens.append(output_ids[i : i + 1])
-                if stop_mask[i]:
-                    req.done_lm_generation = True
-                    req.finish_reason = "stop_id_encountered"
-                if req.next_position_id > self.max_tokens:
-                    req.done_lm_generation = True
-                    req.finish_reason = "max_tokens_reached"
-
-            if repetition_cache is not None:
-                # Update repetition cache in requests
-                for i, req in enumerate(requests):
-                    req.repetition_cache = repetition_cache[i]
-
-        task = update_req_states()
-
-        return output_ids, task
 
     def postprocess(self, token_ids: torch.Tensor, decoder_cache: CosyVoice2DecoderCache | None = None):
         if not self.use_detokenizer_cache:
