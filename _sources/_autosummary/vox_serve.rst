@@ -14,6 +14,7 @@
    launch
    model
    requests
+   rt
    sampling
    scheduler
    scheduler_entry

@@ -1,4 +1,4 @@
-﻿vox\_serve.sampling
+vox\_serve.sampling
 ===================
 
 .. automodule:: vox_serve.sampling
