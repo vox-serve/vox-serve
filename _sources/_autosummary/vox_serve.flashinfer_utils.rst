@@ -15,6 +15,5 @@ vox\_serve.flashinfer\_utils
 
    .. autosummary::
    
-      FlashInferDecodeWrapper
-      FlashInferPrefillWrapper
+      FlashInferWrapper
    

@@ -488,10 +488,13 @@ plus the CosyVoice3 flow kernels of <code class="docutils literal notranslate"><
 <tr class="row-odd"><td><p><a class="reference internal" href="vox_serve.fusion.dit.html#module-vox_serve.fusion.dit" title="vox_serve.fusion.dit"><code class="xref py py-obj docutils literal notranslate"><span class="pre">dit</span></code></a></p></td>
 <td><p>Fused Triton kernels for chunked DiT decoders and their vocoders (CosyVoice3 flow and HiFT).</p></td>
 </tr>
-<tr class="row-even"><td><p><a class="reference internal" href="vox_serve.fusion.projections.html#module-vox_serve.fusion.projections" title="vox_serve.fusion.projections"><code class="xref py py-obj docutils literal notranslate"><span class="pre">projections</span></code></a></p></td>
+<tr class="row-even"><td><p><a class="reference internal" href="vox_serve.fusion.hift.html#module-vox_serve.fusion.hift" title="vox_serve.fusion.hift"><code class="xref py py-obj docutils literal notranslate"><span class="pre">hift</span></code></a></p></td>
+<td><p>Channels-last HiFT vocoder decode (CosyVoice3 <code class="docutils literal notranslate"><span class="pre">--fuse-codec</span></code>).</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="vox_serve.fusion.projections.html#module-vox_serve.fusion.projections" title="vox_serve.fusion.projections"><code class="xref py py-obj docutils literal notranslate"><span class="pre">projections</span></code></a></p></td>
 <td><p>Model-agnostic LM fusion: sibling projections that read the same input become one GEMM.</p></td>
 </tr>
-<tr class="row-odd"><td><p><a class="reference internal" href="vox_serve.fusion.seg_attention.html#module-vox_serve.fusion.seg_attention" title="vox_serve.fusion.seg_attention"><code class="xref py py-obj docutils literal notranslate"><span class="pre">seg_attention</span></code></a></p></td>
+<tr class="row-even"><td><p><a class="reference internal" href="vox_serve.fusion.seg_attention.html#module-vox_serve.fusion.seg_attention" title="vox_serve.fusion.seg_attention"><code class="xref py py-obj docutils literal notranslate"><span class="pre">seg_attention</span></code></a></p></td>
 <td><p>Segmented multi-head attention for chunked flow-matching decoders (Triton).</p></td>
 </tr>
 </tbody>
