@@ -11,6 +11,7 @@
    :recursive:
 
    flashinfer_utils
+   fusion
    launch
    model
    requests
