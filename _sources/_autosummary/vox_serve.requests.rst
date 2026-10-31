@@ -8,6 +8,5 @@ vox\_serve.requests
 
    .. autosummary::
    
-      LMInputs
       Request
    
