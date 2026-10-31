@@ -137,7 +137,7 @@ class VoxServeServerManager:
         cmd = [
             sys.executable,
             "-m",
-            "vox_serve.launch",
+            "vox_serve",
             "--model",
             config.model,
             "--port",

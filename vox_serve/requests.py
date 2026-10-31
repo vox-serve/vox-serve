@@ -1,11 +1,10 @@
 from dataclasses import dataclass, field
 from queue import Queue
-from typing import Any, Dict, List, Optional, TypedDict
+from typing import Any, Dict, List
 
-import torch
+import numpy as np
 
 from .sampling import SamplingConfig
-from .tokenizer.base import DecoderCache
 
 
 @dataclass
@@ -21,33 +20,28 @@ class Request:
     # Model-specific kwargs (e.g., language, speaker, ref_text for Qwen3-TTS)
     model_kwargs: Dict[str, Any] = field(default_factory=dict)
 
-    # next_position_id == len(input_tokens) + len(lm_output_tokens) + 1
+    # position of the next token the LM processes (the prompt length after prefill)
     next_position_id: int = None
 
-    # KV cache data
+    # KV cache pages of the request
     kv_pages: List[int] = None
-    kv_token_len: int = None
-    kv_last_page_len: int = None
-    # kv_token_len == (len(kv_pages) - 1) * page_size + kv_last_page_len
 
-    # input prompt tokens. shape: (seq_len, n_codebooks)
-    input_tokens: torch.Tensor = None
-    # length of input prompt tokens
+    # number of prompt rows (known once the program has built the prompt)
     input_length: int = None
-    # raw output tokens from LM to be given to the next step of LM inference. shape: (seq_len, n_codebooks)
-    lm_output_tokens: List[torch.Tensor] = field(default_factory=list)
-    # audio tokens to be given to the detokenizer, after filtering or reverting delay patterns.
-    # shape: (seq_len, n_codebooks)
-    lm_output_audio_tokens: List[torch.Tensor] = field(default_factory=list)
+    # sampled rows of every LM step, each of shape (n_codebooks,)
+    lm_output_tokens: List[np.ndarray] = field(default_factory=list)
+    # audio frames to be given to the detokenizer, each of shape (n_codebooks,)
+    lm_output_audio_tokens: List[np.ndarray] = field(default_factory=list)
     output_audio: Queue = field(default_factory=Queue)
 
-    # optional inputs for inference or sampling
-    input_features: torch.Tensor = None
-    input_masks: torch.Tensor = None
-    repetition_cache: torch.Tensor = None  # Shape: (window_size, n_codebooks, vocab_size)
-
-    # optional per-request decoder cache for models whose postprocess requires it
-    decoder_cache: DecoderCache = None
+    # program state (ProgramWorker): the prompt built by the program (``vox_serve.rt.prompt.Prompt``),
+    # the request's LM slot (last sampled token, repetition-penalty state) and detokenizer slot, and its
+    # sampling seed / steps
+    lm_prompt: Any = None
+    slot: int = None
+    detok_slot: int = None
+    seed: int = None
+    lm_steps: int = 0
 
     # progress status
     done_lm_prefill: bool = False
@@ -70,22 +64,9 @@ class Request:
     waiting_for_text: bool = False  # True when generation paused waiting for text
     prefill_ready: bool = False  # True when enough text buffered to start prefill
     eos_injected: bool = False  # True after EOS token has been injected (for input streaming)
+    first_text_token: int = None  # The only text token in the prefill prompt (for input streaming)
 
     # timestamp tracking for online scheduling
     chunk_send_timestamps: List[float] = field(default_factory=list)  # when each chunk was sent
     chunk_durations: List[float] = field(default_factory=list)  # duration of each chunk in seconds
 
-
-class LMInputs(TypedDict):
-    """Typed container for scheduler-prepared inputs for LM steps."""
-    qo_indptr: List[int]
-    paged_kv_indptr: List[int]
-    paged_kv_indices: List[int]
-    paged_kv_last_page_len: List[int]
-    # Pre-allocated tensors for GPU computation
-    input_ids: torch.Tensor
-    position_ids: torch.Tensor
-    input_features: Optional[torch.Tensor]
-    input_masks: Optional[torch.Tensor]
-    repetition_cache: Optional[torch.Tensor]
-    is_prefill: bool

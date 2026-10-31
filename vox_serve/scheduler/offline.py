@@ -9,12 +9,8 @@ class OfflineScheduler(Scheduler):
         lm_requests = []
 
         # Get worker limitations
-        if hasattr(self.model_worker, 'prefill_graph_batch_size'):
-            max_prefill_batch_size = self.model_worker.prefill_graph_batch_size
-            max_seq_len = max(self.model_worker.cuda_graph_seq_len_buckets)
-        else:
-            max_prefill_batch_size = self.max_batch_size
-            max_seq_len = 1024
+        max_prefill_batch_size = self.model_worker.prefill_graph_batch_size
+        max_seq_len = max(self.model_worker.cuda_graph_seq_len_buckets)
 
         # Separate prefill and decode requests
         prefill_requests = []
@@ -75,12 +71,14 @@ class OfflineScheduler(Scheduler):
     def _select_detokenize_requests(self):
         """
         Offline scheduling: only detokenize when no LM requests are ongoing.
+        Requests not prefilled yet do not count: they may be waiting for the codec state slot of a
+        finished request, which is only freed once that request's audio is decoded.
         Naive approach: go through requests one by one, add every chunk until max batch size.
         """
         # Check if there are any ongoing LM requests
         has_ongoing_lm = False
         for req in self.active_requests:
-            if not req.done_lm_generation:
+            if req.done_lm_prefill and not req.done_lm_generation:
                 has_ongoing_lm = True
                 break
 
