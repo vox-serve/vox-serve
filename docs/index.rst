@@ -35,6 +35,7 @@ text-to-speech (TTS) and speech-to-speech (STS) workloads.
 
    api
    cli
+   runtimes
    models
    architecture
 
@@ -43,3 +44,4 @@ text-to-speech (TTS) and speech-to-speech (STS) workloads.
    :caption: Contributing
 
    development
+   adding-a-model

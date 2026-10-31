@@ -73,7 +73,14 @@ Package overview
 Key modules
 -----------
 
+.. automodule:: vox_serve.cli
+   :members:
+
 .. automodule:: vox_serve.launch
    :members:
    :undoc-members:
+   :show-inheritance:
+
+.. automodule:: vox_serve.rt.program
+   :members: LMProgram
    :show-inheritance:

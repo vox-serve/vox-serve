@@ -1,8 +1,7 @@
 CLI Reference
 =============
 
-The CLI entrypoint is ``vox-serve`` (installed via pip), which maps to
-``python -m vox_serve.launch``.
+The CLI entrypoint is ``vox-serve`` (installed via pip; also ``python -m vox_serve``).
 
 Usage
 -----
@@ -11,83 +10,147 @@ Usage
 
    vox-serve --model <model-name> --port 8000
 
-Arguments
----------
+Runtime
+-------
+
+``--runtime auto|rust|python``
+  ``auto`` (default) serves with the Rust runtime, and with the Python runtime when the Rust extension
+  is not installed or does not load, or when only the Python runtime takes the arguments (for example
+  ``--async-scheduling``). Without the extension, flags only the Rust runtime has are ignored with a
+  warning. ``rust`` and ``python`` select one runtime without fallback; ``python -m vox_serve.launch``
+  is the Python runtime too.
+
+Common arguments (both runtimes)
+--------------------------------
 
 ``--model``
-  Model name or local path to load for inference.
-  Default: ``canopylabs/orpheus-3b-0.1-ft``.
+  Model name or Hugging Face repository. Default: ``canopylabs/orpheus-3b-0.1-ft``.
 
-``--scheduler-type``
-  Scheduler backend implementation. One of: ``base``, ``online``, ``offline``.
-
-``--async-scheduling``
-  Enable async scheduling mode, which overlaps request handling and scheduler work.
-
-``--host``
-  Bind address for the HTTP server. Default: ``0.0.0.0``.
-
-``--port``
-  TCP port for the HTTP server. Default: ``8000``.
+``--host`` / ``--port``
+  Bind address and port of the HTTP server. Defaults: ``0.0.0.0``, ``8000``.
 
 ``--max-batch-size``
-  Maximum batch size used by the scheduler for inference.
+  Maximum number of requests decoded together. Default: ``8``.
 
-``--max-num-pages``
-  Maximum number of KV cache pages for the scheduler backend.
+``--page-size`` / ``--max-num-pages``
+  KV-cache page size (default ``64``) and number of pages (default: enough for twice the batch at the
+  maximum context).
 
-``--page-size``
-  Size of each KV cache page (tokens per page).
-
-``--top-p``
-  Top-p (nucleus) sampling threshold. When set, tokens are sampled from the smallest set
-  whose cumulative probability exceeds this value.
-
-``--top-k``
-  Top-k sampling threshold. When set, tokens are sampled from the k most likely candidates.
-
-``--min-p``
-  Min-p sampling threshold. Filters out tokens with probability below this value.
-
-``--temperature``
-  Sampling temperature to scale logits. Lower is more deterministic; higher is more random.
+``--scheduler-type``
+  Scheduling policy: ``base`` (default), ``online`` (requests close to an audio underrun first) or
+  ``offline`` (throughput first). The Python runtime also has ``input_streaming`` (needed there for the
+  input-streaming endpoints; the Rust runtime serves them with every policy and treats the name as
+  ``base``), the Rust runtime also ``deadline``. :doc:`runtimes` describes the policies.
 
 ``--max-tokens``
-  Maximum number of tokens to generate per request.
+  Per-request token limit (prompt included), overriding the model's default.
 
-``--repetition-penalty``
-  Penalize repeated tokens to reduce loops in generated output.
-
-``--repetition-window``
-  Window size for repetition penalty.
-
-``--cfg-scale``
-  Classifier-free guidance scale, where higher values strengthen conditioning.
+``--temperature``, ``--top-p``, ``--top-k``, ``--min-p``, ``--repetition-penalty``
+  Sampling parameters of every request, overriding the model's defaults.
 
 ``--greedy``
-  Use greedy decoding (disables top-k/top-p/min-p/temperature sampling).
+  Greedy decoding for every request (testing).
 
-``--enable-cuda-graph``
-  Enable CUDA graph optimization for the decode phase.
+``--detokenize-interval``
+  Codec frames per decoded audio chunk (Qwen3-TTS). Default: the model's.
 
-``--disable-cuda-graph``
-  Disable CUDA graph optimization for the decode phase.
-
-``--enable-disaggregation``
-  Enable disaggregation mode (requires at least 2 GPUs).
+``--cfg-scale``
+  Classifier-free guidance scale (Voxtral-TTS). Default: the model's.
 
 ``--dp-size``
-  Enable data parallel mode with N replicas (N >= 1). Cannot be combined with
-  ``--enable-disaggregation`` and requires N <= available GPUs.
+  Data-parallel replicas, one per GPU ``0..N-1``.
 
-``--enable-nvtx``
-  Enable NVTX profiling for performance analysis.
+``--enable-disaggregation``
+  Run the codec on GPU 1 and the LM on GPU 0.
 
 ``--enable-torch-compile``
-  Enable ``torch.compile`` optimization for model inference.
+  Compile the LM forward with ``torch.compile`` before capturing its graphs (slower start-up).
+
+``--fuse-lm``, ``--fuse-layers``, ``--fuse-codec``, ``--fuse-depth``, ``--fuse-talker``, ``--compile-detok``
+  Kernel fusion (``vox_serve/fusion``), model-specific: merged q/k/v and gate/up GEMMs (``--fuse-lm``), fused
+  decoder layers (``--fuse-layers``: Higgs Audio v3, CosyVoice3), fused codec kernels (``--fuse-codec``:
+  Higgs Audio v3, CosyVoice3), Qwen3-TTS depth transformer and talker (``--fuse-depth``, ``--fuse-talker``),
+  and ``torch.compile`` of the codec (``--compile-detok``). ``vox-serve --help`` lists the models of each.
 
 ``--log-level``
-  Set log verbosity. One of: ``DEBUG``, ``INFO``, ``WARNING``, ``ERROR``, ``CRITICAL``.
+  ``DEBUG``, ``INFO`` (default), ``WARNING`` or ``ERROR``.
+
+Python runtime only
+-------------------
+
+``--async-scheduling``
+  Schedule the next step while the GPU runs the current one.
+
+``--disable-cuda-graph`` / ``--enable-cuda-graph``
+  Run the model's step functions eagerly instead of replaying CUDA graphs (for debugging model code).
+  ``--enable-cuda-graph`` is the default.
 
 ``--socket-suffix``
-  Append a suffix to IPC socket paths to avoid conflicts when running multiple instances.
+  Suffix of the IPC socket paths between the API server and the schedulers, to run several servers on
+  one host.
+
+``--enable-nvtx``
+  NVTX ranges around the steps, for profiling.
+
+``--repetition-window``, ``--unroll-depth-cuda-graph``
+  Accepted for compatibility, without effect: the repetition penalty covers every generated token, and
+  the depth transformer is part of each step's graph.
+
+Rust runtime only
+-----------------
+
+``--max-context`` / ``--prefill-buckets``
+  Maximum sequence length of a request (default ``2048``) and the prefill graph sizes (default
+  ``256,512,1024,2048``, capped at the maximum context).
+
+``--max-prefills-per-step``
+  Requests prefilled together in one step (default ``1``).
+
+``--max-detok-batch-size``
+  Largest codec batch captured as a graph (default: ``--max-batch-size``); bounds codec graph memory.
+
+``--torch-compile-targets``
+  Restrict ``--enable-torch-compile`` to these LM functions (e.g. ``decode_head,decode_depth``).
+
+``--codec-gpu`` / ``--codec-sms``
+  Run the codec on another GPU (or an SM partition of one shared by several replicas).
+
+``--overlap-detok``, ``--async-engines``, ``--sm-modes``, ``--sm-mode``, ``--urgent-lane``, ``--stream-priorities``
+  Run the LM and the codec concurrently: on separate streams, or on SM partitions of the GPU, with a
+  high-priority lane for first audio chunks (:ref:`runtimes:running the lm and the codec concurrently`).
+
+``--urgent-max-batch``
+  Largest urgent-lane batch (default ``8``).
+
+``--lm-segments whole|depth|layers:<k>``, ``--gate none|depth|layer:<i>``
+  Capture Qwen3-TTS steps in segments (before the depth transformer, or in groups of ``k`` layers), and
+  start codec batches only once the LM step reaches the named segment.
+
+``--dec-batch``, ``--dec-max-batch``, ``--dec-flush-ms``, ``--dec-urgent-ms``
+  Codec batching of the asynchronous engine: the ready chunks a batch waits for (default ``0``: none), the
+  largest batch without urgent chunks (default ``0``: the largest captured), how close a playback deadline
+  flushes a partial batch (default ``50`` ms), and how close makes a chunk urgent (default ``100`` ms).
+
+``--prefill-exclusive``, ``--urgent-exclusive``, ``--slack-urgency``, ``--time-share``
+  Asynchronous-engine variants: prefills never overlap codec batches; urgent codec batches run on all SMs
+  while the LM waits; first chunks are scheduled by deadline (``--deadline-startup-ms``) instead of always
+  urgent; LM steps and codec batches alternate on the whole GPU.
+
+``--deadline-startup-ms``, ``--deadline-lm-step-ms``, ``--deadline-codec-ms``, ``--deadline-prefill-ms``, ``--deadline-max-prefill-deferral-ms``, ``--deadline-max-pending-chunks``
+  First-audio target and cost estimates of the ``deadline`` policy (calibrate per model and GPU), the
+  longest prefill deferral, and the number of audio chunks waiting for the codec at which a request's LM
+  steps pause (``0``, the default: never).
+
+``--bench-requests N`` (with ``--bench-text``, ``--bench-audio``, ``--bench-kwargs``, ``--bench-out``)
+  Run N concurrent requests without HTTP, report their timings, optionally write their audio, and exit.
+
+``--trace-dir``
+  Write the GPU time of every graph launch and every scheduling decision as JSON lines.
+
+``--prompt-builder python|template``
+  Build prompts with the program's ``preprocess`` (or the template builder) instead of the model's Rust
+  prompt builder: for bringing up a model, or checking a Rust builder against Python
+  (:doc:`adding-a-model`).
+
+``vox-serve --runtime rust --help`` and ``vox-serve --runtime python --help`` list every flag;
+``rust/docs/v2_runtime_design.md`` describes the asynchronous engine.

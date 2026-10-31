@@ -7,7 +7,7 @@ Step-Audio-2-Mini is a speech-to-speech (STS) model developed by StepFun, featur
 Start the server:
 
 ```bash
-python -m vox_serve.launch --model stepfun-ai/Step-Audio-2-mini --port 8000
+vox-serve --model stepfun-ai/Step-Audio-2-mini --port 8000
 ```
 
 ### Text-to-Speech
@@ -121,7 +121,7 @@ curl -X POST "http://localhost:8000/generate" \
 ## CLI Options
 
 ```bash
-python -m vox_serve.launch \
+vox-serve \
   --model stepfun-ai/Step-Audio-2-mini \
   --port 8000 \
   --temperature 0.7 \
