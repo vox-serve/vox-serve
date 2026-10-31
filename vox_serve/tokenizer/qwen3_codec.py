@@ -1126,10 +1126,15 @@ class EuclideanCodebook(nn.Module):
         self.cluster_usage = nn.Parameter(torch.ones(codebook_size))
         self.embedding_sum = nn.Parameter(torch.zeros(codebook_size, dim))
 
+        self._embedding: Optional[torch.Tensor] = None
+
     def decode(self, codes: torch.Tensor) -> torch.Tensor:
-        embedding = self.embedding_sum / self.cluster_usage.clamp(min=self.epsilon)[:, None]
-        quantized = F.embedding(codes, embedding)
-        return quantized
+        # The normalized table only changes with the weights: compute it once instead of
+        # renormalizing all 2048 x 256 entries on every call (inference only).
+        if self._embedding is None or self._embedding.device != self.embedding_sum.device:
+            with torch.no_grad():
+                self._embedding = self.embedding_sum / self.cluster_usage.clamp(min=self.epsilon)[:, None]
+        return F.embedding(codes, self._embedding)
 
 
 class VectorQuantization(nn.Module):

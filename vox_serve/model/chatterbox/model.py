@@ -1,7 +1,6 @@
 from dataclasses import dataclass
-from typing import Any, List, Union
+from typing import Union
 
-import librosa
 import torch
 from huggingface_hub import hf_hub_download
 from safetensors.torch import safe_open
@@ -10,12 +9,11 @@ from torch import nn
 from transformers import LlamaConfig
 from transformers.activations import ACT2FN
 
-from ..encoder.chatterbox import ChatterboxCondEnc, T3Cond
-from ..flashinfer_utils import FlashInferWrapper, apply_rope_pos_ids, rms_norm
-from ..requests import Request
-from ..sampling import Sampler, SamplingConfig
-from ..tokenizer.chatterbox import ChatterboxDecoder
-from .base import BaseLM, PreprocessOutput
+from ...encoder.chatterbox import ChatterboxCondEnc, T3Cond
+from ...flashinfer_utils import FlashInferWrapper, apply_rope_pos_ids, rms_norm
+from ...sampling import SamplingConfig
+from ...tokenizer.chatterbox import ChatterboxDecoder
+from ..base import BaseLM
 
 
 class ChatterboxConfig:
@@ -524,37 +522,9 @@ class ChatterboxModel(BaseLM):
         return 21120
 
     @property
-    def supports_audio_input(self) -> bool:
-        """Indicates if the model accepts audio input."""
-        return True
-
-    @property
-    def needs_watermarking(self) -> bool:
-        """Indicates if the model requires watermarking."""
-        return True
-
-    @property
-    def watermarker_type(self) -> str:
-        """Indicates the watermarker type to use."""
-        return "parth"
-
-    @property
-    def needs_input_features(self) -> bool:
-        """Indicates if the model requires input_features."""
-        return True
-
-    @property
-    def needs_input_masks(self) -> bool:
-        """Indicates if the model requires input_masks."""
-        return True
-
-    @property
     def vocab_size(self) -> int:
         """Vocabulary size of the model."""
         return self.model.config.speech_tokens_dict_size
-
-    def is_stop_id(self, token_ids: List[int]) -> bool:
-        return token_ids[0] == self.stop_token_id
 
     def _load_tokenizer(self, tokenizer_path):
         """Load tokenizer from local path or HuggingFace hub"""
@@ -601,214 +571,6 @@ class ChatterboxModel(BaseLM):
             text += "."
 
         return text
-
-    def _prepare_conditionals(self, wav_fpath, exaggeration=0.5):
-        ## Load reference wav
-        s3gen_ref_wav, _sr = librosa.load(wav_fpath, sr=self.S3GEN_SR)
-
-        ref_16k_wav = librosa.resample(s3gen_ref_wav, orig_sr=self.S3GEN_SR, target_sr=self.S3_SR)
-
-        s3gen_ref_wav = s3gen_ref_wav[:self.DEC_COND_LEN]
-        s3gen_ref_dict = self.s3gen.embed_ref(s3gen_ref_wav, self.S3GEN_SR, device=self.device)
-
-        # Speech cond prompt tokens
-        if plen := self.t3.hp.speech_cond_prompt_len:
-            s3_tokzr = self.s3gen.tokenizer
-            t3_cond_prompt_tokens, _ = s3_tokzr.forward([ref_16k_wav[:self.ENC_COND_LEN]], max_len=plen)
-            t3_cond_prompt_tokens = torch.atleast_2d(t3_cond_prompt_tokens).to(self.device)
-
-        # Voice-encoder speaker embedding
-        ve_embed = torch.from_numpy(self.ve.embeds_from_wavs([ref_16k_wav], sample_rate=self.S3_SR))
-        ve_embed = ve_embed.mean(axis=0, keepdim=True).to(self.device)
-
-        t3_cond = T3Cond(
-            speaker_emb=ve_embed,
-            cond_prompt_speech_tokens=t3_cond_prompt_tokens,
-            emotion_adv=exaggeration * torch.ones(1, 1, 1),
-        ).to(device=self.device)
-        return Conditionals(t3_cond, s3gen_ref_dict)
-
-    def preprocess(
-        self,
-        prompt: str = None,
-        audio_path: str = None,
-        exaggeration: int = None,
-    ) -> PreprocessOutput:
-        """Prepare the prompt for the model, formatting it according to Chatterbox specifications."""
-        if audio_path:
-            # conds = self._prepare_conditionals(audio_path)
-            raise NotImplementedError("Audio conditioning not implemented yet.")
-        else:
-            conds = self.default_conds.t3.to(dtype=self.dtype)
-
-        # TODO: exaggeration handling
-        # TODO: cfg handling
-
-        if conds.cond_prompt_speech_tokens is not None and conds.cond_prompt_speech_emb is None:
-            conds.cond_prompt_speech_emb = self.model.speech_emb(conds.cond_prompt_speech_tokens) + \
-                self.model.speech_pos_emb(
-                    torch.arange(0, conds.cond_prompt_speech_tokens.shape[1], device=self.device)
-                )
-
-        cond_emb = self.model.cond_enc(conds)[0]
-
-        prompt = self._punc_norm(prompt)
-        prompt = prompt.replace(" ", "[SPACE]")
-        input_ids = self.text_tokenizer.encode(prompt)
-        input_ids = [0] * cond_emb.shape[0] + [self.start_token_id] + input_ids.ids + [
-            self.stop_token_id,
-            self.start_speech_token_id,
-            self.start_speech_token_id, # following official implementation
-        ]
-        input_ids = torch.tensor(input_ids, device=self.device).view(-1, 1)
-
-        # 1 for audio, 0 for else
-        input_masks = torch.zeros(
-            input_ids.shape[0],
-            self.n_codebooks,
-            device=self.device,
-            dtype=torch.bool,
-        )
-
-        input_features = torch.zeros(
-            input_ids.shape[0],
-            self.model.config.hidden_size,
-            device=self.device,
-            dtype=self.dtype,
-        )
-        input_features[:cond_emb.shape[0]] = cond_emb
-
-        text_embeds = self.model.text_emb(
-            torch.clamp(
-                input_ids[cond_emb.shape[0]:-2, 0], 0, self.model.config.text_tokens_dict_size - 1,
-            )
-        )
-        text_embeds = text_embeds + self.model.text_pos_emb(torch.arange(0, text_embeds.shape[0], device=self.device))
-        input_features[cond_emb.shape[0] : cond_emb.shape[0] + text_embeds.shape[0]] = text_embeds
-
-        audio_embeds = self.model.speech_emb(
-            torch.clamp(input_ids[-2:, 0], 0, self.model.config.speech_tokens_dict_size - 1)
-        )
-        audio_embeds = audio_embeds + self.model.speech_pos_emb(torch.zeros(2, device=self.device, dtype=torch.long))
-        input_features[-2:] = audio_embeds
-
-        # Create repetition cache if repetition penalty is enabled
-        repetition_cache = None
-        config = self.default_sampling_config
-        if (config.repetition_penalty is not None and
-            config.repetition_window is not None and
-            config.repetition_penalty != 1.0):
-            repetition_cache = torch.zeros(
-                config.repetition_window if config.repetition_window > 0 else 1,
-                self.n_codebooks,
-                self.vocab_size,
-                dtype=torch.bool,
-                device=self.device,
-            )
-
-        return PreprocessOutput(
-            input_tokens=input_ids,
-            repetition_cache=repetition_cache,
-            input_masks=input_masks,
-            input_features=input_features,
-        )
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        position_ids: torch.Tensor,
-        attn_wrapper: FlashInferWrapper,
-        kv_cache: torch.Tensor,
-        input_masks: torch.Tensor,
-        input_features: torch.Tensor,
-        **kwargs: Any,
-    ) -> torch.Tensor:
-        """Forward pass through the model."""
-        # text_embeds = self.model.text_emb(
-        #     torch.clamp(input_ids[:, 0], 0, self.model.config.text_tokens_dict_size - 1)
-        # )
-        # text_embeds = text_embeds + self.model.text_pos_emb(position_ids)
-
-        audio_embeds = self.model.speech_emb(
-            torch.clamp(input_ids[:, 0], 0, self.model.config.speech_tokens_dict_size - 1)
-        )
-        audio_embeds = audio_embeds + self.model.speech_pos_emb(
-            torch.clamp(position_ids - 45, 0, self.model.config.max_speech_tokens)
-        )
-        # NOTE (keisuke): subtracting the length of default prompt (45) from position_ids
-        # since the position id count is independent for text and speech tokens in Chatterbox model.
-        # To support custom prompts, we need a way to adjust position ids dynamically.
-
-        inputs_embeds = torch.where(input_masks, audio_embeds, input_features)
-
-        logits = self.model(
-            inputs_embeds=inputs_embeds,
-            position_ids=position_ids,
-            attn_wrapper=attn_wrapper,
-            kv_cache=kv_cache,
-        )
-
-        return logits[:, None, :]  # add codebook dimension
-
-    def sampling(
-        self,
-        logits: torch.Tensor,
-        requests: List[Request],
-        sampling_params: SamplingConfig | None = None,
-        repetition_cache: torch.Tensor | None = None,
-        cfg_scale: float | None = None,
-        **kwargs,
-    ) -> torch.Tensor:
-        if sampling_params is None:
-            sampling_params = self.default_sampling_config
-
-        if repetition_cache is not None:
-            logits = Sampler.apply_repetition_penalty(
-                logits, repetition_cache, sampling_params.repetition_penalty
-            )
-
-        output_ids = Sampler.run_sampling(logits.view(-1, self.vocab_size), config=sampling_params)
-        output_ids = output_ids.view(logits.shape[0], logits.shape[1])
-
-        if repetition_cache is not None:
-            Sampler.update_repetition_penalty_cache(
-                repetition_cache,
-                output_ids,
-                sampling_params.repetition_window,
-            )
-
-        for i, req in enumerate(requests):
-            req.input_tokens = output_ids[i : i + 1]
-
-            req.input_masks = req.input_masks[:1].zero_() + 1
-            req.input_features = req.input_features[:1].zero_()
-
-        async def update_req_states():
-            stop_mask = output_ids[:, 0] == self.stop_speech_token_id
-            # SOS: speech_vocab_size, EOS: speech_vocab_size + 1
-            audio_mask = (output_ids[:, 0] != self.speech_vocab_size) & \
-                         (output_ids[:, 0] != self.speech_vocab_size + 1) & \
-                         (output_ids[:, 0] < self.speech_vocab_size)
-
-            for i, req in enumerate(requests):
-                req.lm_output_tokens.append(output_ids[i : i + 1])
-                if audio_mask[i] and not stop_mask[i]:
-                    req.lm_output_audio_tokens.append(output_ids[i : i + 1])
-                if stop_mask[i]:
-                    req.done_lm_generation = True
-                    req.finish_reason = "stop_id_encountered"
-                if req.next_position_id > self.max_tokens:
-                    req.done_lm_generation = True
-                    req.finish_reason = "max_tokens_reached"
-
-            if repetition_cache is not None:
-                # Update repetition cache in requests
-                for i, req in enumerate(requests):
-                    req.repetition_cache = repetition_cache[i]
-
-        task = update_req_states()
-
-        return output_ids, task
 
     def postprocess(self, token_ids: torch.Tensor):
         """Convert token IDs to audio bytes."""
