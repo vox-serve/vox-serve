@@ -1,4 +1,3 @@
-from .base import ModelWorker
-from .cuda_graph_worker import CudaGraphWorker
+from .program_worker import ProgramWorker
 
-__all__ = ["ModelWorker", "CudaGraphWorker"]
+__all__ = ["ProgramWorker"]

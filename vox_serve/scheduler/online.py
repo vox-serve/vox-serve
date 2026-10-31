@@ -2,7 +2,6 @@ import time
 from typing import List
 
 from ..requests import Request
-from ..worker import CudaGraphWorker
 from .base import Scheduler
 
 
@@ -22,13 +21,8 @@ class OnlineScheduler(Scheduler):
         lm_requests = []
 
         # Get worker limitations
-        if isinstance(self.model_worker, CudaGraphWorker):
-            max_prefill_batch_size = self.model_worker.prefill_graph_batch_size
-            max_seq_len = max(self.model_worker.cuda_graph_seq_len_buckets)
-        else:
-            # Fallback for non-CUDA graph worker
-            max_prefill_batch_size = self.max_batch_size
-            max_seq_len = 1024  # Default assumption
+        max_prefill_batch_size = self.model_worker.prefill_graph_batch_size
+        max_seq_len = max(self.model_worker.cuda_graph_seq_len_buckets)
 
         # Separate prefill and decode requests based on criticality
         # (prefill requests are always critical)
@@ -245,13 +239,11 @@ class OnlineScheduler(Scheduler):
     def _prepare_requests(self):
         super()._prepare_requests()
 
-        # Update pressing status for all streaming requests
         self._update_pressing_status()
 
     async def _prepare_requests_async(self):
         await super()._prepare_requests_async()
 
-        # Update pressing status for all streaming requests
         self._update_pressing_status()
 
     def _calculate_chunk_duration(self, audio_chunk: bytes) -> float:
@@ -265,17 +257,18 @@ class OnlineScheduler(Scheduler):
 
     def _update_pressing_status(self):
         """
-        Update the pressing status for all streaming requests based on playback timing.
-        A request is pressing if:
+        Update the pressing status for all requests.
+        A streaming request is pressing if:
         1. No chunk has been generated yet, or
         2. The latest chunk is already started playing at the client side
+        A non-streaming request is pressing once its tokens are all generated: its audio is only decoded
+        together with pressing chunks, so it would otherwise never be decoded when no stream is pressing.
         """
         current_time = time.time()
 
         for req in self.active_requests:
             if not req.is_streaming:
-                # Non-streaming requests are never pressing
-                req.is_pressing = False
+                req.is_pressing = req.done_lm_generation
                 continue
 
             # If no chunks have been sent yet, the request is pressing

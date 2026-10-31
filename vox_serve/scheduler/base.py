@@ -10,7 +10,7 @@ import zmq.asyncio
 from ..requests import Request
 from ..sampling import SamplingConfig
 from ..utils import get_logger
-from ..worker import CudaGraphWorker, ModelWorker
+from ..worker import ProgramWorker
 
 
 class Scheduler:
@@ -41,6 +41,7 @@ class Scheduler:
         dp_rank: int = 0,
         dp_size: int = 1,
         detokenize_interval: int = None,
+        program_options: dict = None,
     ):
         self.device = device
         self.max_batch_size = max_batch_size
@@ -61,45 +62,32 @@ class Scheduler:
 
         self.logger.info(f"Using {'async' if async_scheduling else 'sync'} scheduling mode")
 
-        # Choose worker based on user configuration
-        worker_kwargs = {
-            "model_name": model_name_or_path,
-            "max_batch_size": max_batch_size,
-            "top_p": top_p,
-            "top_k": top_k,
-            "min_p": min_p,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "repetition_penalty": repetition_penalty,
-            "repetition_window": repetition_window,
-            "cfg_scale": cfg_scale,
-            "greedy": greedy,
-            "max_num_pages": max_num_pages,
-            "page_size": page_size,
-            "enable_nvtx": enable_nvtx,
-            "enable_torch_compile": enable_torch_compile,
-            "unroll_depth_cuda_graph": unroll_depth_cuda_graph,
-            "dp_rank": dp_rank,
-            "dp_size": dp_size,
-            "detokenize_interval": detokenize_interval,
-        }
-
-        # Simplified worker selection logic
-        if enable_disaggregation:
-            worker_kwargs["detokenizer_device"] = "cuda:1"
-
-        if enable_cuda_graph:
-            opt_text = " with disaggregation optimization" if enable_disaggregation else " with CUDA graph optimization"
-            self.logger.info(f"Using CudaGraphWorker{opt_text}")
-            self.model_worker = CudaGraphWorker(**worker_kwargs)
-        else:
-            opt_text = (
-                " with disaggregation optimization"
-                if enable_disaggregation
-                else " without CUDA graph optimization"
-            )
-            self.logger.info(f"Using ModelWorker{opt_text}")
-            self.model_worker = ModelWorker(**worker_kwargs)
+        # The worker runs the model's program (vox_serve.model.<model>.program)
+        self.logger.info(f"Using ProgramWorker{'' if enable_cuda_graph else ' without CUDA graphs'}")
+        self.model_worker = ProgramWorker(
+            model_name=model_name_or_path,
+            max_batch_size=max_batch_size,
+            top_p=top_p,
+            top_k=top_k,
+            min_p=min_p,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            repetition_penalty=repetition_penalty,
+            repetition_window=repetition_window,
+            cfg_scale=cfg_scale,
+            greedy=greedy,
+            max_num_pages=max_num_pages,
+            page_size=page_size,
+            enable_cuda_graph=enable_cuda_graph,
+            enable_nvtx=enable_nvtx,
+            enable_torch_compile=enable_torch_compile,
+            unroll_depth_cuda_graph=unroll_depth_cuda_graph,
+            detokenizer_device="cuda:1" if enable_disaggregation else None,
+            dp_rank=dp_rank,
+            dp_size=dp_size,
+            detokenize_interval=detokenize_interval,
+            program_options=program_options,
+        )
 
         self.active_requests: List[Request] = []
 
@@ -243,13 +231,8 @@ class Scheduler:
         lm_requests = []
 
         # Get worker limitations
-        if isinstance(self.model_worker, CudaGraphWorker):
-            max_prefill_batch_size = self.model_worker.prefill_graph_batch_size
-            max_seq_len = max(self.model_worker.cuda_graph_seq_len_buckets)
-        else:
-            # Fallback for non-CUDA graph worker
-            max_prefill_batch_size = self.max_batch_size
-            max_seq_len = 1024  # Default assumption
+        max_prefill_batch_size = self.model_worker.prefill_graph_batch_size
+        max_seq_len = max(self.model_worker.cuda_graph_seq_len_buckets)
 
         # Separate prefill and decode requests
         prefill_requests = []
