@@ -23,7 +23,7 @@ import torch.nn.functional as F
 
 from ...flashinfer_utils import apply_rope_pos_ids
 from ...rt.core import Arena, RtAttention
-from ...rt.program import LMProgram
+from ...rt.program import LMProgram, pcm16
 from ...rt.prompt import Prompt
 from ...utils import download_audio_from_url, get_logger
 from .model import Qwen3TTSModel
@@ -321,7 +321,7 @@ class Qwen3TTSProgram(LMProgram):
         for s, w in zip(self._state_t, work_t, strict=True):
             s.index_copy_(0, slots, w)
         audio = audio.reshape(bd, self.detok_samples)
-        out["audio"][:bd].copy_((audio.float() * 32767).to(torch.int16))
+        out["audio"][:bd].copy_(pcm16(audio))
 
     # ---- voice cloning (Base) ------------------------------------------------------------------
 

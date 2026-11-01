@@ -35,7 +35,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from ...rt.core import Arena, EngineSpecBuilder, RtAttention
-from ...rt.program import TOKEN_AUDIO, TOKEN_STOP, LMProgram
+from ...rt.program import TOKEN_AUDIO, TOKEN_STOP, LMProgram, pcm16
 from ...rt.prompt import Prompt
 from ...tokenizer.higgs import CODEBOOK_SIZE, HOP, SAMPLE_RATE, HiggsAudioTokenizer
 from ...utils import get_logger
@@ -329,10 +329,8 @@ class HiggsTTSProgram(LMProgram):
         j = torch.arange(CORE * HOP, device=dd)
         pcm = wav.gather(1, (e0[:, None] * HOP + j).clamp(max=WINDOW * HOP - 1))
         n = (e1 - e0) * HOP
-        pcm = pcm.clamp(-1, 1) * (j < n[:, None])
         audio = out["audio"][:bd]
-        # Truncation toward zero, matching numpy's (x * 32767).astype(np.int16).
-        audio[:, :-1].copy_((pcm * 32767).to(torch.int16))
+        audio[:, :-1].copy_(pcm16(pcm * (j < n[:, None])))
         audio[:, -1].copy_(n.to(torch.int16))
 
     # ---- meta -------------------------------------------------------------------------------------

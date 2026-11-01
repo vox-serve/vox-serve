@@ -20,7 +20,7 @@ from huggingface_hub import hf_hub_download
 
 from ...rt.core import Arena, RtAttention
 from ...rt.kernels import ops
-from ...rt.program import LMProgram
+from ...rt.program import LMProgram, pcm16
 from ...rt.prompt import Prompt
 from ...utils import get_logger
 from .model import (
@@ -198,7 +198,7 @@ class VoxtralTTSProgram(LMProgram):
         codes = (full - self.n_special).clamp(min=0)
         audio = self.model.audio_tokenizer.decode(codes.transpose(1, 2), dtype=self.dtype)
         audio = audio[..., LEFT_CONTEXT * self.samples_per_frame :].reshape(bd, self.detok_samples)
-        out["audio"][:bd].copy_((audio.float() * 32767).to(torch.int16))
+        out["audio"][:bd].copy_(pcm16(audio))
 
     def preprocess(self, text: str, audio_path: Optional[str], model_kwargs: Dict[str, Any]) -> Prompt:
         """``[BOS] [BEGIN_AUDIO] [AUDIO]*N [NEXT_AUDIO_TEXT] text [REPEAT_AUDIO_TEXT] [BEGIN_AUDIO]``;
