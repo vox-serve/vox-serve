@@ -146,7 +146,7 @@ By default a step runs the codec, then the LM, on one stream. These flags overla
   selects other graphs. For example, ``--sm-modes 32 --sm-mode 1`` gives the codec 32 SMs and the LM the
   rest; ``--sm-mode adaptive`` picks the partition from latencies measured while serving.
 - ``--urgent-lane``: a third, high-priority codec lane on all SMs for first chunks and chunks close to
-  their playback deadline (of streaming requests; Qwen3-TTS, Orpheus, Zonos, CSM, CosyVoice3).
+  their playback deadline (of streaming requests; Qwen3-TTS, Orpheus, Zonos, CSM, CosyVoice3, XTTS-v2).
 - ``--lm-segments depth`` / ``layers:<k>`` with ``--gate``: Qwen3-TTS steps captured in segments, so codec
   batches can start at a segment boundary (with ``--async-engines``).
 
