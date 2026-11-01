@@ -1,6 +1,6 @@
 [package]
 name = "vox-rt"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Rust serving runtime for vox-serve: HTTP, scheduling and CUDA-graph execution with no Python on the hot path"
 license = "Apache-2.0"

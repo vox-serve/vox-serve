@@ -1,6 +1,6 @@
 """VoxServe: A serving system for Speech Language Models."""
 
-__version__ = "0.0.1"
+__version__ = "0.2.0"
 __author__ = "VoxServe Team"
 __description__ = "A serving system for speech language models."
 

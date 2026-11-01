@@ -1,8 +1,8 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/_static/images/logo-dark.png">
-    <source media="(prefers-color-scheme: light)" srcset="docs/_static/images/logo-light.png">
-    <img src="docs/_static/images/logo-dark.png" alt="VoxServe Logo" width="320" />
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/vox-serve/vox-serve/main/docs/_static/images/logo-dark.png">
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/vox-serve/vox-serve/main/docs/_static/images/logo-light.png">
+    <img src="https://raw.githubusercontent.com/vox-serve/vox-serve/main/docs/_static/images/logo-dark.png" alt="VoxServe Logo" width="320" />
   </picture>
 </p>
 
@@ -61,7 +61,7 @@ curl -X POST "http://localhost:<port-number>/generate" \
   -F "text=Hello world" -F "@input.wav" -F "streaming=true" -o output.wav
 ```
 
-See the [`examples/`](examples/) directory for more usage examples.
+See the [`examples/`](https://github.com/vox-serve/vox-serve/tree/main/examples) directory for more usage examples.
 
 ## Supported Models
 
@@ -111,6 +111,6 @@ Qwen3-TTS supports incremental text input, enabling seamless integration with LL
 
 VoxServe includes a web-based playground for interactive testing. Use the browser UI to manage servers, generate audio, and view real-time logs.
 
-![VoxServe Playground](examples/playground/static/images/playground-sample.png)
+![VoxServe Playground](https://raw.githubusercontent.com/vox-serve/vox-serve/main/examples/playground/static/images/playground-sample.png)
 
-See [examples/playground/README.md](examples/playground/README.md) for setup instructions.
+See [examples/playground/README.md](https://github.com/vox-serve/vox-serve/blob/main/examples/playground/README.md) for setup instructions.
