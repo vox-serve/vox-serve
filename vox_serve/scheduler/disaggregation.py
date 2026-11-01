@@ -96,6 +96,8 @@ class DisaggregationScheduler(Scheduler):
 
             # Prepare LM inputs (no detokenize requests needed here)
             lm_inputs = self.model_worker.prepare_lm_inputs(lm_requests, [])
+            for message in self._accepted_messages(lm_requests):
+                await self.result_socket.send(message)
 
             # Run LM forward pass
             if lm_inputs is not None and lm_inputs["is_prefill"]:
