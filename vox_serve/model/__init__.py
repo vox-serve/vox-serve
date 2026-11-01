@@ -29,6 +29,8 @@ _PROGRAMS = {
     "zyphra/zonos": ("zonos", "ZonosProgram"),
     "voxtral-tts": ("voxtral_tts", "VoxtralTTSProgram"),
     "mistralai/voxtral-4b-tts": ("voxtral_tts", "VoxtralTTSProgram"),
+    "xtts": ("xtts", "XTTSProgram"),
+    "coqui/xtts-v2": ("xtts", "XTTSProgram"),
 }
 
 

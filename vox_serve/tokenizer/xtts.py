@@ -1,3 +1,15 @@
+"""XTTS-v2 text tokenizer: per-language text normalization (numbers, abbreviations, symbols; romanization
+for Chinese, Japanese and Korean) and the model's BPE vocabulary, with ``[lang]`` and ``[SPACE]`` markers.
+
+Adapted from Coqui TTS (https://github.com/coqui-ai/TTS), ``TTS/tts/layers/xtts/tokenizer.py``, which is
+licensed under the Mozilla Public License 2.0. This file remains under the MPL-2.0: you can obtain a copy of
+the license at http://mozilla.org/MPL/2.0/.
+
+Optional packages, imported when a text needs them: ``num2words`` (numbers, every language), ``pypinyin``
+(Chinese), ``cutlet`` (Japanese) and ``ko-speech-tools`` (Korean). Chinese numbers are left as digits (Coqui's
+``zh_num2words`` is not ported).
+"""
+
 import logging
 import os
 import re
@@ -6,10 +18,7 @@ from functools import cached_property
 from typing import Any
 
 import torch
-from ko_speech_tools import hangul_romanize
-from num2words import num2words
 from tokenizers import Tokenizer
-
 
 logger = logging.getLogger(__name__)
 
@@ -498,6 +507,15 @@ _dot_number_re = re.compile(r"\b\d{1,3}(.\d{3})*(\,\d+)?\b")
 _decimal_number_re = re.compile(r"([0-9]+[.,][0-9]+)")
 
 
+def num2words(*args, **kwargs):
+    """``num2words.num2words``, imported on first use."""
+    try:
+        from num2words import num2words as _num2words
+    except ImportError as e:
+        raise ImportError("XTTS needs num2words to read numbers: pip install num2words") from e
+    return _num2words(*args, **kwargs)
+
+
 def _remove_commas(m):
     text = m.group(0)
     if "," in text:
@@ -557,7 +575,7 @@ def _expand_number(m, lang="en"):
 
 def expand_numbers_multilingual(text, lang="en"):
     if lang == "zh":
-        text = zh_num2words()(text)
+        pass  # digits stay digits (Coqui converts them with its zh_num2words module, not ported)
     else:
         if lang in ["en", "ru"]:
             text = re.sub(_comma_number_re, _remove_commas, text)
@@ -567,7 +585,7 @@ def expand_numbers_multilingual(text, lang="en"):
             text = re.sub(_currency_re["GBP"], lambda m: _expand_currency(m, lang, "GBP"), text)
             text = re.sub(_currency_re["USD"], lambda m: _expand_currency(m, lang, "USD"), text)
             text = re.sub(_currency_re["EUR"], lambda m: _expand_currency(m, lang, "EUR"), text)
-        except:
+        except Exception:  # noqa: BLE001 - as in Coqui: an amount num2words cannot read stays as written
             pass
         if lang != "tr":
             text = re.sub(_decimal_number_re, lambda m: _expand_decimal_point(m, lang), text)
@@ -642,7 +660,8 @@ class VoiceBpeTokenizer:
         limit = self.char_limits.get(lang, 250)
         if len(txt) > limit:
             logger.warning(
-                "The text length exceeds the character limit of %d for language '%s', this might cause truncated audio: %s",
+                "The text length exceeds the character limit of %d for language '%s', this might cause truncated "
+                "audio: %s",
                 limit,
                 lang,
                 txt[:50] + "...",
@@ -654,6 +673,10 @@ class VoiceBpeTokenizer:
             if lang == "zh":
                 txt = chinese_transliterate(txt)
             if lang == "ko":
+                try:
+                    from ko_speech_tools import hangul_romanize
+                except ImportError as e:
+                    raise ImportError("XTTS needs ko-speech-tools for Korean: pip install ko-speech-tools") from e
                 txt = hangul_romanize(txt)
         elif lang == "ja":
             txt = japanese_cleaners(txt, self.katsu)

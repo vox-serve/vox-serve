@@ -1,34 +1,29 @@
+"""XTTS-v2 modules other than the GPT: the HiFi-GAN vocoder conditioned on a speaker embedding
+(``HifiDecoder``), the ResNet speaker encoder, and the conditioning encoder + perceiver resampler that turn a
+reference clip's mel spectrogram into the GPT's 32 conditioning latents.
+
+Adapted from Coqui TTS (https://github.com/coqui-ai/TTS): ``TTS/tts/layers/xtts/hifigan_decoder.py``,
+``latent_encoder.py`` and ``perceiver_encoder.py``, ``TTS/encoder/models/resnet.py`` and
+``TTS/vocoder/models/hifigan_generator.py``, which are licensed under the Mozilla Public License 2.0. This
+file remains under the MPL-2.0: you can obtain a copy of the license at http://mozilla.org/MPL/2.0/.
+"""
+
+import logging
+import math
+from collections import namedtuple
+from functools import wraps
+
 import torch
-from torch import nn
 import torch.nn.functional as F
+from einops import rearrange, repeat
+from einops.layers.torch import Rearrange
+from torch import einsum, nn
+from torch.nn import Conv1d, ConvTranspose1d
+from torch.nn.utils.parametrizations import weight_norm
+from torch.nn.utils.parametrize import remove_parametrizations
 
-# from TTS.utils.audio.torch_transforms import TorchSTFT
-# from base import BaseTTS, BaseEncoder
+logger = logging.getLogger(__name__)
 
-import os
-import sys
-from pathlib import Path
-from typing import Any, Callable, Dict, Union
-
-import torch
-import fsspec
-
-class BaseTTS(nn.Module):
-    def __init__(self, config, ap=None, tokenizer=None):
-        super().__init__()
-        self.config = config
-        self.args = getattr(config, "model_args", config)
-        self.ap = ap
-        self.tokenizer = tokenizer
-        self.speaker_manager = None
-        self.language_manager = None
-
-    def load_checkpoint(self, config, checkpoint_dir, **kwargs):
-        pass
-
-    @property
-    def device(self):
-        return next(self.parameters()).device
 
 class PreEmphasis(torch.nn.Module):
     # Buffer name must be `filter` to match the xtts-v2 checkpoint keys.
@@ -69,74 +64,10 @@ class BaseEncoder(nn.Module):
 
     def get_torch_mel_spectrogram_class(self, audio_config):
         return TorchMelSpectrogram()
-        
+
     def inference(self, x, l2_norm=True):
-        return self.forward(x, l2_norm)        
+        return self.forward(x, l2_norm)
 
-def get_user_data_dir(appname: str) -> Path:
-    """
-    Return OS-specific user data directory for caching.
-    """
-    if sys.platform == "win32":
-        import winreg
-
-        key = winreg.OpenKey(
-            winreg.HKEY_CURRENT_USER,
-            r"Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders",
-        )
-        dir_, _ = winreg.QueryValueEx(key, "Local AppData")
-        ans = Path(dir_).resolve(strict=False)
-
-    elif sys.platform == "darwin":
-        ans = Path("~/Library/Application Support/").expanduser()
-
-    else:
-        ans = Path.home().joinpath(".local/share")
-
-    path = ans.joinpath(appname)
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def load_fsspec(
-    path: str,
-    map_location: Union[
-        str,
-        Callable,
-        torch.device,
-        Dict[Union[str, torch.device], Union[str, torch.device]],
-    ] = None,
-    cache: bool = True,
-    **kwargs,
-) -> Any:
-    """
-    Like torch.load but supports remote paths via fsspec.
-
-    Supports:
-    - local files
-    - http(s)
-    - s3
-    - gcs
-    - hf hub
-    - any fsspec backend
-
-    If cache=True, remote files are cached locally.
-    """
-
-    is_local = os.path.isdir(path) or os.path.isfile(path)
-
-    if cache and not is_local:
-        with fsspec.open(
-            f"filecache::{path}",
-            filecache={"cache_storage": str(get_user_data_dir("tts_cache"))},
-            mode="rb",
-        ) as f:
-            return torch.load(f, map_location=map_location, **kwargs)
-
-    else:
-        with fsspec.open(path, "rb") as f:
-            return torch.load(f, map_location=map_location, **kwargs)
-            
 
 class SELayer(nn.Module):
     def __init__(self, channel, reduction=8):
@@ -332,17 +263,7 @@ class ResNetSpeakerEncoder(BaseEncoder):
 
 
 # adopted from https://github.com/jik876/hifi-gan/blob/master/models.py
-import logging
 
-import torch
-from torch import nn
-from torch.nn import Conv1d, ConvTranspose1d
-from torch.nn import functional as F
-from torch.nn.utils.parametrizations import weight_norm
-from torch.nn.utils.parametrize import remove_parametrizations
-# from trainer.io import load_fsspec
-
-logger = logging.getLogger(__name__)
 
 LRELU_SLOPE = 0.1
 
@@ -426,7 +347,7 @@ class ResBlock1(torch.nn.Module):
         Shapes:
             x: [B, C, T]
         """
-        for c1, c2 in zip(self.convs1, self.convs2):
+        for c1, c2 in zip(self.convs1, self.convs2, strict=False):
             xt = F.leaky_relu(x, LRELU_SLOPE)
             xt = c1(xt)
             xt = F.leaky_relu(xt, LRELU_SLOPE)
@@ -517,9 +438,10 @@ class HifiganGenerator(torch.nn.Module):
         r"""HiFiGAN Generator with Multi-Receptive Field Fusion (MRF)
 
         Network:
-            x -> lrelu -> upsampling_layer -> resblock1_k1x1 -> z1 -> + -> z_sum / #resblocks -> lrelu -> conv_post_7x1 -> tanh -> o
+            x -> lrelu -> upsampling_layer -> resblock1_k1x1 -> z1 -> + -> z_sum / #resblocks -> lrelu
                                                  ..          -> zI ---|
                                               resblockN_kNx1 -> zN ---'
+            -> conv_post_7x1 -> tanh -> o
 
         Args:
             in_channels (int): number of input tensor channels.
@@ -547,7 +469,7 @@ class HifiganGenerator(torch.nn.Module):
         resblock = ResBlock1 if resblock_type == "1" else ResBlock2
         # upsampling layers
         self.ups = nn.ModuleList()
-        for i, (u, k) in enumerate(zip(upsample_factors, upsample_kernel_sizes)):
+        for i, (u, k) in enumerate(zip(upsample_factors, upsample_kernel_sizes, strict=False)):
             self.ups.append(
                 weight_norm(
                     ConvTranspose1d(
@@ -563,7 +485,7 @@ class HifiganGenerator(torch.nn.Module):
         self.resblocks = nn.ModuleList()
         for i in range(len(self.ups)):
             ch = upsample_initial_channel // (2 ** (i + 1))
-            for _, (k, d) in enumerate(zip(resblock_kernel_sizes, resblock_dilation_sizes)):
+            for _, (k, d) in enumerate(zip(resblock_kernel_sizes, resblock_dilation_sizes, strict=False)):
                 self.resblocks.append(resblock(ch, k, d))
         # post convolution layer
         self.conv_post = weight_norm(Conv1d(ch, out_channels, 7, 1, padding=3, bias=conv_post_bias))
@@ -645,19 +567,6 @@ class HifiganGenerator(torch.nn.Module):
             l.remove_weight_norm()
         remove_parametrizations(self.conv_pre, "weight")
         remove_parametrizations(self.conv_post, "weight")
-
-    def load_checkpoint(self, config, checkpoint_path, eval=False, cache=False):  # pylint: disable=unused-argument, redefined-builtin
-        state = load_fsspec(checkpoint_path, map_location=torch.device("cpu"), cache=cache)
-        self.load_state_dict(state["model"])
-        if eval:
-            self.eval()
-            assert not self.training
-            self.remove_weight_norm()
-
-
-import logging
-
-logger = logging.getLogger(__name__)
 
 
 class HifiDecoder(torch.nn.Module):
@@ -764,26 +673,6 @@ class HifiDecoder(torch.nn.Module):
         """
         return self.forward(c, g=g)
 
-    def load_checkpoint(self, checkpoint_path, eval=False):  # pylint: disable=unused-argument, redefined-builtin
-        state = load_fsspec(checkpoint_path, map_location=torch.device("cpu"))
-        # remove unused keys
-        state = state["model"]
-        states_keys = list(state.keys())
-        for key in states_keys:
-            if "waveform_decoder." not in key and "speaker_encoder." not in key:
-                del state[key]
-
-        self.load_state_dict(state)
-        if eval:
-            self.eval()
-            assert not self.training
-            self.waveform_decoder.remove_weight_norm()
-
-
-### Start
-import torch.nn as nn
-import torch
-import math
 
 def zero_module(module):
     """
@@ -825,6 +714,7 @@ def normalization(channels):
     assert groups > 2
     return GroupNorm32(groups, channels)
 
+
 class QKVAttentionLegacy(nn.Module):
     """
     A module which performs QKV attention. Matches legacy QKVAttention + input/output heads shaping
@@ -859,7 +749,7 @@ class QKVAttentionLegacy(nn.Module):
 
         return a.reshape(bs, -1, length)
 
-from einops import rearrange
+
 class RelativePositionBias(nn.Module):
     def __init__(self, scale, causal=False, num_buckets=32, max_distance=128, heads=8):
         super().__init__()
@@ -903,6 +793,7 @@ class RelativePositionBias(nn.Module):
         values = self.relative_attention_bias(rp_bucket)
         bias = rearrange(values, "i j h -> () h i j")
         return qk_dots + (bias * self.scale)
+
 
 class AttentionBlock(nn.Module):
     """
@@ -959,6 +850,7 @@ class AttentionBlock(nn.Module):
             return (x + h).reshape(b, c, *spatial)
         return (x_norm + h).reshape(b, c, *spatial)
 
+
 class ConditioningEncoder(nn.Module):
     def __init__(
         self,
@@ -972,7 +864,7 @@ class ConditioningEncoder(nn.Module):
         super().__init__()
         attn = []
         self.init = nn.Conv1d(spec_dim, embedding_dim, kernel_size=1)
-        for a in range(attn_blocks):
+        for _ in range(attn_blocks):
             attn.append(AttentionBlock(embedding_dim, num_attn_heads, tortoise_norm=tortoise_norm))
         self.attn = nn.Sequential(*attn)
         self.dim = embedding_dim
@@ -985,18 +877,17 @@ class ConditioningEncoder(nn.Module):
         h = self.attn(h)
         return h
 
+
 ################################ Perceiver Resampler ##########################################
-from torch import einsum, nn
-from einops import rearrange, repeat
-from einops.layers.torch import Rearrange
-from collections import namedtuple
-from functools import wraps
+
 
 def exists(val):
     return val is not None
 
+
 def default(val, d):
     return val if exists(val) else d
+
 
 def once(fn):
     called = False
@@ -1012,7 +903,8 @@ def once(fn):
     return inner
 
 
-print_once = once(print)
+print_once = once(logger.info)
+
 
 class RMSNorm(nn.Module):
     def __init__(self, dim, scale=True, dim_cond=None):
@@ -1034,6 +926,7 @@ class RMSNorm(nn.Module):
         gamma, beta = self.to_gamma_beta(cond).chunk(2, dim=-1)
         gamma, beta = map(lambda t: rearrange(t, "b d -> b 1 d"), (gamma, beta))
         return out * gamma + beta
+
 
 class Attention(nn.Module):
     def __init__(
@@ -1076,6 +969,8 @@ class Attention(nn.Module):
 
         out = rearrange(out, "b h n d -> b n (h d)")
         return self.to_out(out)
+
+
 class Attend(nn.Module):
     def __init__(self, dropout=0.0, causal=False, use_flash=False):
         super().__init__()
@@ -1204,11 +1099,12 @@ class CausalConv1d(nn.Conv1d):
         causal_padded_x = F.pad(x, (self.causal_padding, 0), value=0.0)
         return super().forward(causal_padded_x)
 
-import torch.nn.functional as F
+
 class GEGLU(nn.Module):
     def forward(self, x):
         x, gates = x.chunk(2, dim=-1)
         return x * F.gelu(gates)
+
 
 def FeedForward(dim, mult=4, causal_conv=False):
     dim_inner = int(dim * mult * 2 / 3)
@@ -1223,8 +1119,10 @@ def FeedForward(dim, mult=4, causal_conv=False):
 
     return Sequential(nn.Linear(dim, dim_inner * 2), GEGLU(), conv, nn.Linear(dim_inner, dim))
 
+
 def Sequential(*mods):
     return nn.Sequential(*filter(exists, mods))
+
 
 class PerceiverResampler(nn.Module):
     def __init__(

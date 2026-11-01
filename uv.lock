@@ -666,15 +666,6 @@ wheels = [
 ]
 
 [[package]]
-name = "ko-speech-tools"
-version = "0.1.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/41/fa/51b14366b2a1bb958fb748be67a58519ac4b5aeea0faa3b31c8431f63b2c/ko_speech_tools-0.1.0.tar.gz", hash = "sha256:dcc5af8bd9f2a9d2260dcc36617d6de65106be625958302525068e81f94b2b1d", size = 987850, upload-time = "2025-10-03T01:13:16.495Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/e8/59/f0cb1c0d5632ee647129e8272c3534554b395be013a134534fdc03e29914/ko_speech_tools-0.1.0-py3-none-any.whl", hash = "sha256:0fa57d6eb1d5a126a2f10df93dd21355298839c1048865ead1b4bb07695e3f33", size = 997279, upload-time = "2025-10-03T01:13:15.197Z" },
-]
-
-[[package]]
 name = "language-tags"
 version = "1.2.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2247,7 +2238,6 @@ dependencies = [
     { name = "httptools" },
     { name = "huggingface-hub" },
     { name = "inflect" },
-    { name = "ko-speech-tools" },
     { name = "librosa" },
     { name = "num2words" },
     { name = "numpy" },
@@ -2280,7 +2270,6 @@ requires-dist = [
     { name = "httptools", specifier = "==0.6.4" },
     { name = "huggingface-hub", specifier = "==0.34.0" },
     { name = "inflect", specifier = ">=7.4.0" },
-    { name = "ko-speech-tools", specifier = ">=0.1.0" },
     { name = "librosa", specifier = "==0.10.2.post1" },
     { name = "num2words", specifier = ">=0.5.14" },
     { name = "numpy", specifier = "==1.26.4" },
