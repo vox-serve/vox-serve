@@ -1256,10 +1256,10 @@ def signal_handler(signum, frame):
 # Kernel fusion flags: program config keys, set to true by --<key with dashes> (vox_serve/fusion).
 FUSION_FLAGS = {
     "fuse_lm": "Merge sibling q/k/v and gate/up projections of the LM into single GEMMs "
-    "(Orpheus, CSM, CosyVoice2, Chatterbox, Step-Audio-2, Voxtral)",
+    "(Orpheus, CSM, CosyVoice2, Chatterbox, Step-Audio-2, Voxtral, Higgs Audio v2)",
     "fuse_layers": "Run the LM's decoder layers with merged GEMMs and fused add+RMSNorm, q/k-norm+RoPE+KV-write "
     "and SiLU-and-mul kernels (Higgs Audio v3, CosyVoice3)",
-    "fuse_codec": "Fused codec kernels (Higgs Audio v3 DAC, CosyVoice3 HiFT and flow decoder)",
+    "fuse_codec": "Fused codec kernels (Higgs Audio v2 / v3 DAC, CosyVoice3 HiFT and flow decoder)",
     "fuse_depth": "Qwen3-TTS: run the depth transformer with merged QKV / gate-up GEMMs and grouped-query SDPA",
     "fuse_talker": "Qwen3-TTS: run the talker with merged QKV / gate-up GEMMs and fused residual add + RMSNorm",
     "compile_detok": "Fuse the detokenizer with torch.compile before capturing its graphs",

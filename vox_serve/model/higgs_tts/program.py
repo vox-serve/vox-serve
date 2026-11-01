@@ -175,6 +175,8 @@ class HiggsTTSProgram(LMProgram):
     # dt_reset marks a request's first chunk (its pre-seeded frames); the codec itself keeps no state.
     detok_stateful = True
     supports_urgent_lane = True
+    # What codes >= 1024 (BOC / EOC inside a frame) decode as.
+    special_code = 0
 
     def load(self) -> None:
         from huggingface_hub import snapshot_download
@@ -198,24 +200,7 @@ class HiggsTTSProgram(LMProgram):
         self.num_kv_heads = cfg.num_key_value_heads
         self.head_dim = cfg.head_dim
         self.text_vocab = cfg.vocab_size
-
-        self.first_frames = int(self.config.get("first_chunk_frames", 12))
-        if not 1 <= self.first_frames <= CORE:
-            raise ValueError(f"first_chunk_frames must be in [1, {CORE}]")
-        self.preseed = LEFT + CORE - self.first_frames
-        self.detok_interval = ROWS
-        self.detok_samples = CORE * HOP + 1
-
-        dd = self.detok_device
-        self.codec = HiggsAudioTokenizer.from_checkpoint(self.model_dir).to(dd)
-        codec_dtype = getattr(torch, str(self.config.get("codec_dtype", "bfloat16")))
-        self.codec.acoustic_decoder.to(codec_dtype)
-        if self.config.get("fuse_codec"):
-            from ...fusion.dac import fused_dac_decode, prepare
-
-            prepare(self.codec.acoustic_decoder)
-            self.codec.fused_decode = fused_dac_decode
-        self.undelay = (torch.arange(WINDOW)[:, None] + torch.arange(N_CB)[None]).to(dd)
+        self._init_codec(HiggsAudioTokenizer.from_checkpoint(self.model_dir))
 
         from tokenizers import Tokenizer
 
@@ -230,9 +215,29 @@ class HiggsTTSProgram(LMProgram):
             self.max_num_pages,
             self.first_frames,
             self.preseed,
-            codec_dtype,
+            self.codec_dtype,
             " (fused)" if self.codec.fused_decode is not None else "",
         )
+
+    def _init_codec(self, codec: HiggsAudioTokenizer) -> None:
+        """The codec on the detok device and the chunk geometry (shared with Higgs Audio v2)."""
+        self.first_frames = int(self.config.get("first_chunk_frames", 12))
+        if not 1 <= self.first_frames <= CORE:
+            raise ValueError(f"first_chunk_frames must be in [1, {CORE}]")
+        self.preseed = LEFT + CORE - self.first_frames
+        self.detok_interval = ROWS
+        self.detok_samples = CORE * HOP + 1
+
+        dd = self.detok_device
+        self.codec = codec.to(dd)
+        self.codec_dtype = getattr(torch, str(self.config.get("codec_dtype", "bfloat16")))
+        self.codec.acoustic_decoder.to(self.codec_dtype)
+        if self.config.get("fuse_codec"):
+            from ...fusion.dac import fused_dac_decode, prepare
+
+            prepare(self.codec.acoustic_decoder)
+            self.codec.fused_decode = fused_dac_decode
+        self.undelay = (torch.arange(WINDOW)[:, None] + torch.arange(N_CB)[None]).to(dd)
 
     # ---- LM ---------------------------------------------------------------------------------------
 
@@ -307,8 +312,12 @@ class HiggsTTSProgram(LMProgram):
             raise ValueError(f"reference audio longer than {MAX_REF_SECONDS} s")
         with _no_tf32():
             codes = self.codec.encode(wav)
-        rows = delay_pattern(codes).cpu()
+        rows = self.ref_rows(codes).cpu()
         return {"rows": rows.shape[0], "codes": rows.flatten().tolist()}
+
+    def ref_rows(self, codes: torch.Tensor) -> torch.Tensor:
+        """``[T, 8]`` reference codes -> the prompt's delayed rows."""
+        return delay_pattern(codes)
 
     # ---- detokenizer ------------------------------------------------------------------------------
 
@@ -321,7 +330,7 @@ class HiggsTTSProgram(LMProgram):
         reset = arena["dt_reset"][:bd] != 0
         dlen = arena["dt_len"][:bd].long()
         codes = rows.gather(1, self.undelay[None].expand(bd, -1, -1))  # frame i, codebook c = row i + c
-        codes = torch.where(codes >= CODEBOOK_SIZE, 0, codes)
+        codes = torch.where(codes >= CODEBOOK_SIZE, self.special_code, codes)
         frame = torch.arange(WINDOW, device=dd)[None]
         # A frame exists once all its rows do; the first chunk starts with pre-seeded frames.
         real = (frame + N_CB - 1 < dlen[:, None]) & (~reset[:, None] | (frame >= self.preseed))
