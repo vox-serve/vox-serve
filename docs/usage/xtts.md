@@ -55,7 +55,8 @@ model's stop code or after 602 codes (about 28 s of audio).
 ## Implementation Notes
 
 - The GPT runs in float16 (FlashInfer attention has no float32 kernels, and float16 keeps more precision than bfloat16
-  over its 30 layers); the conditioning encoder, speaker encoder and vocoder run in float32, as in Coqui's inference.
+  over its 30 layers); the final norm and code head, the conditioning encoder, the speaker encoder and the vocoder run
+  in float32, as in Coqui's inference.
 - The vocoder decodes windows of 24 latents (4 of context, 16 emitted, 4 of look-ahead), aligned to the global
   mel-frame grid of its 22.05 to 24 kHz resampling and zero-padded after the request's end, so the streamed audio equals
   a whole-sequence decode. The first chunk holds 8 latents (about 0.37 s of audio) and is sent after 12 generated codes.

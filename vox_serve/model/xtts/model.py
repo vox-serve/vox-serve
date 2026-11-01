@@ -103,9 +103,9 @@ class XttsGpt(nn.Module):
 
 
 class XTTSModel(BaseLM, nn.Module):
-    """The XTTS-v2 modules: GPT (``float16``: FlashInfer has no fp32 attention, and bf16 drifts audibly over
-    30 layers) and, in fp32, the conditioning encoder / perceiver (their attention overflows in fp16), the
-    speaker encoder and the HiFi-GAN vocoder."""
+    """The XTTS-v2 modules: the GPT-2 stack and embeddings in ``float16`` (FlashInfer has no fp32 attention;
+    fp16 keeps more precision than bf16 over 30 layers) and, in fp32, the final norm and code head, the
+    conditioning encoder / perceiver (their attention overflows in fp16), the speaker encoder and the vocoder."""
 
     def __init__(self, model_name: str = REPO, device: str = "cuda", audio_decoder_device: str = None):
         nn.Module.__init__(self)
@@ -166,9 +166,8 @@ class XTTSModel(BaseLM, nn.Module):
         self.eval().requires_grad_(False)
 
         self.to(self.device)
+        # final_norm and mel_head stay fp32 (the latents and logits, as Coqui computes them).
         for m in (self.gpt, self.text_embedding, self.mel_embedding, self.text_pos_embedding, self.mel_pos_embedding):
-            m.to(self.dtype)
-        for m in (self.final_norm, self.mel_head):
             m.to(self.dtype)
         self.hifigan_decoder.to(self.audio_decoder_device)
 

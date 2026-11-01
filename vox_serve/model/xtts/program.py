@@ -22,10 +22,11 @@ Coqui's Hugging Face ``generate`` sees for the prompt.
 Detokenization (stateless, windowed): a chunk is ``WINDOW`` latents starting every ``CORE``: ``LEFT`` of context,
 ``CORE`` emitted, ``AHEAD`` of look-ahead. The vocoder's two linear interpolations (latents x4, then 22.05 ->
 24 kHz) run on the global mel-frame grid, so chunk boundaries fall on whole frames (256 samples) and a chunk
-emits exactly the frames a whole-sequence decode puts there; the vocoder's receptive field (about 13 mel
-frames each side) fits in the context, so chunks match a whole-sequence decode except near the end of the
-audio (a chunk sees repeated latents where a whole decode zero-pads). The first chunk is pre-seeded so it
-emits ``first_chunk_frames`` latents. Audio rows hold up to ``CAP`` samples; the last int16 is the valid length.
+emits exactly the frames a whole-sequence decode puts there. The vocoder's receptive field (about 13 mel frames
+each side) fits in the context, and a window holding the request's end zeroes the vocoder's activations after
+it (a whole decode's zero padding), so the chunks reproduce a whole-sequence decode (~70 dB SNR). The first
+chunk is pre-seeded so it emits ``first_chunk_frames`` latents. Audio rows hold up to ``cap`` samples; the last
+int16 is the valid length.
 """
 
 import hashlib
@@ -164,10 +165,10 @@ class XTTSProgram(LMProgram):
 
     def backbone(self, hidden: torch.Tensor, pos: torch.Tensor, attn: RtAttention) -> torch.Tensor:
         m = self.model
-        return m.final_norm(m.gpt(hidden, attn, self.kv_cache))  # the latents
+        return m.final_norm(m.gpt(hidden, attn, self.kv_cache).float())  # the latents, fp32
 
     def head(self, hidden: torch.Tensor) -> torch.Tensor:
-        return self.model.mel_head(hidden).float()[:, None, :]
+        return self.model.mel_head(hidden)[:, None, :]
 
     def decode_tokens(self, hidden: torch.Tensor, arena: Arena, out_tok: torch.Tensor, n_req: int) -> None:
         k = ops()
