@@ -214,6 +214,7 @@
 <li class="toctree-l2"><a class="reference internal" href="usage/chatterbox.html">Chatterbox</a></li>
 <li class="toctree-l2"><a class="reference internal" href="usage/cosyvoice2.html">CosyVoice2</a></li>
 <li class="toctree-l2"><a class="reference internal" href="usage/qwen3-tts.html">Qwen3-TTS</a></li>
+<li class="toctree-l2"><a class="reference internal" href="usage/xtts.html">XTTS-v2</a></li>
 <li class="toctree-l2"><a class="reference internal" href="usage/glm-voice.html">GLM-4-Voice</a></li>
 <li class="toctree-l2"><a class="reference internal" href="usage/step-audio.html">Step-Audio-2</a></li>
 </ul>
@@ -526,7 +527,8 @@ Adding one touches no scheduler, worker or engine code:</p>
 <p>The shortest complete example is Orpheus (Llama-3.2-3B with the SNAC codec), whose whole program is shown
 in <a class="reference internal" href="#the-program"><span class="std std-ref">step 2</span></a>. The other programs cover multi-codebook models
 (<code class="docutils literal notranslate"><span class="pre">zonos</span></code>, <code class="docutils literal notranslate"><span class="pre">higgs_tts</span></code>), depth transformers (<code class="docutils literal notranslate"><span class="pre">csm</span></code>, <code class="docutils literal notranslate"><span class="pre">qwen3_tts</span></code>), flow-matching codecs (<code class="docutils literal notranslate"><span class="pre">cosyvoice2</span></code>,
-<code class="docutils literal notranslate"><span class="pre">chatterbox</span></code>), audio input (<code class="docutils literal notranslate"><span class="pre">step_audio_2</span></code>, <code class="docutils literal notranslate"><span class="pre">glm_voice</span></code>) and input streaming (<code class="docutils literal notranslate"><span class="pre">qwen3_tts</span></code>).</p>
+<code class="docutils literal notranslate"><span class="pre">chatterbox</span></code>), audio input (<code class="docutils literal notranslate"><span class="pre">step_audio_2</span></code>, <code class="docutils literal notranslate"><span class="pre">glm_voice</span></code>), input streaming (<code class="docutils literal notranslate"><span class="pre">qwen3_tts</span></code>) and a codec that
+decodes the LM’s hidden states, carried to it in the token rows (<code class="docutils literal notranslate"><span class="pre">xtts</span></code>).</p>
 <section id="how-a-program-runs">
 <h2>How a program runs<a class="headerlink" href="#how-a-program-runs" title="Link to this heading">#</a></h2>
 <p>At start-up, the program allocates static buffers (KV cache, per-request sampling state) and declares

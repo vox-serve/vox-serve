@@ -28,4 +28,5 @@
    qwen3_tts
    step_audio_2
    voxtral_tts
+   xtts
    zonos

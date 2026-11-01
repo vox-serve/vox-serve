@@ -215,6 +215,7 @@
 <li class="toctree-l2"><a class="reference internal" href="usage/chatterbox.html">Chatterbox</a></li>
 <li class="toctree-l2"><a class="reference internal" href="usage/cosyvoice2.html">CosyVoice2</a></li>
 <li class="toctree-l2"><a class="reference internal" href="usage/qwen3-tts.html">Qwen3-TTS</a></li>
+<li class="toctree-l2"><a class="reference internal" href="usage/xtts.html">XTTS-v2</a></li>
 <li class="toctree-l2"><a class="reference internal" href="usage/glm-voice.html">GLM-4-Voice</a></li>
 <li class="toctree-l2"><a class="reference internal" href="usage/step-audio.html">Step-Audio-2</a></li>
 </ul>
@@ -641,7 +642,7 @@ counts. Every decode and codec graph is captured once per partition, so switchin
 selects other graphs. For example, <code class="docutils literal notranslate"><span class="pre">--sm-modes</span> <span class="pre">32</span> <span class="pre">--sm-mode</span> <span class="pre">1</span></code> gives the codec 32 SMs and the LM the
 rest; <code class="docutils literal notranslate"><span class="pre">--sm-mode</span> <span class="pre">adaptive</span></code> picks the partition from latencies measured while serving.</p></li>
 <li><p><code class="docutils literal notranslate"><span class="pre">--urgent-lane</span></code>: a third, high-priority codec lane on all SMs for first chunks and chunks close to
-their playback deadline (of streaming requests; Qwen3-TTS, Orpheus, Zonos, CSM, CosyVoice3).</p></li>
+their playback deadline (of streaming requests; Qwen3-TTS, Orpheus, Zonos, CSM, CosyVoice3, XTTS-v2).</p></li>
 <li><p><code class="docutils literal notranslate"><span class="pre">--lm-segments</span> <span class="pre">depth</span></code> / <code class="docutils literal notranslate"><span class="pre">layers:&lt;k&gt;</span></code> with <code class="docutils literal notranslate"><span class="pre">--gate</span></code>: Qwen3-TTS steps captured in segments, so codec
 batches can start at a segment boundary (with <code class="docutils literal notranslate"><span class="pre">--async-engines</span></code>).</p></li>
 </ul>
