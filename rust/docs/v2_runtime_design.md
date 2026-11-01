@@ -33,9 +33,10 @@ HTTP / bench ─► Scheduler (one host thread per GPU)
 * **Urgent lane** (`--urgent-lane`). A third lane with its own input / output arenas, its own graphs
   (batch 1–8, whole GPU, own memory pool) and, for Qwen3-TTS, its own codec work state, on a
   high-priority stream. First chunks and chunks whose playback deadline is within `--dec-urgent-ms` go
-  there at once, even while a long background detok batch runs on the partition; a request never has
-  two chunks in flight (stateful codecs decode in order). Supported where the detokenizer keeps no
-  shared scratch state between calls, or keeps one per lane: Qwen3-TTS, Orpheus, Zonos, CSM.
+  there at once, even while a long background detok batch runs on the partition (non-streaming
+  requests have no playback deadline and are never urgent); a request never has two chunks in flight
+  (stateful codecs decode in order). Supported where the detokenizer keeps no shared scratch state
+  between calls, or keeps one per lane: Qwen3-TTS, Orpheus, Zonos, CSM.
 * **GPU-side ordering.** `cudaStreamWaitEvent` only, no host waits: a detok batch can wait for the
   latest `depth_start` (`--gate depth`) or the LM's `done`; the LM lane can wait for the detok lane's
   `done` (exclusive prefill / urgent batches).
