@@ -1,0 +1,109 @@
+name: Rust
+
+# CPU-only checks of the Rust runtime (rust/, the optional vox_serve._rt extension). The build script
+# compiles CUDA sources with nvcc, which needs the CUDA toolkit but no GPU or driver.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CUDA_HOME: /usr/local/cuda-12.8
+  # Pinned so new clippy lints do not break CI; bump together with the fixes they need.
+  RUST_TOOLCHAIN: "1.90.0"
+
+jobs:
+  rust:
+    name: fmt, clippy, test
+    runs-on: ubuntu-24.04
+    env:
+      # Nothing runs on a GPU here: compile the sampling kernels for one architecture only.
+      VOX_CUDA_ARCHS: "90"
+      # The test binary links libpython (pyo3) and libcudart.
+      PYO3_PYTHON: /usr/bin/python3
+      LD_LIBRARY_PATH: /usr/local/cuda-12.8/lib64
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the CUDA compiler and runtime
+        working-directory: .
+        run: |
+          .github/scripts/install-cuda-toolkit.sh 12-8
+          sudo apt-get install -y -q --no-install-recommends python3-dev
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: rustfmt
+        run: cargo fmt --check
+      - name: clippy
+        run: cargo clippy --release --locked --all-targets -- -D warnings
+      - name: test
+        run: cargo test --release --locked
+
+  # The wheel with the extension and the sdist, built as a release builds them (manylinux container,
+  # auditwheel); publish.yml uploads the same files.
+  dists:
+    name: release distributions
+    uses: ./.github/workflows/dists.yml
+
+  prompt-parity:
+    name: prompt builders, Rust vs Python
+    needs: dists
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install the wheel with CPU-only PyTorch
+        run: |
+          python -m venv /tmp/venv
+          /tmp/venv/bin/pip install --upgrade pip
+          /tmp/venv/bin/pip install torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cpu
+          # The extension links the CUDA runtime library (no GPU needed to load it).
+          /tmp/venv/bin/pip install dist/*.whl pytest "nvidia-cuda-runtime-cu12==12.8.*"
+      - name: Run the prompt parity test against the installed wheel
+        env:
+          VOX_REQUIRE_RT: "1"
+        run: |
+          export LD_LIBRARY_PATH=$(/tmp/venv/bin/python -c 'import nvidia.cuda_runtime as m; print(list(m.__path__)[0] + "/lib")')
+          # pytest (not python -m pytest): the installed package is imported, not the source tree.
+          /tmp/venv/bin/pytest tests/test_prompt_parity.py -v
+
+  wheel-without-rust:
+    name: wheel without CUDA (Python runtime only)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build the wheel (the optional extension fails to build without nvcc)
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --wheel --outdir dist .
+      - name: The wheel has no extension and the CLI falls back to the Python runtime
+        run: |
+          if python -m zipfile -l dist/*.whl | grep -E "vox_serve/_rt\."; then
+            echo "the wheel unexpectedly contains the extension"; exit 1
+          fi
+          python -m venv /tmp/venv
+          /tmp/venv/bin/pip install --no-deps dist/*.whl
+          cd /tmp && /tmp/venv/bin/python - <<'PY'
+          from vox_serve.cli import _load_rust
+
+          rt, reason = _load_rust()
+          assert rt is None, "the Rust runtime should be unavailable"
+          print("fallback:", reason)
+          PY

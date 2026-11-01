@@ -1,0 +1,8 @@
+# sdist: the Python package plus what the optional Rust build (rust/) needs.
+include README.md LICENSE pyproject.toml
+graft vox_serve
+include rust/Cargo.toml rust/Cargo.lock rust/build.rs
+graft rust/src
+graft rust/csrc
+graft rust/third_party
+global-exclude __pycache__ *.py[co] *.so
