@@ -69,7 +69,7 @@ Common arguments (both runtimes)
 ``--fuse-lm``, ``--fuse-layers``, ``--fuse-codec``, ``--fuse-depth``, ``--fuse-talker``, ``--compile-detok``
   Kernel fusion (``vox_serve/fusion``), model-specific: merged q/k/v and gate/up GEMMs (``--fuse-lm``), fused
   decoder layers (``--fuse-layers``: Higgs Audio v3, CosyVoice3), fused codec kernels (``--fuse-codec``:
-  Higgs Audio v3, CosyVoice3), Qwen3-TTS depth transformer and talker (``--fuse-depth``, ``--fuse-talker``),
+  Higgs Audio v2 / v3, CosyVoice3), Qwen3-TTS depth transformer and talker (``--fuse-depth``, ``--fuse-talker``),
   and ``torch.compile`` of the codec (``--compile-detok``). ``vox-serve --help`` lists the models of each.
 
 ``--log-level``

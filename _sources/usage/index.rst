@@ -15,6 +15,7 @@ Text-to-Speech (TTS) Models
    chatterbox
    cosyvoice2
    qwen3-tts
+   higgs-audio-v2
    vibevoice
    xtts
 

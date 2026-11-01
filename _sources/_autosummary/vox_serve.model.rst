@@ -23,6 +23,7 @@
    cosyvoice3
    csm
    glm_voice
+   higgs_audio_v2
    higgs_tts
    orpheus
    qwen3_tts

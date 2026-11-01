@@ -215,6 +215,7 @@
 <li class="toctree-l2"><a class="reference internal" href="usage/chatterbox.html">Chatterbox</a></li>
 <li class="toctree-l2"><a class="reference internal" href="usage/cosyvoice2.html">CosyVoice2</a></li>
 <li class="toctree-l2"><a class="reference internal" href="usage/qwen3-tts.html">Qwen3-TTS</a></li>
+<li class="toctree-l2"><a class="reference internal" href="usage/higgs-audio-v2.html">Higgs Audio v2</a></li>
 <li class="toctree-l2"><a class="reference internal" href="usage/vibevoice.html">VibeVoice-Realtime</a></li>
 <li class="toctree-l2"><a class="reference internal" href="usage/xtts.html">XTTS-v2</a></li>
 <li class="toctree-l2"><a class="reference internal" href="usage/glm-voice.html">GLM-4-Voice</a></li>
@@ -488,8 +489,8 @@
 current families, their shorthand codes, and a representative Hugging Face identifier.</p>
 <section id="text-to-speech-tts">
 <h2>Text-to-speech (TTS)<a class="headerlink" href="#text-to-speech-tts" title="Link to this heading">#</a></h2>
-<div class="pst-scrollable-table-container"><table class="table" id="id13">
-<caption><span class="caption-text">TTS model families</span><a class="headerlink" href="#id13" title="Link to this table">#</a></caption>
+<div class="pst-scrollable-table-container"><table class="table" id="id14">
+<caption><span class="caption-text">TTS model families</span><a class="headerlink" href="#id14" title="Link to this table">#</a></caption>
 <colgroup>
 <col style="width: 16.2%" />
 <col style="width: 40.5%" />
@@ -522,11 +523,15 @@ current families, their shorthand codes, and a representative Hugging Face ident
 <td><p><code class="docutils literal notranslate"><span class="pre">bosonai/higgs-tts-3-4b</span></code> (<a class="reference external" href="https://huggingface.co/bosonai/higgs-tts-3-4b">link</a>)</p></td>
 <td><p>Higgs Audio v3 TTS developed by Boson AI. Using a Qwen3-4B LLM over 8 delayed codebooks with the Higgs Audio tokenizer. Supports audio input for voice cloning.</p></td>
 </tr>
-<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">orpheus</span></code></p></td>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">higgs-audio-v2</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">bosonai/higgs-audio-v2-generation-3B-base</span></code> (<a class="reference external" href="https://huggingface.co/bosonai/higgs-audio-v2-generation-3B-base">link</a>)</p></td>
+<td><p>Higgs Audio v2 developed by Boson AI. Using a Llama-3.2-3B LLM with dual (text / audio) FFN layers over 8 delayed codebooks of the Higgs Audio tokenizer. Supports audio input (with its transcript) for voice cloning and a scene description. Weights under the Boson Higgs Audio 2 Community License (based on the Llama 3 license).</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">orpheus</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">canopylabs/orpheus-3b-0.1-ft</span></code> (<a class="reference external" href="https://huggingface.co/canopylabs/orpheus-3b-0.1-ft">link</a>)</p></td>
 <td><p>TTS model developed by Canopy Labs. Using 3B LLM with SNAC detokenizer.</p></td>
 </tr>
-<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">qwen3-tts</span></code></p></td>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">qwen3-tts</span></code></p></td>
 <td><div class="line-block">
 <div class="line"><code class="docutils literal notranslate"><span class="pre">Qwen/Qwen3-TTS-12Hz-1.7B-Base</span></code></div>
 <div class="line"><code class="docutils literal notranslate"><span class="pre">Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice</span></code></div>
@@ -536,20 +541,20 @@ current families, their shorthand codes, and a representative Hugging Face ident
 </td>
 <td><p>TTS model developed by Alibaba Qwen team. Using 1.7B LLM with depth transformer and Mimi-like detokenizer.</p></td>
 </tr>
-<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">vibevoice</span></code></p></td>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">vibevoice</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">microsoft/VibeVoice-Realtime-0.5B</span></code> (<a class="reference external" href="https://huggingface.co/microsoft/VibeVoice-Realtime-0.5B">link</a>)</p></td>
 <td><p>Real-time TTS model developed by Microsoft. A Qwen2.5-0.5B split into text and speech layers, a diffusion
 head producing continuous 7.5 Hz acoustic latents, and a causal acoustic decoder. Preset voices only.</p></td>
 </tr>
-<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">voxtral-tts</span></code></p></td>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">voxtral-tts</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">mistralai/Voxtral-4B-TTS-2603</span></code> (<a class="reference external" href="https://huggingface.co/mistralai/Voxtral-4B-TTS-2603">link</a>)</p></td>
 <td><p>TTS model developed by Mistral AI. Using a 4B LLM with a flow-matching acoustic head and a 37-codebook codec.</p></td>
 </tr>
-<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">xtts</span></code></p></td>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">xtts</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">coqui/XTTS-v2</span></code> (<a class="reference external" href="https://huggingface.co/coqui/XTTS-v2">link</a>)</p></td>
 <td><p>Multilingual TTS model developed by Coqui. Using a GPT-2 (30 layers) whose hidden states a HiFi-GAN vocoder decodes; 17 languages, 58 built-in voices. Supports audio input for voice cloning. Weights under the Coqui Public Model License (non-commercial).</p></td>
 </tr>
-<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">zonos</span></code></p></td>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">zonos</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">Zyphra/Zonos-v0.1-transformer</span></code> (<a class="reference external" href="https://huggingface.co/Zyphra/Zonos-v0.1-transformer">link</a>)</p></td>
 <td><p>TTS model developed by Zyphra. Using 1B LLM with DAC detokenizer.</p></td>
 </tr>
@@ -559,8 +564,8 @@ head producing continuous 7.5 Hz acoustic latents, and a causal acoustic decoder
 </section>
 <section id="speech-to-speech-sts">
 <h2>Speech-to-speech (STS)<a class="headerlink" href="#speech-to-speech-sts" title="Link to this heading">#</a></h2>
-<div class="pst-scrollable-table-container"><table class="table" id="id14">
-<caption><span class="caption-text">STS model families</span><a class="headerlink" href="#id14" title="Link to this table">#</a></caption>
+<div class="pst-scrollable-table-container"><table class="table" id="id15">
+<caption><span class="caption-text">STS model families</span><a class="headerlink" href="#id15" title="Link to this table">#</a></caption>
 <colgroup>
 <col style="width: 16.2%" />
 <col style="width: 40.5%" />
