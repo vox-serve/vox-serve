@@ -117,7 +117,7 @@ pub struct Args {
     #[arg(long)]
     time_share: bool,
     /// Capture LM steps whole, split before the depth transformer (`depth`), or additionally as
-    /// groups of k backbone layers (`layers:<k>`).
+    /// groups of k backbone layers (`layers:<k>`); split steps need the asynchronous engine.
     #[arg(long, default_value = "whole")]
     lm_segments: String,
     /// Fuse the detokenizer with torch.compile before capturing its graphs.
@@ -267,6 +267,16 @@ pub fn run(args: Args) -> Result<()> {
         || args.codec_gpu.is_some();
     if args.overlap_detok || async_engines {
         config["overlap_detok"] = json!(true);
+    }
+    // Only the asynchronous engine's LM lane runs the segment and depth graphs: the synchronous loops
+    // would launch just the first segment, which never writes `out_kind` (requests then never stop).
+    // Without the asynchronous engine's --gate, the segments would only add launches anyway.
+    if args.lm_segments != "whole" && !async_engines {
+        anyhow::bail!(
+            "--lm-segments {} needs the asynchronous engine: add --async-engines (or --sm-modes, --urgent-lane, \
+             --time-share, --codec-gpu)",
+            args.lm_segments
+        );
     }
     if !args.sm_modes.is_empty() {
         config["sm_modes"] = json!(args.sm_modes);
