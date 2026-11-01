@@ -8,6 +8,7 @@ IMPORTANT: This module must NOT import torch at the module level!
 """
 
 import argparse
+import json
 import os
 import sys
 
@@ -35,9 +36,11 @@ def _run_scheduler_daemon(
     enable_disaggregation: bool,
     enable_nvtx: bool,
     enable_torch_compile: bool,
+    unroll_depth_cuda_graph: bool,
     async_scheduling: bool,
     log_level: str,
     detokenize_interval: int = None,
+    program_options=None,
 ) -> None:
     """Entry point for scheduler daemon that sets CUDA_VISIBLE_DEVICES before importing torch."""
     # DEBUG: Check if torch is already imported (should NOT be!)
@@ -96,10 +99,12 @@ def _run_scheduler_daemon(
         enable_disaggregation=enable_disaggregation,
         enable_nvtx=enable_nvtx,
         enable_torch_compile=enable_torch_compile,
+        unroll_depth_cuda_graph=unroll_depth_cuda_graph,
         async_scheduling=async_scheduling,
         dp_rank=dp_rank,
         dp_size=dp_size,
         detokenize_interval=detokenize_interval,
+        program_options=program_options,
     )
     logger.info(f"Scheduler (DP rank {dp_rank}/{dp_size}) started successfully with model: {model_name}")
     scheduler.run_forever()
@@ -131,8 +136,10 @@ def main():
     parser.add_argument("--enable-disaggregation", action="store_true")
     parser.add_argument("--enable-nvtx", action="store_true")
     parser.add_argument("--enable-torch-compile", action="store_true")
+    parser.add_argument("--unroll-depth-cuda-graph", action="store_true")
     parser.add_argument("--async-scheduling", action="store_true")
     parser.add_argument("--detokenize-interval", type=int, default=None)
+    parser.add_argument("--program-options", type=json.loads, default=None)
 
     args = parser.parse_args()
 
@@ -159,9 +166,11 @@ def main():
         enable_disaggregation=args.enable_disaggregation,
         enable_nvtx=args.enable_nvtx,
         enable_torch_compile=args.enable_torch_compile,
+        unroll_depth_cuda_graph=args.unroll_depth_cuda_graph,
         async_scheduling=args.async_scheduling,
         log_level=args.log_level,
         detokenize_interval=args.detokenize_interval,
+        program_options=args.program_options,
     )
 
 

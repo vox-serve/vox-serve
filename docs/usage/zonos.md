@@ -7,7 +7,7 @@ Zonos-v0.1 is a 1B parameter text-to-speech model developed by Zyphra, using a D
 Start the server:
 
 ```bash
-python -m vox_serve.launch --model Zyphra/Zonos-v0.1-transformer --port 8000
+vox-serve --model Zyphra/Zonos-v0.1-transformer --port 8000
 ```
 
 Generate speech:
@@ -69,7 +69,7 @@ curl -X POST "http://localhost:8000/generate" \
 ## CLI Options
 
 ```bash
-python -m vox_serve.launch \
+vox-serve \
   --model Zyphra/Zonos-v0.1-transformer \
   --port 8000 \
   --temperature 0.7 \

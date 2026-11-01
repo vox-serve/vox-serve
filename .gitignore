@@ -179,3 +179,8 @@ cython_debug/
 # audio files 
 *.wav
 *.mp3
+
+# Written into the working directory at run time: torch's remote-module templates, Hugging Face download locks
+/tmp*/
+/*.lock
+!/uv.lock

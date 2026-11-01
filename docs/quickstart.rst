@@ -35,7 +35,11 @@ Or with the module entrypoint:
 
 .. code-block:: bash
 
-   python -m vox_serve.launch --model <model-name> --port 8000
+   python -m vox_serve --model <model-name> --port 8000
+
+``vox-serve`` serves with the Rust runtime when its extension is installed (the PyPI wheel for Linux x86_64
+contains it; other installs build it, which needs a Rust toolchain and the CUDA compiler ``nvcc``), and with
+the Python runtime otherwise; see :doc:`runtimes`.
 
 Send a request
 --------------

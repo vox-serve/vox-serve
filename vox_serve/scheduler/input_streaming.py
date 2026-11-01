@@ -49,21 +49,16 @@ class InputStreamingScheduler(Scheduler):
             req: The request to prepare
         """
         # Tokenize all buffered text (without special tokens)
-        all_tokens = self.model_worker.model.text_tokenizer.encode(
-            req.input_text_buffer, add_special_tokens=False
-        )
+        all_tokens = self.model_worker.tokenize_stream_text(req.input_text_buffer)
 
+        req.prompt = req.input_text_buffer
         if not all_tokens:
             # Edge case: text didn't produce any tokens
-            req.prompt = req.input_text_buffer
             req.prefill_ready = True
             return
 
-        # Decode only the first token back to text for minimal prompt
-        first_token_text = self.model_worker.model.text_tokenizer.decode(
-            [all_tokens[0]], skip_special_tokens=True
-        )
-        req.prompt = first_token_text
+        # The prefill prompt holds only the first token
+        req.first_text_token = all_tokens[0]
 
         # Queue remaining tokens for decode injection
         for tok in all_tokens[1:]:
@@ -72,7 +67,7 @@ class InputStreamingScheduler(Scheduler):
 
         req.prefill_ready = True
         self.logger.debug(
-            f"Prefill prepared: prompt='{first_token_text}' (1 token), "
+            f"Prefill prepared: first token {all_tokens[0]}, "
             f"queued {len(all_tokens) - 1} tokens"
         )
 
@@ -180,9 +175,7 @@ class InputStreamingScheduler(Scheduler):
                         )
                 else:
                     # After prefill: tokenize and queue for decode injection
-                    tokens = self.model_worker.model.text_tokenizer.encode(
-                        text, add_special_tokens=False
-                    )
+                    tokens = self.model_worker.tokenize_stream_text(text)
                     for tok in tokens:
                         req.pending_text_tokens.put(tok)
                     req.total_text_tokens += len(tokens)
@@ -226,9 +219,9 @@ class InputStreamingScheduler(Scheduler):
                         )
                     else:
                         self.logger.warning(f"TEXT_COMPLETE for {request_id} but no text buffered")
+                        # Fails the request; selecting it for detokenization sends its completion.
                         req.done_lm_generation = True
-                        req.done_all = True
-                        req.finish_reason = "no_text_provided"
+                        req.finish_reason = "error: no text provided"
                 else:
                     # Prefill already started/done, just mark complete
                     # Wake up if waiting - will use pad tokens from now on
@@ -252,14 +245,9 @@ class InputStreamingScheduler(Scheduler):
         """
         lm_requests = []
 
-        # Get worker limitations (same as parent)
-        from ..worker import CudaGraphWorker
-        if isinstance(self.model_worker, CudaGraphWorker):
-            max_prefill_batch_size = self.model_worker.prefill_graph_batch_size
-            max_seq_len = max(self.model_worker.cuda_graph_seq_len_buckets)
-        else:
-            max_prefill_batch_size = self.max_batch_size
-            max_seq_len = 1024
+        # Get worker limitations
+        max_prefill_batch_size = self.model_worker.prefill_graph_batch_size
+        max_seq_len = max(self.model_worker.cuda_graph_seq_len_buckets)
 
         # Separate prefill and decode requests
         prefill_requests = []

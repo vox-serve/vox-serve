@@ -21,12 +21,25 @@ import zmq
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
+from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
 from .utils import get_global_log_level, get_logger, set_global_log_level
 
 # Module-level logger - will be updated with proper log level in main()
 logger = get_logger(__name__)
+
+
+class RequestFailedError(Exception):
+    """A request failed after its streaming response started: the server closes the connection."""
+
+
+def _error_reason(completion_info: Dict) -> Optional[str]:
+    """The message of an ``error: <message>`` finish reason (a request the worker failed), else None."""
+    reason = completion_info.get("reason")
+    if isinstance(reason, str) and reason.startswith("error:"):
+        return reason[len("error:") :].strip() or "request failed"
+    return None
 
 
 class APIServer:
@@ -53,11 +66,13 @@ class APIServer:
         enable_disaggregation: bool = False,
         enable_nvtx: bool = False,
         enable_torch_compile: bool = False,
+        unroll_depth_cuda_graph: bool = False,
         max_num_pages: int = None,
         page_size: int = 2048,
         async_scheduling: bool = False,
         dp_size: int = 1,
         detokenize_interval: int = None,
+        program_options: Optional[Dict] = None,
     ):
         """Initialize the API server and start scheduler process(es).
 
@@ -87,6 +102,7 @@ class APIServer:
             async_scheduling: Enable async scheduling mode.
             dp_size: Data parallel replica count.
             detokenize_interval: Interval for audio detokenization (model-specific).
+            program_options: Extra configuration of the model's program (kernel fusion flags).
         """
         self.model_name = model_name
         self.request_socket_path = request_socket_path
@@ -110,12 +126,14 @@ class APIServer:
         self.enable_disaggregation = enable_disaggregation
         self.enable_nvtx = enable_nvtx
         self.enable_torch_compile = enable_torch_compile
+        self.unroll_depth_cuda_graph = unroll_depth_cuda_graph
         self.max_num_pages = max_num_pages
         self.page_size = page_size
         self.scheduler_type = scheduler_type
         self.async_scheduling = async_scheduling
         self.dp_size = dp_size
         self.detokenize_interval = detokenize_interval
+        self.program_options = program_options or {}
         self.scheduler_processes = None  # Will be a list for DP mode
         self.logger = get_logger(__name__)
 
@@ -124,6 +142,9 @@ class APIServer:
         # Track recently completed request_ids to absorb late messages without warnings
         self.recently_completed = collections.OrderedDict()  # request_id -> timestamp
         self.recently_completed_ttl_sec = 5.0
+        # Input-streaming requests that finished: request_id -> (timestamp, error or None), so that /text,
+        # /end and /audio calls after the end (kept for the request timeout) report how the request ended
+        self.finished_input_streams = collections.OrderedDict()
         self.request_lock = threading.Lock()
         self.running = True
 
@@ -266,10 +287,14 @@ class APIServer:
                         cmd.append("--enable-nvtx")
                     if self.enable_torch_compile:
                         cmd.append("--enable-torch-compile")
+                    if self.unroll_depth_cuda_graph:
+                        cmd.append("--unroll-depth-cuda-graph")
                     if self.async_scheduling:
                         cmd.append("--async-scheduling")
                     if self.detokenize_interval is not None:
                         cmd.extend(["--detokenize-interval", str(self.detokenize_interval)])
+                    if self.program_options:
+                        cmd.extend(["--program-options", json.dumps(self.program_options)])
 
                     self.logger.info(f"Starting DP rank {rank} with CUDA_VISIBLE_DEVICES={gpu_mapping[rank]}")
                     process = subprocess.Popen(cmd, env=env)
@@ -339,10 +364,14 @@ class APIServer:
                     cmd.append("--enable-nvtx")
                 if self.enable_torch_compile:
                     cmd.append("--enable-torch-compile")
+                if self.unroll_depth_cuda_graph:
+                    cmd.append("--unroll-depth-cuda-graph")
                 if self.async_scheduling:
                     cmd.append("--async-scheduling")
                 if self.detokenize_interval is not None:
                     cmd.extend(["--detokenize-interval", str(self.detokenize_interval)])
+                if self.program_options:
+                    cmd.extend(["--program-options", json.dumps(self.program_options)])
 
                 process = subprocess.Popen(cmd)
                 self.scheduler_process = process
@@ -384,16 +413,28 @@ class APIServer:
                                     break
                             for rid in to_pop:
                                 self.recently_completed.pop(rid, None)
+                        while self.finished_input_streams:
+                            rid, (ts, _) = next(iter(self.finished_input_streams.items()))
+                            if time.time() - ts < self.timeout_seconds:
+                                break
+                            del self.finished_input_streams[rid]
 
                         if request_id in self.pending_requests:
+                            request_data = self.pending_requests[request_id]
                             if message_type == "AUDIO":
                                 # Handle audio chunk
-                                self.pending_requests[request_id]["chunks"].append(data)
+                                request_data["chunks"].append(data)
+                            elif message_type == "ACCEPTED":
+                                # The scheduler has built the request's prompt: its streaming response can start
+                                request_data["accepted"] = True
                             elif message_type == "COMPLETION":
                                 # Handle completion notification
                                 completion_info = json.loads(data.decode("utf-8"))
                                 self.logger.info(f"Request {request_id} completed: {completion_info}")
-                                self.pending_requests[request_id]["event"].set()
+                                request_data["error"] = _error_reason(completion_info)
+                                if request_data.get("input_streaming"):
+                                    self.finished_input_streams[request_id] = (time.time(), request_data["error"])
+                                request_data["event"].set()
                                 # remember completion to suppress late messages
                                 self.recently_completed[request_id] = time.time()
                         # If we've very recently completed this request, drop silently (debug only)
@@ -586,10 +627,11 @@ class APIServer:
             HTTPException: If the request is not found or already completed.
         """
         with self.request_lock:
+            self._raise_if_failed(request_id)
             request_data = self.pending_requests.get(request_id)
-            if not request_data:
+            if not request_data and request_id not in self.finished_input_streams:
                 raise HTTPException(status_code=404, detail=f"Request {request_id} not found")
-            if request_data["event"].is_set():
+            if not request_data or request_data["event"].is_set():
                 raise HTTPException(status_code=400, detail=f"Request {request_id} already completed")
 
         # Send TEXT_UPDATE message to scheduler
@@ -606,9 +648,12 @@ class APIServer:
             request_id: Request identifier returned by ``start_input_streaming_request``.
 
         Raises:
-            HTTPException: If the request is not found.
+            HTTPException: If the request is not found or has failed.
         """
         with self.request_lock:
+            self._raise_if_failed(request_id)
+            if request_id in self.finished_input_streams:
+                return  # it has already finished: nothing left to end
             request_data = self.pending_requests.get(request_id)
             if not request_data:
                 raise HTTPException(status_code=404, detail=f"Request {request_id} not found")
@@ -618,6 +663,37 @@ class APIServer:
         message = f"{request_id}|TEXT_COMPLETE|".encode("utf-8")
         self._enqueue_request(message)
         self.logger.info(f"Text input complete for request {request_id}")
+
+    def _raise_if_failed(self, request_id: str) -> None:
+        """400 with the reason if an input-streaming request has failed (call with ``request_lock`` held)."""
+        finished = self.finished_input_streams.get(request_id)
+        if finished is not None and finished[1] is not None:
+            raise HTTPException(status_code=400, detail=f"Request {request_id} failed: {finished[1]}")
+
+    async def wait_accepted(self, request_id: str) -> None:
+        """Waits until the scheduler has built the prompt of a streaming request (or the request has produced
+        audio or completed), so that its response starts only once the request is known to run, as in the
+        Rust runtime, which builds prompts before it responds.
+
+        Raises:
+            HTTPException: 400 with the reason if the request failed first (bad input, such as an unknown
+                voice, audio for a model without audio input or a prompt that is too long); 500 on timeout.
+        """
+        deadline = time.time() + self.timeout_seconds
+        while True:
+            with self.request_lock:
+                request_data = self.pending_requests.get(request_id)
+                if request_data is None or request_data.get("accepted") or request_data["chunks"]:
+                    return
+                if request_data["event"].is_set():
+                    if request_data.get("error") is None:
+                        return  # completed without audio: the stream ends after the WAV header
+                    del self.pending_requests[request_id]
+                    raise HTTPException(status_code=400, detail=request_data["error"])
+                if time.time() > deadline:
+                    del self.pending_requests[request_id]
+                    raise HTTPException(status_code=500, detail="Generation timed out")
+            await asyncio.sleep(0.001)
 
     async def async_stream_chunks(self, request_id: str):
         """Yield audio chunks for an already enqueued streaming request.
@@ -629,7 +705,8 @@ class APIServer:
             Raw audio chunks (bytes) as they arrive.
 
         Raises:
-            HTTPException: If the request times out or fails.
+            HTTPException: If the request times out.
+            RequestFailedError: If the request fails (the response has started, so the connection is cut).
         """
         start_time = time.time()
         # Stream chunks until completion
@@ -661,14 +738,21 @@ class APIServer:
             if done:
                 # Yield any remaining chunks and cleanup
                 remaining: list[bytes] = []
+                error = None
                 with self.request_lock:
-                    request_data = self.pending_requests.get(request_id)
+                    request_data = self.pending_requests.pop(request_id, None)
                     if request_data:
                         consumed = request_data.get("consumed_chunks", 0)
                         remaining = request_data["chunks"][consumed:]
-                        self.pending_requests.pop(request_id, None)
+                        error = request_data.get("error")
+                    elif request_id in self.finished_input_streams:
+                        error = self.finished_input_streams[request_id][1]
                 for chunk in remaining:
                     yield chunk
+                if error is not None:
+                    # A clean end of the stream would look like a success.
+                    self.logger.warning(f"Request {request_id} failed during its stream: {error}")
+                    raise RequestFailedError(error)
                 break
 
             # Small async sleep to avoid busy-waiting
@@ -724,9 +808,12 @@ class APIServer:
 
             # Retrieve collected audio chunks
             with self.request_lock:
-                audio_chunks = self.pending_requests[request_id]["chunks"][:]
-                del self.pending_requests[request_id]
+                request_data = self.pending_requests.pop(request_id)
+            audio_chunks = request_data["chunks"]
 
+            # A failed request (bad input: an unsupported option, a prompt that is too long, ...)
+            if request_data.get("error") is not None:
+                raise HTTPException(status_code=400, detail=request_data["error"])
             if not audio_chunks:
                 raise HTTPException(status_code=500, detail="No audio generated")
 
@@ -802,6 +889,7 @@ async def generate(
     ref_text: Optional[str] = Form(None),
     instruct: Optional[str] = Form(None),
     x_vector_only_mode: Optional[bool] = Form(None),
+    voice: Optional[str] = Form(None),
 ):
     """
     Generate speech from text and return audio file or streaming response.
@@ -815,6 +903,7 @@ async def generate(
         ref_text: Reference text for voice cloning (used with audio for ICL mode)
         instruct: Instruction text for voice design/control (model-specific)
         x_vector_only_mode: If True, use only speaker embedding without ICL (model-specific)
+        voice: Voice name (model-specific, e.g. Orpheus' "tara")
 
     Returns:
         Audio file as direct response (if streaming=False) or streaming audio response (if streaming=True)
@@ -844,11 +933,15 @@ async def generate(
         model_kwargs["instruct"] = instruct
     if x_vector_only_mode is not None:
         model_kwargs["x_vector_only_mode"] = x_vector_only_mode
+    if voice is not None:
+        model_kwargs["voice"] = voice
 
     try:
         if streaming:
-            # Streaming response: enqueue request immediately, then stream asynchronously
+            # Streaming response: enqueue the request, and respond once its prompt is built (a request that
+            # fails before gets an error status), then stream asynchronously
             request_id = api_server.start_streaming_request(text, audio_path, model_kwargs)
+            await api_server.wait_accepted(request_id)
 
             async def audio_stream():
                 # WAV header for 24kHz mono 16-bit audio
@@ -904,6 +997,64 @@ async def generate(
 
 
 # ============================================================================
+# OpenAI-compatible /v1/audio/speech endpoint (raw PCM streaming)
+# ============================================================================
+
+
+class AudioSpeechRequest(BaseModel):
+    """Request body for the OpenAI-compatible ``/v1/audio/speech`` endpoint.
+
+    Mirrors the payload sent by ``benchmarking/bench/adapters/voxtral.py``:
+    ``{model, input, voice, language, response_format, stream, extra_params}``.
+    ``extra_params`` may carry ``cfg_alpha`` (classifier-free guidance scale).
+    """
+
+    model: Optional[str] = None
+    input: str
+    voice: Optional[str] = None
+    language: Optional[str] = None
+    response_format: Optional[str] = "pcm"
+    stream: Optional[bool] = True
+    extra_params: Optional[Dict] = None
+
+
+@app.post("/v1/audio/speech")
+async def audio_speech(req: AudioSpeechRequest):
+    """Generate speech and stream raw int16 PCM (no WAV header).
+
+    Reuses the existing streaming machinery (``async_stream_chunks``); the worker
+    already emits int16 PCM bytes, so unlike the ``/generate`` WAV route this
+    endpoint forwards them verbatim with ``media_type="audio/pcm"``.
+    """
+    if api_server is None:
+        raise HTTPException(status_code=503, detail="Server not ready")
+
+    model_kwargs = {
+        "voice": req.voice,
+        "language": req.language,
+        "cfg_alpha": (req.extra_params or {}).get("cfg_alpha"),
+    }
+
+    try:
+        request_id = api_server.start_streaming_request(req.input, None, model_kwargs)
+        await api_server.wait_accepted(request_id)
+
+        async def audio_stream():
+            async for chunk in api_server.async_stream_chunks(request_id):
+                yield chunk
+
+        return StreamingResponse(
+            audio_stream(),
+            media_type="audio/pcm",
+            headers={"Cache-Control": "no-cache"},
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+# ============================================================================
 # Input Streaming Endpoints
 # ============================================================================
 
@@ -934,6 +1085,10 @@ async def start_input_streaming(
     """
     if api_server is None:
         raise HTTPException(status_code=503, detail="Server not ready")
+    if api_server.scheduler_type != "input_streaming":
+        raise HTTPException(
+            status_code=400, detail="input streaming needs a server started with --scheduler-type input_streaming"
+        )
 
     audio_path = None
     if audio:
@@ -1011,6 +1166,7 @@ async def stream_audio(request_id: str):
 
     # Validate request exists
     with api_server.request_lock:
+        api_server._raise_if_failed(request_id)
         request_data = api_server.pending_requests.get(request_id)
         if not request_data:
             raise HTTPException(status_code=404, detail=f"Request {request_id} not found")
@@ -1097,21 +1253,24 @@ def signal_handler(signum, frame):
     os._exit(0)  # Force immediate exit
 
 
-def main():
-    """Run the VoxServe API server from the CLI.
+# Kernel fusion flags: program config keys, set to true by --<key with dashes> (vox_serve/fusion).
+FUSION_FLAGS = {
+    "fuse_lm": "Merge sibling q/k/v and gate/up projections of the LM into single GEMMs "
+    "(Orpheus, CSM, CosyVoice2, Chatterbox, Step-Audio-2, Voxtral)",
+    "fuse_layers": "Run the LM's decoder layers with merged GEMMs and fused add+RMSNorm, q/k-norm+RoPE+KV-write "
+    "and SiLU-and-mul kernels (Higgs Audio v3, CosyVoice3)",
+    "fuse_codec": "Fused codec kernels (Higgs Audio v3 DAC, CosyVoice3 HiFT and flow decoder)",
+    "fuse_depth": "Qwen3-TTS: run the depth transformer with merged QKV / gate-up GEMMs and grouped-query SDPA",
+    "fuse_talker": "Qwen3-TTS: run the talker with merged QKV / gate-up GEMMs and fused residual add + RMSNorm",
+    "compile_detok": "Fuse the detokenizer with torch.compile before capturing its graphs",
+}
 
-    The CLI maps to ``python -m vox_serve.launch`` or the ``vox-serve`` entrypoint.
 
-    Arguments are parsed via ``argparse`` and control model selection, scheduling
-    behavior, sampling parameters, and performance settings.
-    """
+def build_parser(prog: Optional[str] = None):
+    """Command-line arguments of the Python runtime (``vox-serve --runtime python``)."""
     import argparse
-    import multiprocessing as mp
 
-    import uvicorn
-
-    # Parse command line arguments
-    parser = argparse.ArgumentParser(description="Vox-Serve Text-to-Speech API Server")
+    parser = argparse.ArgumentParser(prog=prog, description="Vox-Serve Text-to-Speech API Server")
     parser.add_argument(
         "--model",
         type=str,
@@ -1130,9 +1289,12 @@ def main():
     parser.add_argument("--port", type=int, default=8000, help="Port to bind the server to (default: 8000)")
     parser.add_argument("--max-batch-size", type=int, default=8, help="Maximum batch size for inference (default: 8)")
     parser.add_argument(
-        "--max-num-pages", type=int, default=2048, help="Maximum number of KV cache pages (default: 1024)"
+        "--max-num-pages",
+        type=int,
+        default=None,
+        help="Number of KV cache pages (default: enough for 2 x max-batch-size requests of maximum context)",
     )
-    parser.add_argument("--page-size", type=int, default=128, help="Size of each KV cache page (default: 128)")
+    parser.add_argument("--page-size", type=int, default=64, help="Size of each KV cache page (default: 64)")
     parser.add_argument("--top-p", type=float, default=None, help="Top-p sampling parameter (default: None)")
     parser.add_argument("--top-k", type=int, default=None, help="Top-k sampling parameter (default: None)")
     parser.add_argument("--min-p", type=float, default=None, help="Min-p sampling parameter (default: None)")
@@ -1141,8 +1303,15 @@ def main():
         "--max-tokens", type=int, default=None, help="Maximum number of tokens to generate (default: model-specific)"
     )
     parser.add_argument("--repetition-penalty", type=float, default=None, help="Repetition penalty (default: None)")
-    parser.add_argument("--repetition-window", type=int, default=None, help="Repetition window size (default: None)")
-    parser.add_argument("--cfg-scale", type=float, default=None, help="CFG scale for guidance (default: None)")
+    parser.add_argument(
+        "--repetition-window",
+        type=int,
+        default=None,
+        help="No effect (kept for compatibility): the repetition penalty covers every generated token",
+    )
+    parser.add_argument(
+        "--cfg-scale", type=float, default=None, help="CFG scale for guidance (Voxtral-TTS; default: the model's)"
+    )
     parser.add_argument(
         "--greedy",
         action="store_true",
@@ -1152,10 +1321,10 @@ def main():
         "--enable-cuda-graph",
         action="store_true",
         default=True,
-        help="Enable CUDA graph optimization for decode phase (default: True)",
+        help="Replay the model's steps as CUDA graphs (default: True)",
     )
     parser.add_argument(
-        "--disable-cuda-graph", action="store_true", help="Disable CUDA graph optimization for decode phase"
+        "--disable-cuda-graph", action="store_true", help="Run the model's steps eagerly (for debugging model code)"
     )
     parser.add_argument(
         "--enable-disaggregation",
@@ -1201,7 +1370,30 @@ def main():
         default=None,
         help="Interval for audio detokenization (default: None, model-specific). Only supported by qwen3-tts models.",
     )
-    args = parser.parse_args()
+    parser.add_argument(
+        "--unroll-depth-cuda-graph",
+        action="store_true",
+        help="No effect (kept for compatibility): the depth transformer is part of each step's graph",
+    )
+    fusion = parser.add_argument_group("kernel fusion (vox_serve.fusion; the same flags as the Rust runtime)")
+    for flag, help_text in FUSION_FLAGS.items():
+        fusion.add_argument(f"--{flag.replace('_', '-')}", action="store_true", help=help_text)
+    return parser
+
+
+def main(argv: Optional[list] = None, prog: Optional[str] = None):
+    """Run the VoxServe API server from the CLI.
+
+    The CLI maps to ``python -m vox_serve.launch`` or ``vox-serve --runtime python`` (see ``vox_serve.cli``).
+
+    Arguments are parsed via ``argparse`` and control model selection, scheduling
+    behavior, sampling parameters, and performance settings.
+    """
+    import multiprocessing as mp
+
+    import uvicorn
+
+    args = build_parser(prog).parse_args(argv)
 
     # Set global log level for the entire application
     set_global_log_level(args.log_level)
@@ -1275,6 +1467,8 @@ def main():
         async_scheduling=args.async_scheduling,
         dp_size=args.dp_size,
         detokenize_interval=args.detokenize_interval,
+        unroll_depth_cuda_graph=args.unroll_depth_cuda_graph,
+        program_options={flag: True for flag in FUSION_FLAGS if getattr(args, flag)},
     )
 
     # Register signal handlers for graceful shutdown

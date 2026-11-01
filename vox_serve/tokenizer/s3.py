@@ -621,3 +621,109 @@ class S3TokenizerV2(torch.nn.Module):
     def freeze(self):
         for _, param in self.named_parameters():
             param.requires_grad = False
+
+
+# ---- S3 tokenizer v3 (CosyVoice3) -------------------------------------------------------------
+# Adopted from s3tokenizer 0.3.0 (``model_v3.py`` and ``utils.onnx2torch_v3``): the v2 encoder with
+# 12 blocks and LayerNorm eps 1e-5, exported to ONNX with different node names.
+
+
+def onnx2torch_v3(onnx_path: str) -> dict:
+    """Weights of ``speech_tokenizer_v3.onnx`` in ``S3TokenizerV3`` naming."""
+    model = onnx.load(onnx_path)
+    inits = {i.name: i for i in model.graph.initializer}
+    consts = {}
+    for node in model.graph.node:
+        if node.op_type == "Constant":
+            for attr in node.attribute:
+                if attr.name == "value":
+                    consts[node.output[0]] = onnx.numpy_helper.to_array(attr.t)
+
+    def tensor(name, transpose=False):
+        if name in inits:
+            arr = onnx.numpy_helper.to_array(inits[name]).copy()
+        elif name in consts:
+            arr = consts[name].copy()
+        else:
+            return None
+        t = torch.from_numpy(arr)
+        return t.t() if transpose and t.ndim == 2 else t
+
+    def bias(node):
+        for inp in node.input:
+            t = tensor(inp)
+            if t is not None:
+                return t
+        return None
+
+    w = {}
+    for node in model.graph.node:
+        name, op, inputs = node.name, node.op_type, node.input
+        if name in ("/conv1/Conv", "/conv2/Conv"):
+            conv = name[1:6]
+            w[f"encoder.{conv}.weight"] = tensor(inputs[1])
+            if len(inputs) > 2:
+                w[f"encoder.{conv}.bias"] = tensor(inputs[2])
+        elif name.startswith("/blocks."):
+            prefix = f"encoder.blocks.{name.split('/')[1].split('.')[1]}"
+            for ln in ("attn_ln", "mlp_ln"):
+                if f"{ln}/Mul" in name and op == "Mul":
+                    w[f"{prefix}.{ln}.weight"] = tensor(inputs[1])
+                elif f"{ln}/Add" in name and op == "Add":
+                    t = bias(node)
+                    if t is not None and t.numel() > 1:
+                        w[f"{prefix}.{ln}.bias"] = t
+            for proj in ("query", "key", "value", "out"):
+                if f"attn/{proj}/MatMul" in name:
+                    w[f"{prefix}.attn.{proj}.weight"] = tensor(inputs[1], transpose=True)
+                elif f"attn/{proj}/Add" in name:
+                    w[f"{prefix}.attn.{proj}.bias"] = bias(node)
+            for i in ("0", "2"):
+                if f"mlp/mlp.{i}/MatMul" in name:
+                    w[f"{prefix}.mlp.{i}.weight"] = tensor(inputs[1], transpose=True)
+                elif f"mlp/mlp.{i}/Add" in name:
+                    w[f"{prefix}.mlp.{i}.bias"] = bias(node)
+    for name in inits:
+        if "fsmn_block.weight" in name:
+            w[f"encoder.{name}"] = tensor(name)
+        if "quantizer.project_in.bias" in name:
+            w["quantizer._codebook.project_down.bias"] = tensor(name)
+    for node in model.graph.node:
+        if "quantizer" in node.name and "MatMul" in node.op_type:
+            w["quantizer._codebook.project_down.weight"] = tensor(node.input[1], transpose=True)
+    return {k: v for k, v in w.items() if v is not None}
+
+
+class ResidualAttentionBlockV3(ResidualAttentionBlock):
+    def __init__(self, n_state: int, n_head: int, kernel_size: int = 31, use_sdpa: bool = False):
+        super().__init__(n_state, n_head, kernel_size, use_sdpa)
+        self.attn_ln = torch.nn.LayerNorm(n_state, eps=1e-5)
+
+
+class AudioEncoderV3(AudioEncoderV2):
+    def __init__(self, n_mels: int, n_state: int, n_head: int, n_layer: int, stride: int, use_sdpa: bool):
+        super().__init__(n_mels, n_state, n_head, n_layer, stride, use_sdpa)
+        self.blocks = torch.nn.ModuleList(
+            [ResidualAttentionBlockV3(n_state, n_head, use_sdpa=use_sdpa) for _ in range(n_layer)]
+        )
+
+
+class S3TokenizerV3(torch.nn.Module):
+    """S3 tokenizer v3 (``speech_tokenizer_v3.onnx``), inference only, audio up to 30 s."""
+
+    def __init__(self, onnx_path: str, config: ModelConfig = None):
+        super().__init__()
+        self.config = config or ModelConfig(n_audio_layer=12)
+        c = self.config
+        self.encoder = AudioEncoderV3(c.n_mels, c.n_audio_state, c.n_audio_head, c.n_audio_layer, 2, c.use_sdpa)
+        self.quantizer = FSQVectorQuantization(c.n_audio_state, c.n_codebook_size)
+        missing, unexpected = self.load_state_dict(onnx2torch_v3(onnx_path), strict=False)
+        if unexpected or any(not k.endswith(".bias") for k in missing):
+            raise RuntimeError(f"speech_tokenizer_v3 weights: missing {missing}, unexpected {unexpected}")
+
+    @torch.inference_mode()
+    def quantize(self, mel: torch.Tensor, mel_len: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        if bool((mel_len > 3000).any()):
+            raise NotImplementedError("speech_tokenizer_v3: audio longer than 30 s")
+        hidden, code_len = self.encoder(mel, mel_len)
+        return self.quantizer.encode(hidden), code_len
