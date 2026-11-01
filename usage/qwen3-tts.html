@@ -225,12 +225,14 @@
 <li class="toctree-l1"><a class="reference internal" href="../api.html">API Reference</a></li>
 
 <li class="toctree-l1"><a class="reference internal" href="../cli.html">CLI Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../runtimes.html">Serving Runtimes</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../models.html">Supported Models</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../architecture.html">Architecture</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Contributing</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../development.html">Development</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../adding-a-model.html">Adding a Model</a></li>
 </ul>
 
     </div>
@@ -490,7 +492,7 @@
 <li><p>Custom Voice Model</p></li>
 </ol>
 <p>Uses predefined speaker embeddings for consistent, high-quality voices.</p>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>-m<span class="w"> </span>vox_serve.launch<span class="w"> </span>--model<span class="w"> </span>Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice<span class="w"> </span>--port<span class="w"> </span><span class="m">8000</span>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>vox-serve<span class="w"> </span>--model<span class="w"> </span>Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice<span class="w"> </span>--port<span class="w"> </span><span class="m">8000</span>
 </pre></div>
 </div>
 <div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">requests</span>
@@ -506,7 +508,7 @@
 <section id="base-model">
 <h3>2. Base Model<a class="headerlink" href="#base-model" title="Link to this heading">#</a></h3>
 <p>Clone any voice using a reference audio sample and its transcript.</p>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>-m<span class="w"> </span>vox_serve.launch<span class="w"> </span>--model<span class="w"> </span>Qwen/Qwen3-TTS-12Hz-1.7B-Base<span class="w"> </span>--port<span class="w"> </span><span class="m">8000</span>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>vox-serve<span class="w"> </span>--model<span class="w"> </span>Qwen/Qwen3-TTS-12Hz-1.7B-Base<span class="w"> </span>--port<span class="w"> </span><span class="m">8000</span>
 </pre></div>
 </div>
 <div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">response</span> <span class="o">=</span> <span class="n">requests</span><span class="o">.</span><span class="n">post</span><span class="p">(</span><span class="s2">"http://localhost:8000/generate"</span><span class="p">,</span> <span class="n">json</span><span class="o">=</span><span class="p">{</span>
@@ -522,7 +524,7 @@
 <section id="voice-design-mode">
 <h3>3. Voice Design Mode<a class="headerlink" href="#voice-design-mode" title="Link to this heading">#</a></h3>
 <p>Generate voices based on natural language descriptions.</p>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>-m<span class="w"> </span>vox_serve.launch<span class="w"> </span>--model<span class="w"> </span>Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign<span class="w"> </span>--port<span class="w"> </span><span class="m">8000</span>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>vox-serve<span class="w"> </span>--model<span class="w"> </span>Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign<span class="w"> </span>--port<span class="w"> </span><span class="m">8000</span>
 </pre></div>
 </div>
 <div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">response</span> <span class="o">=</span> <span class="n">requests</span><span class="o">.</span><span class="n">post</span><span class="p">(</span><span class="s2">"http://localhost:8000/generate"</span><span class="p">,</span> <span class="n">json</span><span class="o">=</span><span class="p">{</span>
@@ -536,10 +538,11 @@
 <section id="input-streaming">
 <h3>Input Streaming<a class="headerlink" href="#input-streaming" title="Link to this heading">#</a></h3>
 <p>We also support input text streaming mode, ideal for connecting with text LLM to build a voice chatbot. For this, start the server with input streaming scheduler:</p>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>-m<span class="w"> </span>vox_serve.launch<span class="w"> </span>--model<span class="w"> </span>Qwen/Qwen3-TTS-12Hz-1.7B-Base<span class="w"> </span>--port<span class="w"> </span><span class="m">8000</span><span class="w"> </span>--scheduler<span class="w"> </span>input_streaming
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>vox-serve<span class="w"> </span>--model<span class="w"> </span>Qwen/Qwen3-TTS-12Hz-1.7B-Base<span class="w"> </span>--port<span class="w"> </span><span class="m">8000</span><span class="w"> </span>--scheduler-type<span class="w"> </span>input_streaming
 </pre></div>
 </div>
 <p>And see the example client script <a class="reference external" href="https://github.com/vox-serve/vox-serve/tree/main/examples/input_streaming">here</a>.</p>
+<p>With input streaming, the Base model clones a voice from its speaker embedding only, because in-context learning needs the whole text up front: without reference audio it uses the default voice, and a request with reference audio must set <code class="docutils literal notranslate"><span class="pre">x_vector_only_mode</span></code> to true.</p>
 </section>
 </section>
 </section>

@@ -1,0 +1,958 @@
+
+<!DOCTYPE html>
+
+
+<html lang="en" data-content_root="./" >
+
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>Adding a Model &#8212; VoxServe v0.0.1 Documentation</title>
+  
+  
+  
+  <script data-cfasync="false">
+    document.documentElement.dataset.mode = localStorage.getItem("mode") || "";
+    document.documentElement.dataset.theme = localStorage.getItem("theme") || "";
+  </script>
+  <!--
+    this give us a css class that will be invisible only if js is disabled
+  -->
+  <noscript>
+    <style>
+      .pst-js-only { display: none !important; }
+
+    </style>
+  </noscript>
+  
+  <!-- Loaded before other Sphinx assets -->
+  <link href="_static/styles/theme.css?digest=90905a2f556bf617f1a9" rel="stylesheet" />
+<link href="_static/styles/pydata-sphinx-theme.css?digest=90905a2f556bf617f1a9" rel="stylesheet" />
+
+    <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=8f2a1f02" />
+    <link rel="stylesheet" type="text/css" href="_static/styles/sphinx-book-theme.css?v=4418a689" />
+    <link rel="stylesheet" type="text/css" href="_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="_static/css/custom_log.css?v=229a0be7" />
+    <link rel="stylesheet" type="text/css" href="_static/css/custom_log.css?v=229a0be7" />
+  
+  <!-- So that users can add custom icons -->
+  <script defer src="_static/scripts/fontawesome.js?digest=90905a2f556bf617f1a9"></script>
+  <!-- Pre-loaded scripts that we'll load fully later -->
+  <link rel="preload" as="script" href="_static/scripts/bootstrap.js?digest=90905a2f556bf617f1a9" />
+<link rel="preload" as="script" href="_static/scripts/pydata-sphinx-theme.js?digest=90905a2f556bf617f1a9" />
+
+    <script src="_static/documentation_options.js?v=e645c8fa"></script>
+    <script src="_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="_static/copybutton.js?v=ccdb6887"></script>
+    <script src="_static/scripts/sphinx-book-theme.js?v=fab101a9"></script>
+    <script crossorigin="anonymous" integrity="sha256-Ae2Vz/4ePdIu6ZyI/5ZGsYnb+m0JlOmKPjt6XZ9JJkA=" src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.4/require.min.js"></script>
+    <script>DOCUMENTATION_OPTIONS.pagename = 'adding-a-model';</script>
+    <script>DOCUMENTATION_OPTIONS.search_as_you_type = false;</script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="prev" title="Development" href="development.html" />
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta name="docsearch:language" content="en"/>
+  <meta name="docsearch:version" content="0.0.1" />
+    <meta name="docbuild:last-update" content="Nov 01, 2026"/>
+  
+    
+    <script src="_static/searchtools.js"></script>
+    <script src="_static/language_data.js"></script>
+    <script src="searchindex.js"></script>
+  
+  </head>
+  <body data-default-mode="">
+  
+  
+  <div id="pst-skip-link" class="skip-link d-print-none"><a href="#main-content">Skip to main content</a></div>
+
+  
+  <div id="pst-scroll-pixel-helper"></div>
+  
+  <button type="button" class="btn rounded-pill" id="pst-back-to-top">
+    <i class="fa-solid fa-arrow-up"></i>Back to top</button>
+  
+  
+  
+  
+  <dialog id="pst-search-dialog">
+    
+<form class="bd-search d-flex align-items-center"
+      action="search.html"
+      method="get">
+  <i class="fa-solid fa-magnifying-glass"></i>
+  <input type="search"
+         class="form-control"
+         name="q"
+         placeholder="Search..."
+         aria-label="Search..."
+         autocomplete="off"
+         autocorrect="off"
+         autocapitalize="off"
+         spellcheck="false"/>
+  <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd>K</kbd></span>
+</form>
+  </dialog>
+
+  <div class="pst-async-banner-revealer d-none">
+  <aside id="bd-header-version-warning" class="d-none d-print-none" aria-label="Version warning"></aside>
+</div>
+
+  
+    <header id="pst-header" class="bd-header navbar navbar-expand-lg bd-navbar d-print-none">
+<div class="bd-header__inner bd-page-width">
+  <button class="pst-navbar-icon sidebar-toggle primary-toggle" aria-label="Site navigation">
+    <span class="fa-solid fa-bars"></span>
+  </button>
+  
+  
+  <div class="col-lg-9 navbar-header-items">
+    
+    
+    <div class="navbar-header-items__end">
+      
+        <div class="navbar-item navbar-persistent--container">
+          
+
+<button class="btn search-button-field search-button__button pst-js-only" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+ <i class="fa-solid fa-magnifying-glass"></i>
+ <span class="search-button__default-text">Search</span>
+ <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+</button>
+        </div>
+      
+      
+    </div>
+    
+  </div>
+  
+  
+    <div class="navbar-persistent--mobile">
+
+<button class="btn search-button-field search-button__button pst-js-only" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+ <i class="fa-solid fa-magnifying-glass"></i>
+ <span class="search-button__default-text">Search</span>
+ <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+</button>
+    </div>
+  
+
+  
+    <button class="pst-navbar-icon sidebar-toggle secondary-toggle" aria-label="On this page">
+      <span class="fa-solid fa-outdent"></span>
+    </button>
+  
+</div>
+
+    </header>
+  
+
+  <div class="bd-container">
+    <div class="bd-container__inner bd-page-width">
+      
+      
+      
+      <dialog id="pst-primary-sidebar-modal"></dialog>
+      <div id="pst-primary-sidebar" class="bd-sidebar-primary bd-sidebar">
+        
+
+  
+  <div class="sidebar-header-items sidebar-primary__section">
+    
+    
+    
+    
+  </div>
+  
+    <div class="sidebar-primary-items__start sidebar-primary__section">
+        <div class="sidebar-primary-item">
+
+  
+    
+  
+
+<a class="navbar-brand logo" href="index.html">
+  
+  
+  
+  
+  
+    
+    
+      
+    
+    
+    <img src="_static/logo-light.png" class="logo__image only-light" alt="VoxServe v0.0.1 Documentation - Home"/>
+    <img src="_static/logo-light.png" class="logo__image only-dark pst-js-only" alt="VoxServe v0.0.1 Documentation - Home"/>
+  
+  
+</a></div>
+        <div class="sidebar-primary-item">
+
+<button class="btn search-button-field search-button__button pst-js-only" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+ <i class="fa-solid fa-magnifying-glass"></i>
+ <span class="search-button__default-text">Search</span>
+ <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+</button></div>
+        <div class="sidebar-primary-item"><nav class="bd-links bd-docs-nav" aria-label="Main">
+    <div class="bd-toc-item navbar-nav active">
+        <p aria-level="2" class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="quickstart.html">Quickstart</a></li>
+<li class="toctree-l1"><a class="reference internal" href="concepts.html">Core Concepts</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Usage Guides</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1 has-children"><a class="reference internal" href="usage/index.html">Usage Guides</a><details open="open"><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l2"><a class="reference internal" href="usage/orpheus.html">Orpheus</a></li>
+<li class="toctree-l2"><a class="reference internal" href="usage/csm.html">CSM</a></li>
+<li class="toctree-l2"><a class="reference internal" href="usage/zonos.html">Zonos</a></li>
+<li class="toctree-l2"><a class="reference internal" href="usage/chatterbox.html">Chatterbox</a></li>
+<li class="toctree-l2"><a class="reference internal" href="usage/cosyvoice2.html">CosyVoice2</a></li>
+<li class="toctree-l2"><a class="reference internal" href="usage/qwen3-tts.html">Qwen3-TTS</a></li>
+<li class="toctree-l2"><a class="reference internal" href="usage/glm-voice.html">GLM-4-Voice</a></li>
+<li class="toctree-l2"><a class="reference internal" href="usage/step-audio.html">Step-Audio-2</a></li>
+</ul>
+</details></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="api.html">API Reference</a></li>
+
+<li class="toctree-l1"><a class="reference internal" href="cli.html">CLI Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="runtimes.html">Serving Runtimes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="models.html">Supported Models</a></li>
+<li class="toctree-l1"><a class="reference internal" href="architecture.html">Architecture</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Contributing</span></p>
+<ul class="current nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="development.html">Development</a></li>
+<li class="toctree-l1 current active"><a class="current reference internal" href="#">Adding a Model</a></li>
+</ul>
+
+    </div>
+</nav></div>
+    </div>
+  
+  
+  <div class="sidebar-primary-items__end sidebar-primary__section">
+      <div class="sidebar-primary-item">
+<div id="ethical-ad-placement"
+      class="flat"
+      data-ea-publisher="readthedocs"
+      data-ea-type="readthedocs-sidebar"
+      data-ea-manual="true">
+</div></div>
+  </div>
+
+
+      </div>
+      
+      <main id="main-content" class="bd-main" role="main">
+        
+        
+
+<div class="sbt-scroll-pixel-helper"></div>
+
+          <div class="bd-content">
+            <div class="bd-article-container">
+              
+              <div class="bd-header-article d-print-none">
+<div class="header-article-items header-article__inner">
+  
+    <div class="header-article-items__start">
+      
+        <div class="header-article-item"><button class="sidebar-toggle primary-toggle btn btn-sm" title="Toggle primary sidebar" data-bs-placement="bottom" data-bs-toggle="tooltip">
+  <span class="fa-solid fa-bars"></span>
+</button></div>
+      
+    </div>
+  
+  
+    <div class="header-article-items__end">
+      
+        <div class="header-article-item">
+
+<div class="article-header-buttons">
+
+
+
+
+
+<div class="dropdown dropdown-source-buttons">
+  <button class="btn dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" aria-label="Source repositories">
+    <i class="fab fa-github"></i>
+  </button>
+  <ul class="dropdown-menu">
+      
+      
+      
+      <li><a href="https://github.com/vox-serve/vox-serve" target="_blank"
+   class="btn btn-sm btn-source-repository-button dropdown-item"
+   title="Source repository"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fab fa-github"></i>
+  </span>
+<span class="btn__text-container">Repository</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li><a href="https://github.com/vox-serve/vox-serve/blob/main/adding-a-model.rst?plain=1" target="_blank"
+   class="btn btn-sm btn-source-file-button dropdown-item"
+   title="Show source"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-code"></i>
+  </span>
+<span class="btn__text-container">Show source</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li><a href="https://github.com/vox-serve/vox-serve/edit/main/adding-a-model.rst" target="_blank"
+   class="btn btn-sm btn-source-edit-button dropdown-item"
+   title="Suggest edit"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-pencil-alt"></i>
+  </span>
+<span class="btn__text-container">Suggest edit</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li><a href="https://github.com/vox-serve/vox-serve/issues/new?title=Issue%20on%20page%20%2Fadding-a-model.html&body=Your%20issue%20content%20here." target="_blank"
+   class="btn btn-sm btn-source-issues-button dropdown-item"
+   title="Open an issue"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-lightbulb"></i>
+  </span>
+<span class="btn__text-container">Open issue</span>
+</a>
+</li>
+      
+  </ul>
+</div>
+
+
+
+
+
+
+<div class="dropdown dropdown-download-buttons">
+  <button class="btn dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" aria-label="Download this page">
+    <i class="fas fa-download"></i>
+  </button>
+  <ul class="dropdown-menu">
+      
+      
+      
+      <li><a href="_sources/adding-a-model.rst" target="_blank"
+   class="btn btn-sm btn-download-source-button dropdown-item"
+   title="Download source file"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-file"></i>
+  </span>
+<span class="btn__text-container">.rst</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li>
+<button onclick="window.print()"
+  class="btn btn-sm btn-download-pdf-button dropdown-item"
+  title="Print to PDF"
+  data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-file-pdf"></i>
+  </span>
+<span class="btn__text-container">.pdf</span>
+</button>
+</li>
+      
+  </ul>
+</div>
+
+
+
+
+<button onclick="toggleFullScreen()"
+  class="btn btn-sm btn-fullscreen-button pst-navbar-icon"
+  title="Fullscreen mode"
+  data-bs-placement="bottom" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-expand"></i>
+  </span>
+
+</button>
+
+
+
+<div class="theme-switch-container dropdown pst-js-only" data-bs-toggle="tooltip" data-bs-placement="bottom" title="Color mode">
+  <button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button dropdown-toggle" aria-label="Color mode" data-bs-toggle="dropdown">
+    <i class="theme-switch fa-solid fa-sun fa-lg fa-fw" data-mode="light" title="Light"></i>
+    <i class="theme-switch fa-solid fa-moon fa-lg fa-fw" data-mode="dark" title="Dark"></i>
+    <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg fa-fw" data-mode="auto" title="System Settings"></i>
+  </button>
+  <ul class="dropdown-menu dropdown-menu-end">
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="auto"><i class="fa-solid fa-circle-half-stroke fa-lg fa-fw me-1"></i>System Settings</button></li>
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="light"><i class="fa-solid fa-sun fa-lg fa-fw me-1"></i>Light</button></li>
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="dark"><i class="fa-solid fa-moon fa-lg fa-fw me-1"></i>Dark</button></li>
+  </ul>
+</div>
+
+
+<button class="btn btn-sm pst-navbar-icon search-button search-button__button pst-js-only" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="fa-solid fa-magnifying-glass fa-lg"></i>
+</button>
+<button class="sidebar-toggle secondary-toggle btn btn-sm pst-navbar-icon" title="Toggle secondary sidebar" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <span class="fa-solid fa-list"></span>
+</button>
+</div></div>
+      
+    </div>
+  
+</div>
+</div>
+              
+              
+
+<div id="jb-print-docs-body" class="onlyprint">
+    <h1>Adding a Model</h1>
+    <!-- Table of contents -->
+    <div id="print-main-content">
+        <div id="jb-print-toc">
+            
+            <div>
+                <h2> Contents </h2>
+            </div>
+            <nav aria-label="Page">
+                <ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#how-a-program-runs">How a program runs</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#the-model-code">1. The model code</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#the-program">2. The program</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#registering-the-model">3. Registering the model</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#prompts">4. Prompts</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#validating">5. Validating</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#documentation">6. Documentation</a></li>
+</ul>
+            </nav>
+        </div>
+    </div>
+</div>
+
+              
+                
+<div id="searchbox"></div>
+                <article class="bd-article">
+                  
+  <section id="adding-a-model">
+<h1>Adding a Model<a class="headerlink" href="#adding-a-model" title="Link to this heading">#</a></h1>
+<p>A model is implemented once, in Python, as a <em>program</em>, and both runtimes (<a class="reference internal" href="runtimes.html"><span class="doc">Serving Runtimes</span></a>) serve it.
+Adding one touches no scheduler, worker or engine code:</p>
+<div class="pst-scrollable-table-container"><table class="table">
+<colgroup>
+<col style="width: 34.0%" />
+<col style="width: 50.0%" />
+<col style="width: 16.0%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"><p>File</p></th>
+<th class="head"><p>Contents</p></th>
+<th class="head"><p>Needed</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">vox_serve/model/&lt;name&gt;/model.py</span></code></p></td>
+<td><p>PyTorch modules, weight loading, codec, model constants (a <code class="docutils literal notranslate"><span class="pre">BaseLM</span></code> subclass)</p></td>
+<td><p>usually</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">vox_serve/model/&lt;name&gt;/program.py</span></code></p></td>
+<td><p>the program: how a step runs on the GPU, what sampled tokens mean, prompts, <code class="docutils literal notranslate"><span class="pre">meta</span></code></p></td>
+<td><p>yes</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">vox_serve/model/__init__.py</span></code></p></td>
+<td><p>the model names that select the program</p></td>
+<td><p>yes</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">rust/src/models/&lt;name&gt;.rs</span></code></p></td>
+<td><p>a prompt builder in Rust, for high request rates on the Rust runtime</p></td>
+<td><p>optional</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">README.md</span></code>, <code class="docutils literal notranslate"><span class="pre">docs/models.rst</span></code>, <code class="docutils literal notranslate"><span class="pre">docs/usage/&lt;name&gt;.md</span></code></p></td>
+<td><p>documentation</p></td>
+<td><p>yes</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>The shortest complete example is Orpheus (Llama-3.2-3B with the SNAC codec), whose whole program is shown
+in <a class="reference internal" href="#the-program"><span class="std std-ref">step 2</span></a>. The other programs cover multi-codebook models
+(<code class="docutils literal notranslate"><span class="pre">zonos</span></code>, <code class="docutils literal notranslate"><span class="pre">higgs_tts</span></code>), depth transformers (<code class="docutils literal notranslate"><span class="pre">csm</span></code>, <code class="docutils literal notranslate"><span class="pre">qwen3_tts</span></code>), flow-matching codecs (<code class="docutils literal notranslate"><span class="pre">cosyvoice2</span></code>,
+<code class="docutils literal notranslate"><span class="pre">chatterbox</span></code>), audio input (<code class="docutils literal notranslate"><span class="pre">step_audio_2</span></code>, <code class="docutils literal notranslate"><span class="pre">glm_voice</span></code>) and input streaming (<code class="docutils literal notranslate"><span class="pre">qwen3_tts</span></code>).</p>
+<section id="how-a-program-runs">
+<h2>How a program runs<a class="headerlink" href="#how-a-program-runs" title="Link to this heading">#</a></h2>
+<p>At start-up, the program allocates static buffers (KV cache, per-request sampling state) and declares
+<em>arenas</em>: named input and output fields in one device buffer each. It then captures every stage of a step
+as CUDA graphs, one per batch size:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">lm_prefill</span></code>: prompt rows, one graph per row bucket (<code class="docutils literal notranslate"><span class="pre">256</span></code>, <code class="docutils literal notranslate"><span class="pre">512</span></code>, <code class="docutils literal notranslate"><span class="pre">1024</span></code>, <code class="docutils literal notranslate"><span class="pre">2048</span></code>, up to
+<code class="docutils literal notranslate"><span class="pre">--max-context</span></code>);</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">lm_decode</span></code>: one row per request, for batch sizes 1, 2, 4, … up to <code class="docutils literal notranslate"><span class="pre">--max-batch-size</span></code>;</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">detok</span></code>: the codec, which turns a chunk of <code class="docutils literal notranslate"><span class="pre">detok_interval</span></code> frames into <code class="docutils literal notranslate"><span class="pre">detok_samples</span></code> audio samples.</p></li>
+</ul>
+<p>Each step, a runtime writes the inputs (tokens, positions, KV page tables, sampling parameters, …) into the
+input arena, replays the graphs and reads the output arena: the sampled tokens (<code class="docutils literal notranslate"><span class="pre">out_tok</span></code>) and their
+kind (<code class="docutils literal notranslate"><span class="pre">out_kind</span></code>: audio frame, stop, or other). The runtime never looks inside the model, and the program
+never sees requests, only rows and batch entries. <code class="docutils literal notranslate"><span class="pre">LMProgram</span></code> (<code class="docutils literal notranslate"><span class="pre">vox_serve/rt/program.py</span></code>) implements all
+of this; a program supplies the model-specific pieces. The conventions (rows fed back on the GPU, the
+scratch KV page, padding entries) are described at the top of <code class="docutils literal notranslate"><span class="pre">vox_serve/rt/program.py</span></code>.</p>
+<p>Code that runs inside a captured graph, which is everything a program’s hooks run except <code class="docutils literal notranslate"><span class="pre">load</span></code>,
+<code class="docutils literal notranslate"><span class="pre">preprocess</span></code> and <code class="docutils literal notranslate"><span class="pre">meta</span></code>, must follow the rules of CUDA graph capture:</p>
+<ul class="simple">
+<li><p><strong>No host synchronization.</strong> No <code class="docutils literal notranslate"><span class="pre">.item()</span></code>, <code class="docutils literal notranslate"><span class="pre">.cpu()</span></code>, <code class="docutils literal notranslate"><span class="pre">.tolist()</span></code>, printing tensors, or Python
+<code class="docutils literal notranslate"><span class="pre">if</span></code> on tensor values; use <code class="docutils literal notranslate"><span class="pre">torch.where</span></code> and masks.</p></li>
+<li><p><strong>Static shapes.</strong> Shapes may depend on the batch size or row bucket being captured, not on data.</p></li>
+<li><p><strong>State in buffers.</strong> Anything kept between steps or chunks lives in a buffer allocated in
+<code class="docutils literal notranslate"><span class="pre">allocate_state</span></code> and indexed by the request’s slot (<code class="docutils literal notranslate"><span class="pre">arena[&quot;slot&quot;]</span></code>), never in Python attributes.</p></li>
+<li><p><strong>Padding is real work.</strong> Unused batch entries (<code class="docutils literal notranslate"><span class="pre">active</span> <span class="pre">==</span> <span class="pre">0</span></code>) point at a dummy slot and KV page 0 and
+compute garbage that is ignored; they must not fail or write into other requests’ state.</p></li>
+<li><p><strong>Randomness through the sampler.</strong> <code class="docutils literal notranslate"><span class="pre">sample_into</span></code> draws from per-request seeds, so a request samples the
+same tokens whatever batch it lands in.</p></li>
+</ul>
+</section>
+<section id="the-model-code">
+<h2>1. The model code<a class="headerlink" href="#the-model-code" title="Link to this heading">#</a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">model.py</span></code> holds the PyTorch side, often adapted from the reference implementation:</p>
+<ul class="simple">
+<li><p><strong>Attention</strong> goes through FlashInfer’s paged KV cache. Each layer receives <code class="docutils literal notranslate"><span class="pre">attn_wrapper</span></code> and the paged
+cache, writes its keys and values with <code class="docutils literal notranslate"><span class="pre">attn_wrapper.set_kv_cache(kv_cache,</span> <span class="pre">k,</span> <span class="pre">v)</span></code> and attends with
+<code class="docutils literal notranslate"><span class="pre">attn_wrapper.run(q,</span> <span class="pre">kv_cache)</span></code>. The cache is laid out <code class="docutils literal notranslate"><span class="pre">[num_layers,</span> <span class="pre">num_pages,</span> <span class="pre">2,</span> <span class="pre">page_size,</span>
+<span class="pre">num_kv_heads,</span> <span class="pre">head_dim]</span></code>. <code class="docutils literal notranslate"><span class="pre">vox_serve/flashinfer_utils.py</span></code> has RoPE and RMSNorm kernels. Start from a
+model with the same backbone: Orpheus (Llama), CosyVoice2 (Qwen2), Qwen3-TTS (Qwen3).</p></li>
+<li><p><strong>The codec</strong> maps token ids <code class="docutils literal notranslate"><span class="pre">[batch,</span> <span class="pre">frames,</span> <span class="pre">codebooks]</span></code> to audio. Shared codecs live in
+<code class="docutils literal notranslate"><span class="pre">vox_serve/tokenizer/</span></code> (SNAC, Mimi, DAC, HiFT, …) and audio encoders in <code class="docutils literal notranslate"><span class="pre">vox_serve/encoder/</span></code>.</p></li>
+<li><p><strong>Constants</strong>: a <code class="docutils literal notranslate"><span class="pre">BaseLM</span></code> subclass (<code class="docutils literal notranslate"><span class="pre">vox_serve/model/base.py</span></code>) reports the layer and head counts,
+<code class="docutils literal notranslate"><span class="pre">detokenize_interval</span></code> (frames per audio chunk), <code class="docutils literal notranslate"><span class="pre">detokenize_overlap</span></code> (frames consecutive chunks
+share), <code class="docutils literal notranslate"><span class="pre">output_audio_length</span></code> (samples per chunk), <code class="docutils literal notranslate"><span class="pre">max_tokens</span></code> and <code class="docutils literal notranslate"><span class="pre">default_sampling_config</span></code>
+(a <code class="docutils literal notranslate"><span class="pre">vox_serve.sampling.SamplingConfig</span></code>).</p></li>
+</ul>
+<p>The model class does not run steps, sample or build prompts; the program does.</p>
+</section>
+<section id="the-program">
+<h2>2. The program<a class="headerlink" href="#the-program" title="Link to this heading">#</a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">program.py</span></code> subclasses <code class="docutils literal notranslate"><span class="pre">LMProgram</span></code>. The Orpheus program, complete:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="sd">"""Orpheus (Llama-3.2-3B + SNAC 24 kHz) graph program."""</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Any</span><span class="p">,</span> <span class="n">Dict</span><span class="p">,</span> <span class="n">List</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">...rt.core</span><span class="w"> </span><span class="kn">import</span> <span class="n">RtAttention</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">...rt.program</span><span class="w"> </span><span class="kn">import</span> <span class="n">LMProgram</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">.model</span><span class="w"> </span><span class="kn">import</span> <span class="n">OrpheusModel</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">OrpheusProgram</span><span class="p">(</span><span class="n">LMProgram</span><span class="p">):</span>
+    <span class="n">supports_urgent_lane</span> <span class="o">=</span> <span class="kc">True</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">load</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">name</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"model"</span><span class="p">,</span> <span class="s2">"canopylabs/orpheus-3b-0.1-ft"</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">name</span> <span class="o">==</span> <span class="s2">"orpheus"</span><span class="p">:</span>
+            <span class="n">name</span> <span class="o">=</span> <span class="s2">"canopylabs/orpheus-3b-0.1-ft"</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">model_name</span> <span class="o">=</span> <span class="n">name</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">model</span> <span class="o">=</span> <span class="n">OrpheusModel</span><span class="p">(</span>
+            <span class="n">name</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="nb">str</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">device</span><span class="p">),</span> <span class="n">audio_decoder_device</span><span class="o">=</span><span class="nb">str</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">detok_device</span><span class="p">),</span> <span class="n">tokenizer_path</span><span class="o">=</span><span class="n">name</span>
+        <span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">lm</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">model</span>
+        <span class="n">cfg</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">lm</span><span class="o">.</span><span class="n">config</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">n_codebooks</span> <span class="o">=</span> <span class="mi">1</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">vocab_size</span> <span class="o">=</span> <span class="n">cfg</span><span class="o">.</span><span class="n">vocab_size</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">num_layers</span> <span class="o">=</span> <span class="n">cfg</span><span class="o">.</span><span class="n">num_hidden_layers</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">num_qo_heads</span> <span class="o">=</span> <span class="n">cfg</span><span class="o">.</span><span class="n">num_attention_heads</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">num_kv_heads</span> <span class="o">=</span> <span class="n">cfg</span><span class="o">.</span><span class="n">num_key_value_heads</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">head_dim</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">head_dim</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">detok_interval</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">detokenize_interval</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">detok_samples</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">output_audio_length</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">embed</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">ids</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">arena</span><span class="p">,</span> <span class="n">rows</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">:</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">lm</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">embed_tokens</span><span class="p">(</span><span class="n">ids</span><span class="p">[:,</span> <span class="mi">0</span><span class="p">])</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">fuse_lm_modules</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">lm</span><span class="o">.</span><span class="n">model</span><span class="p">]</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">backbone</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">hidden</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">pos</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">attn</span><span class="p">:</span> <span class="n">RtAttention</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">:</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">lm</span><span class="o">.</span><span class="n">model</span><span class="p">(</span><span class="n">inputs_embeds</span><span class="o">=</span><span class="n">hidden</span><span class="p">,</span> <span class="n">position_ids</span><span class="o">=</span><span class="n">pos</span><span class="p">,</span> <span class="n">attn_wrapper</span><span class="o">=</span><span class="n">attn</span><span class="p">,</span> <span class="n">kv_cache</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">kv_cache</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">head</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">hidden</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">:</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">lm</span><span class="o">.</span><span class="n">lm_head</span><span class="p">(</span><span class="n">hidden</span><span class="p">)[:,</span> <span class="kc">None</span><span class="p">,</span> <span class="p">:]</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">detokenize</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">tokens</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">:</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">postprocess</span><span class="p">(</span><span class="n">tokens</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">stop_tokens</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">List</span><span class="p">[</span><span class="nb">int</span><span class="p">]:</span>
+        <span class="k">return</span> <span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">stop_token_id</span><span class="p">]</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">meta</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]:</span>
+        <span class="kn">from</span><span class="w"> </span><span class="nn">huggingface_hub</span><span class="w"> </span><span class="kn">import</span> <span class="n">hf_hub_download</span>
+
+        <span class="n">sc</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">default_sampling_config</span>
+        <span class="k">return</span> <span class="p">{</span>
+            <span class="s2">"kind"</span><span class="p">:</span> <span class="s2">"orpheus"</span><span class="p">,</span>
+            <span class="s2">"model_name"</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">model_name</span><span class="p">,</span>
+            <span class="c1"># `{voice}: {text}` between Orpheus' start-of-human / end-of-human-and-start-of-AI ids.</span>
+            <span class="s2">"prompt_builder"</span><span class="p">:</span> <span class="s2">"template"</span><span class="p">,</span>
+            <span class="s2">"prompt_template"</span><span class="p">:</span> <span class="p">{</span>
+                <span class="s2">"tokenizer_json"</span><span class="p">:</span> <span class="n">hf_hub_download</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">model_name</span><span class="p">,</span> <span class="s2">"tokenizer.json"</span><span class="p">),</span>
+                <span class="s2">"prefix_ids"</span><span class="p">:</span> <span class="p">[</span><span class="mi">128259</span><span class="p">],</span>
+                <span class="s2">"suffix_ids"</span><span class="p">:</span> <span class="p">[</span><span class="mi">128009</span><span class="p">,</span> <span class="mi">128260</span><span class="p">,</span> <span class="mi">128261</span><span class="p">,</span> <span class="mi">128257</span><span class="p">],</span>
+                <span class="s2">"text"</span><span class="p">:</span> <span class="s2">"</span><span class="si">{voice}</span><span class="s2">: </span><span class="si">{text}</span><span class="s2">"</span><span class="p">,</span>
+                <span class="s2">"kwargs"</span><span class="p">:</span> <span class="p">{</span><span class="s2">"voice"</span><span class="p">:</span> <span class="p">{</span><span class="s2">"default"</span><span class="p">:</span> <span class="s2">"tara"</span><span class="p">,</span> <span class="s2">"choices"</span><span class="p">:</span> <span class="nb">list</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">available_voices</span><span class="p">)}},</span>
+            <span class="p">},</span>
+            <span class="s2">"sample_rate"</span><span class="p">:</span> <span class="mi">24000</span><span class="p">,</span>
+            <span class="s2">"detok_overlap"</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">detokenize_overlap</span><span class="p">,</span>
+            <span class="s2">"max_tokens"</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">max_tokens</span><span class="p">,</span>
+            <span class="s2">"sampling"</span><span class="p">:</span> <span class="p">{</span>
+                <span class="s2">"temperature"</span><span class="p">:</span> <span class="n">sc</span><span class="o">.</span><span class="n">temperature</span><span class="p">,</span>
+                <span class="s2">"top_k"</span><span class="p">:</span> <span class="n">sc</span><span class="o">.</span><span class="n">top_k</span> <span class="ow">or</span> <span class="mi">0</span><span class="p">,</span>
+                <span class="s2">"top_p"</span><span class="p">:</span> <span class="n">sc</span><span class="o">.</span><span class="n">top_p</span> <span class="k">if</span> <span class="n">sc</span><span class="o">.</span><span class="n">top_p</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="mf">1.0</span><span class="p">,</span>
+                <span class="s2">"min_p"</span><span class="p">:</span> <span class="n">sc</span><span class="o">.</span><span class="n">min_p</span> <span class="ow">or</span> <span class="mf">0.0</span><span class="p">,</span>
+                <span class="s2">"repetition_penalty"</span><span class="p">:</span> <span class="n">sc</span><span class="o">.</span><span class="n">repetition_penalty</span> <span class="ow">or</span> <span class="mf">1.0</span><span class="p">,</span>
+                <span class="s2">"repetition_window"</span><span class="p">:</span> <span class="n">sc</span><span class="o">.</span><span class="n">repetition_window</span> <span class="k">if</span> <span class="n">sc</span><span class="o">.</span><span class="n">repetition_window</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="o">-</span><span class="mi">1</span><span class="p">,</span>
+            <span class="p">},</span>
+        <span class="p">}</span>
+</pre></div>
+</div>
+<p>Required pieces:</p>
+<dl class="simple">
+<dt><code class="docutils literal notranslate"><span class="pre">load()</span></code></dt><dd><p>Builds the model on <code class="docutils literal notranslate"><span class="pre">self.device</span></code> (the codec on <code class="docutils literal notranslate"><span class="pre">self.detok_device</span></code>, a second GPU with
+<code class="docutils literal notranslate"><span class="pre">--enable-disaggregation</span></code>) and sets <code class="docutils literal notranslate"><span class="pre">n_codebooks</span></code>, <code class="docutils literal notranslate"><span class="pre">vocab_size</span></code>, <code class="docutils literal notranslate"><span class="pre">num_layers</span></code>, <code class="docutils literal notranslate"><span class="pre">num_qo_heads</span></code>,
+<code class="docutils literal notranslate"><span class="pre">num_kv_heads</span></code>, <code class="docutils literal notranslate"><span class="pre">head_dim</span></code>, <code class="docutils literal notranslate"><span class="pre">detok_interval</span></code> and <code class="docutils literal notranslate"><span class="pre">detok_samples</span></code>. <code class="docutils literal notranslate"><span class="pre">self.config</span></code> holds the
+command-line options (<code class="docutils literal notranslate"><span class="pre">model</span></code>, <code class="docutils literal notranslate"><span class="pre">max_batch_size</span></code>, <code class="docutils literal notranslate"><span class="pre">fuse_lm</span></code>, …); map the short model name to a
+Hugging Face id here.</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">embed(ids,</span> <span class="pre">arena,</span> <span class="pre">rows)</span></code>, <code class="docutils literal notranslate"><span class="pre">backbone(hidden,</span> <span class="pre">pos,</span> <span class="pre">attn)</span></code>, <code class="docutils literal notranslate"><span class="pre">head(hidden)</span></code></dt><dd><p>Token ids <code class="docutils literal notranslate"><span class="pre">[rows,</span> <span class="pre">n_codebooks]</span></code> to hidden states, the decoder stack over paged attention, and hidden
+states <code class="docutils literal notranslate"><span class="pre">[N,</span> <span class="pre">H]</span></code> to logits <code class="docutils literal notranslate"><span class="pre">[N,</span> <span class="pre">n_codebooks,</span> <span class="pre">vocab]</span></code>. <code class="docutils literal notranslate"><span class="pre">self.kv_cache</span></code> is the paged cache.</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">detokenize(tokens)</span></code></dt><dd><p><code class="docutils literal notranslate"><span class="pre">[Bd,</span> <span class="pre">detok_interval,</span> <span class="pre">n_codebooks]</span></code> token ids to float audio in <code class="docutils literal notranslate"><span class="pre">[-1,</span> <span class="pre">1]</span></code> with <code class="docutils literal notranslate"><span class="pre">Bd</span> <span class="pre">*</span> <span class="pre">detok_samples</span></code>
+values. Consecutive chunks start <code class="docutils literal notranslate"><span class="pre">detok_interval</span> <span class="pre">-</span> <span class="pre">detok_overlap</span></code> frames apart, and each returns only the
+samples it adds.</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">stop_tokens()</span></code>, <code class="docutils literal notranslate"><span class="pre">audio_tokens()</span></code></dt><dd><p>Which codebook-0 tokens end generation, and the <code class="docutils literal notranslate"><span class="pre">[lo,</span> <span class="pre">hi)</span></code> range that is audio (other tokens, such as
+interleaved text, are fed back but not decoded). Override <code class="docutils literal notranslate"><span class="pre">token_kind(tok)</span></code> for anything else.</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">meta()</span></code></dt><dd><p>Model constants for the runtimes (table below).</p>
+</dd>
+<dt>Prompts</dt><dd><p><code class="docutils literal notranslate"><span class="pre">preprocess</span></code>, or the <code class="docutils literal notranslate"><span class="pre">template</span></code> prompt builder (see <a class="reference internal" href="#prompts"><span class="std std-ref">step 4</span></a>).</p>
+</dd>
+</dl>
+<p>Optional pieces (look at the programs named for examples):</p>
+<div class="pst-scrollable-table-container"><table class="table">
+<colgroup>
+<col style="width: 38.0%" />
+<col style="width: 62.0%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"><p>Override / attribute</p></th>
+<th class="head"><p>Use</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">decode_tokens(hidden,</span> <span class="pre">arena,</span> <span class="pre">out_tok,</span> <span class="pre">n_req)</span></code></p></td>
+<td><p>Custom sampling: depth transformers (<code class="docutils literal notranslate"><span class="pre">csm</span></code>), delay patterns (<code class="docutils literal notranslate"><span class="pre">zonos</span></code>), classifier-free guidance
+(<code class="docutils literal notranslate"><span class="pre">voxtral_tts</span></code>). Sample with <code class="docutils literal notranslate"><span class="pre">self.sample_into</span></code>, with a different <code class="docutils literal notranslate"><span class="pre">salt</span></code> per sampling call.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">allocate_state()</span></code></p></td>
+<td><p>Extra per-slot buffers (call <code class="docutils literal notranslate"><span class="pre">super().allocate_state()</span></code> first).</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">uses_input_mask</span> <span class="pre">=</span> <span class="pre">True</span></code> + <code class="docutils literal notranslate"><span class="pre">meta[&quot;decode_mask&quot;]</span></code></p></td>
+<td><p>A per-column input mask next to the tokens (e.g. which columns of a row are text or audio).</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">fb_columns</span></code> + <code class="docutils literal notranslate"><span class="pre">meta[&quot;decode_row&quot;]</span></code></p></td>
+<td><p>Only the first <code class="docutils literal notranslate"><span class="pre">fb_columns</span></code> columns of decode rows are fed back from the last sample; the
+others come from <code class="docutils literal notranslate"><span class="pre">decode_row</span></code>.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">uses_repetition_penalty</span> <span class="pre">=</span> <span class="pre">False</span></code></p></td>
+<td><p>The model has no repetition penalty (or applies its own in <code class="docutils literal notranslate"><span class="pre">decode_tokens</span></code>).</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">detok_stateful</span> <span class="pre">=</span> <span class="pre">True</span></code></p></td>
+<td><p>The codec keeps per-request state across chunks; <code class="docutils literal notranslate"><span class="pre">arena[&quot;dt_slot&quot;]</span></code> / <code class="docutils literal notranslate"><span class="pre">arena[&quot;dt_reset&quot;]</span></code> index
+and reset it.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">feature_pool_rows</span></code>, <code class="docutils literal notranslate"><span class="pre">feature_dim</span></code></p></td>
+<td><p>Audio input: encoded audio rows that prompts reference through the input mask (<code class="docutils literal notranslate"><span class="pre">step_audio_2</span></code>).</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">tokenize_stream_text</span></code>, <code class="docutils literal notranslate"><span class="pre">preprocess_streaming</span></code> + <code class="docutils literal notranslate"><span class="pre">meta[&quot;text_stream&quot;]</span></code></p></td>
+<td><p>Input streaming: text arriving while audio is generated (<code class="docutils literal notranslate"><span class="pre">qwen3_tts</span></code>).</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">supports_urgent_lane</span> <span class="pre">=</span> <span class="pre">True</span></code></p></td>
+<td><p>The codec can run on a second lane at the same time (no shared scratch state between calls).</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">decode_head</span></code> / <code class="docutils literal notranslate"><span class="pre">decode_depth</span></code> (<code class="docutils literal notranslate"><span class="pre">supports_depth_split</span></code>), <code class="docutils literal notranslate"><span class="pre">backbone_range</span></code>
+(<code class="docutils literal notranslate"><span class="pre">supports_layer_split</span></code>)</p></td>
+<td><p>The LM step can be captured in segments (<code class="docutils literal notranslate"><span class="pre">--lm-segments</span></code>).</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">fuse_lm_modules()</span></code>, <code class="docutils literal notranslate"><span class="pre">fused_stack_spec()</span></code>, <code class="docutils literal notranslate"><span class="pre">compile_detok_targets()</span></code></p></td>
+<td><p>Kernel fusion with <code class="docutils literal notranslate"><span class="pre">--fuse-lm</span></code>, <code class="docutils literal notranslate"><span class="pre">--fuse-layers</span></code> and <code class="docutils literal notranslate"><span class="pre">--compile-detok</span></code> (<code class="docutils literal notranslate"><span class="pre">vox_serve/fusion/</span></code>).</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">meta()</span></code> keys (<code class="docutils literal notranslate"><span class="pre">LMProgram</span></code> adds the common ones: batch sizes, page size, codebooks, …):</p>
+<div class="pst-scrollable-table-container"><table class="table">
+<colgroup>
+<col style="width: 25.0%" />
+<col style="width: 75.0%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"><p>Key</p></th>
+<th class="head"><p>Meaning</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">kind</span></code></p></td>
+<td><p>The model’s identifier; also selects the Rust prompt builder unless <code class="docutils literal notranslate"><span class="pre">prompt_builder</span></code> is set.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">prompt_builder</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">python</span></code> (the program’s <code class="docutils literal notranslate"><span class="pre">preprocess</span></code>), <code class="docutils literal notranslate"><span class="pre">template</span></code>, or a Rust builder’s name.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">max_tokens</span></code></p></td>
+<td><p>Per-request token limit, prompt included (required).</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">sampling</span></code></p></td>
+<td><p>Default <code class="docutils literal notranslate"><span class="pre">temperature</span></code>, <code class="docutils literal notranslate"><span class="pre">top_k</span></code>, <code class="docutils literal notranslate"><span class="pre">top_p</span></code>, <code class="docutils literal notranslate"><span class="pre">min_p</span></code>, <code class="docutils literal notranslate"><span class="pre">repetition_penalty</span></code>; the <code class="docutils literal notranslate"><span class="pre">--temperature</span></code>
+etc. flags override them.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">sample_rate</span></code></p></td>
+<td><p>Output sample rate in Hz (default 24000).</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">detok_overlap</span></code></p></td>
+<td><p>Frames consecutive audio chunks share (default 0).</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">preseed_frames</span></code></p></td>
+<td><p>Zero frames placed before the first audio frame, so the first chunk is decoded earlier; their
+samples are trimmed.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">decode_mask</span></code>, <code class="docutils literal notranslate"><span class="pre">decode_row</span></code>, <code class="docutils literal notranslate"><span class="pre">text_stream</span></code></p></td>
+<td><p>See the optional pieces above.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">chunk_samples</span></code>, <code class="docutils literal notranslate"><span class="pre">audio_len_in_row</span></code></p></td>
+<td><p>Codecs whose chunks vary in length: samples a chunk advances, and the valid length stored in the last
+sample of each audio row.</p></td>
+</tr>
+<tr class="row-odd"><td><p>anything else</p></td>
+<td><p>Inputs of the prompt builders (tokenizer paths, special token ids, voices, …).</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+<section id="registering-the-model">
+<h2>3. Registering the model<a class="headerlink" href="#registering-the-model" title="Link to this heading">#</a></h2>
+<p>Add the names that select the program to <code class="docutils literal notranslate"><span class="pre">_PROGRAMS</span></code> in <code class="docutils literal notranslate"><span class="pre">vox_serve/model/__init__.py</span></code>, lower case, as
+<code class="docutils literal notranslate"><span class="pre">(package,</span> <span class="pre">class)</span></code>. <code class="docutils literal notranslate"><span class="pre">--model</span></code> is matched exactly first, then as a substring, so list the short name and the
+Hugging Face organization prefix:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="s2">"my-tts"</span><span class="p">:</span> <span class="p">(</span><span class="s2">"my_tts"</span><span class="p">,</span> <span class="s2">"MyTTSProgram"</span><span class="p">),</span>
+<span class="s2">"my-org/my-tts"</span><span class="p">:</span> <span class="p">(</span><span class="s2">"my_tts"</span><span class="p">,</span> <span class="s2">"MyTTSProgram"</span><span class="p">),</span>
+</pre></div>
+</div>
+</section>
+<section id="prompts">
+<h2>4. Prompts<a class="headerlink" href="#prompts" title="Link to this heading">#</a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">preprocess(text,</span> <span class="pre">audio_path,</span> <span class="pre">model_kwargs)</span></code> returns a <code class="docutils literal notranslate"><span class="pre">Prompt</span></code> (<code class="docutils literal notranslate"><span class="pre">vox_serve/rt/prompt.py</span></code>): the
+prompt’s rows flattened to <code class="docutils literal notranslate"><span class="pre">[rows</span> <span class="pre">*</span> <span class="pre">n_codebooks]</span></code> token ids, and with <code class="docutils literal notranslate"><span class="pre">uses_input_mask</span></code> a mask of the
+same length. <code class="docutils literal notranslate"><span class="pre">model_kwargs</span></code> holds the request’s model-specific options (<code class="docutils literal notranslate"><span class="pre">voice</span></code>, <code class="docutils literal notranslate"><span class="pre">speaker</span></code>,
+<code class="docutils literal notranslate"><span class="pre">language</span></code>, <code class="docutils literal notranslate"><span class="pre">ref_text</span></code>, <code class="docutils literal notranslate"><span class="pre">instruct</span></code>, <code class="docutils literal notranslate"><span class="pre">x_vector_only_mode</span></code>); a new option has to be added to both
+servers’ <code class="docutils literal notranslate"><span class="pre">/generate</span></code> form handling (<code class="docutils literal notranslate"><span class="pre">vox_serve/launch.py</span></code> and <code class="docutils literal notranslate"><span class="pre">rust/src/server.rs</span></code>). Raise
+<code class="docutils literal notranslate"><span class="pre">ValueError</span></code> for unsupported input, such as audio for a model without audio input: the request then fails
+with that message.</p>
+<p>The Python runtime always calls <code class="docutils literal notranslate"><span class="pre">preprocess</span></code>. The Rust runtime uses the builder named in <code class="docutils literal notranslate"><span class="pre">meta</span></code>:</p>
+<dl class="simple">
+<dt><code class="docutils literal notranslate"><span class="pre">python</span></code></dt><dd><p>Calls <code class="docutils literal notranslate"><span class="pre">preprocess</span></code> for every request, holding the Python interpreter lock while it runs. Start here: it
+needs no Rust, and it is fast enough unless requests arrive at high rates. It does not support prompts
+that use the feature pool (audio input) or input streaming.</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">template</span></code></dt><dd><p>For prompts that are fixed token ids around a tokenized text template, configured in
+<code class="docutils literal notranslate"><span class="pre">meta[&quot;prompt_template&quot;]</span></code> (Orpheus above). Runs in Rust; no <code class="docutils literal notranslate"><span class="pre">preprocess</span></code> needed.</p>
+</dd>
+<dt>A Rust builder</dt><dd><p><code class="docutils literal notranslate"><span class="pre">rust/src/models/&lt;name&gt;.rs</span></code> implements the <code class="docutils literal notranslate"><span class="pre">PromptBuilder</span></code> trait (<code class="docutils literal notranslate"><span class="pre">preprocess</span></code>, and
+<code class="docutils literal notranslate"><span class="pre">tokenize_stream_text</span></code> / <code class="docutils literal notranslate"><span class="pre">preprocess_streaming</span></code> for input streaming), reads its constants from
+<code class="docutils literal notranslate"><span class="pre">meta</span></code> in its constructor, and is registered under the model’s <code class="docutils literal notranslate"><span class="pre">kind</span></code> in <code class="docutils literal notranslate"><span class="pre">load</span></code> in
+<code class="docutils literal notranslate"><span class="pre">rust/src/models/mod.rs</span></code>. Steps that need PyTorch (encoding reference audio, phonemization) can stay
+in Python as hooks: <code class="docutils literal notranslate"><span class="pre">Hooks::call(&quot;name&quot;,</span> <span class="pre">args)</span></code> runs the program’s <code class="docutils literal notranslate"><span class="pre">hook_&lt;name&gt;</span></code> (see <code class="docutils literal notranslate"><span class="pre">zonos.rs</span></code>).
+The builder must produce exactly the rows <code class="docutils literal notranslate"><span class="pre">preprocess</span></code> does. Compare them with
+<code class="docutils literal notranslate"><span class="pre">vox_serve._rt.build_prompt(meta_json,</span> <span class="pre">text,</span> <span class="pre">audio_path,</span> <span class="pre">model_kwargs_json)</span></code>, or serve with
+<code class="docutils literal notranslate"><span class="pre">--prompt-builder</span> <span class="pre">python</span></code> and compare greedy outputs.</p>
+</dd>
+</dl>
+</section>
+<section id="validating">
+<h2>5. Validating<a class="headerlink" href="#validating" title="Link to this heading">#</a></h2>
+<p>There is no GPU test suite; validate by serving.</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># Debug model code eagerly (Python exceptions, prints), then with CUDA graphs, in the Python runtime.</span>
+vox-serve<span class="w"> </span>--runtime<span class="w"> </span>python<span class="w"> </span>--model<span class="w"> </span>my-tts<span class="w"> </span>--disable-cuda-graph<span class="w"> </span>--port<span class="w"> </span><span class="m">8000</span>
+vox-serve<span class="w"> </span>--runtime<span class="w"> </span>python<span class="w"> </span>--model<span class="w"> </span>my-tts<span class="w"> </span>--port<span class="w"> </span><span class="m">8000</span>
+curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>localhost:8000/generate<span class="w"> </span>-F<span class="w"> </span><span class="s2">"text=Hello world"</span><span class="w"> </span>-F<span class="w"> </span><span class="s2">"streaming=true"</span><span class="w"> </span>-o<span class="w"> </span>out.wav
+
+<span class="c1"># The Rust runtime: concurrent requests without HTTP, greedy, audio written to a directory.</span>
+vox-serve<span class="w"> </span>--runtime<span class="w"> </span>rust<span class="w"> </span>--model<span class="w"> </span>my-tts<span class="w"> </span>--bench-requests<span class="w"> </span><span class="m">4</span><span class="w"> </span>--bench-out<span class="w"> </span>/tmp/my-tts<span class="w"> </span>--greedy
+python<span class="w"> </span>rust/scripts/asr_check.py<span class="w"> </span>/tmp/my-tts/bench_*.wav<span class="w">   </span><span class="c1"># Whisper transcripts of the outputs</span>
+</pre></div>
+</div>
+<p>Check that:</p>
+<ul class="simple">
+<li><p>the audio is intelligible and complete (the ASR transcript matches the text, the end is not cut off);</p></li>
+<li><p>streaming and non-streaming requests both work, in both runtimes;</p></li>
+<li><p>several concurrent requests give the same quality as one (bugs in per-slot state or padding entries only
+show with batching) and greedy outputs do not depend on the batch;</p></li>
+<li><p>with a Rust prompt builder, its prompts equal <code class="docutils literal notranslate"><span class="pre">preprocess</span></code>’s.</p></li>
+</ul>
+<p>Then measure throughput and latency under load with <code class="docutils literal notranslate"><span class="pre">benchmark/</span></code>.</p>
+</section>
+<section id="documentation">
+<h2>6. Documentation<a class="headerlink" href="#documentation" title="Link to this heading">#</a></h2>
+<p>Add the model to the table in <code class="docutils literal notranslate"><span class="pre">README.md</span></code> and <a class="reference internal" href="models.html"><span class="doc">Supported Models</span></a>, and add a usage page (<code class="docutils literal notranslate"><span class="pre">docs/usage/&lt;name&gt;.md</span></code>,
+listed in <code class="docutils literal notranslate"><span class="pre">docs/usage/index.rst</span></code>) with its request options.</p>
+</section>
+</section>
+
+
+                </article>
+              
+
+              
+              
+              
+              
+                <footer class="prev-next-footer d-print-none">
+                  
+<div class="prev-next-area">
+    <a class="left-prev"
+       href="development.html"
+       title="previous page">
+      <i class="fa-solid fa-angle-left"></i>
+      <div class="prev-next-info">
+        <p class="prev-next-subtitle">previous</p>
+        <p class="prev-next-title">Development</p>
+      </div>
+    </a>
+</div>
+                </footer>
+              
+            </div>
+            
+            
+              
+                <dialog id="pst-secondary-sidebar-modal"></dialog>
+                <div id="pst-secondary-sidebar" class="bd-sidebar-secondary bd-toc"><div class="sidebar-secondary-items sidebar-secondary__inner">
+
+
+  <div class="sidebar-secondary-item"><div
+    id="pst-page-navigation-heading-2"
+    class="page-toc tocsection onthispage">
+    <i class="fa-solid fa-list"></i> Contents
+  </div>
+  <nav id="pst-page-toc-nav" class="page-toc" aria-labelledby="pst-page-navigation-heading-2">
+    <ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#how-a-program-runs">How a program runs</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#the-model-code">1. The model code</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#the-program">2. The program</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#registering-the-model">3. Registering the model</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#prompts">4. Prompts</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#validating">5. Validating</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#documentation">6. Documentation</a></li>
+</ul>
+  </nav></div>
+
+</div></div>
+              
+            
+          </div>
+          <footer class="bd-footer-content">
+            
+<div class="bd-footer-content__inner container">
+  
+  <div class="footer-item">
+    
+<p class="component-author">
+By VoxServe Team
+</p>
+
+  </div>
+  
+  <div class="footer-item">
+    
+
+  <p class="copyright">
+    
+      © Copyright 2025-2026, VoxServe Team.
+      <br/>
+    
+  </p>
+
+  </div>
+  
+  <div class="footer-item">
+    <p class="last-updated">
+  Last updated on Nov 01, 2026.
+  <br/>
+</p>
+  </div>
+  
+  <div class="footer-item">
+    
+  </div>
+  
+</div>
+          </footer>
+        
+
+      </main>
+    </div>
+  </div>
+  
+  <!-- Scripts loaded after <body> so the DOM is not blocked -->
+  <script defer src="_static/scripts/bootstrap.js?digest=90905a2f556bf617f1a9"></script>
+<script defer src="_static/scripts/pydata-sphinx-theme.js?digest=90905a2f556bf617f1a9"></script>
+
+  <footer class="bd-footer">
+  </footer>
+  </body>
+</html>

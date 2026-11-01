@@ -1,4 +1,4 @@
-vox\_serve.scheduler
+﻿vox\_serve.scheduler
 ====================
 
 .. automodule:: vox_serve.scheduler

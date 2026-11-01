@@ -1,4 +1,4 @@
-vox\_serve.fusion
+﻿vox\_serve.fusion
 =================
 
 .. automodule:: vox_serve.fusion

@@ -1,4 +1,4 @@
-vox\_serve.model
+﻿vox\_serve.model
 ================
 
 .. automodule:: vox_serve.model

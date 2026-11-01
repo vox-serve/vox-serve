@@ -53,6 +53,7 @@
     <script>DOCUMENTATION_OPTIONS.search_as_you_type = false;</script>
     <link rel="index" title="Index" href="genindex.html" />
     <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="Adding a Model" href="adding-a-model.html" />
     <link rel="prev" title="Architecture" href="architecture.html" />
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
@@ -224,12 +225,14 @@
 <li class="toctree-l1"><a class="reference internal" href="api.html">API Reference</a></li>
 
 <li class="toctree-l1"><a class="reference internal" href="cli.html">CLI Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="runtimes.html">Serving Runtimes</a></li>
 <li class="toctree-l1"><a class="reference internal" href="models.html">Supported Models</a></li>
 <li class="toctree-l1"><a class="reference internal" href="architecture.html">Architecture</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Contributing</span></p>
 <ul class="current nav bd-sidenav">
 <li class="toctree-l1 current active"><a class="current reference internal" href="#">Development</a></li>
+<li class="toctree-l1"><a class="reference internal" href="adding-a-model.html">Adding a Model</a></li>
 </ul>
 
     </div>
@@ -465,9 +468,10 @@
                 <ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#local-setup">Local setup</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#run-the-server">Run the server</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#formatting-and-linting">Formatting and linting</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#repository-layout">Repository layout</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#checks">Checks</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#continuous-integration">Continuous integration</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#build-documentation">Build documentation</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#manual-validation">Manual validation</a></li>
 </ul>
             </nav>
         </div>
@@ -486,19 +490,78 @@
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>pip<span class="w"> </span>install<span class="w"> </span>-e<span class="w"> </span>.
 </pre></div>
 </div>
+<p>This also builds the Rust runtime (the <code class="docutils literal notranslate"><span class="pre">vox_serve._rt</span></code> extension) when a Rust toolchain and the CUDA
+compiler are available (<a class="reference internal" href="runtimes.html#installing-the-rust-runtime"><span class="std std-ref">Installing the Rust runtime</span></a>); otherwise it is skipped and
+<code class="docutils literal notranslate"><span class="pre">vox-serve</span></code> runs the Python runtime. Python changes take effect immediately. After changing anything under
+<code class="docutils literal notranslate"><span class="pre">rust/</span></code>, run <code class="docutils literal notranslate"><span class="pre">pip</span> <span class="pre">install</span> <span class="pre">-e</span> <span class="pre">.</span></code> again; <code class="docutils literal notranslate"><span class="pre">VOX_CUDA_ARCHS=90</span></code> (one GPU architecture) makes that build
+faster.</p>
 </section>
 <section id="run-the-server">
 <h2>Run the server<a class="headerlink" href="#run-the-server" title="Link to this heading">#</a></h2>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>-m<span class="w"> </span>vox_serve.launch<span class="w"> </span>--model<span class="w"> </span>&lt;model-name&gt;<span class="w"> </span>--port<span class="w"> </span><span class="m">8000</span>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>vox-serve<span class="w"> </span>--model<span class="w"> </span>&lt;model-name&gt;<span class="w"> </span>--port<span class="w"> </span><span class="m">8000</span><span class="w">                    </span><span class="c1"># Rust runtime (Python if unavailable)</span>
+vox-serve<span class="w"> </span>--runtime<span class="w"> </span>python<span class="w"> </span>--model<span class="w"> </span>&lt;model-name&gt;<span class="w"> </span>--port<span class="w"> </span><span class="m">8000</span><span class="w">   </span><span class="c1"># Python runtime</span>
 </pre></div>
 </div>
 </section>
-<section id="formatting-and-linting">
-<h2>Formatting and linting<a class="headerlink" href="#formatting-and-linting" title="Link to this heading">#</a></h2>
+<section id="repository-layout">
+<h2>Repository layout<a class="headerlink" href="#repository-layout" title="Link to this heading">#</a></h2>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">vox_serve/model/&lt;name&gt;/</span></code>: the models, one program each, used by both runtimes (<a class="reference internal" href="adding-a-model.html"><span class="doc">Adding a Model</span></a>).</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">vox_serve/rt/</span></code>: what the programs share (base program, graph capture, sampling kernels, prompts).</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">vox_serve/fusion/</span></code>: fused kernels behind the <code class="docutils literal notranslate"><span class="pre">--fuse-*</span></code> flags.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">vox_serve/launch.py</span></code>, <code class="docutils literal notranslate"><span class="pre">vox_serve/scheduler/</span></code>, <code class="docutils literal notranslate"><span class="pre">vox_serve/worker/</span></code>: the Python runtime.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">vox_serve/cli.py</span></code>: the <code class="docutils literal notranslate"><span class="pre">vox-serve</span></code> command, which picks the runtime.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">rust/</span></code>: the Rust runtime (crate <code class="docutils literal notranslate"><span class="pre">vox-rt</span></code>): <code class="docutils literal notranslate"><span class="pre">src/server.rs</span></code> (HTTP), <code class="docutils literal notranslate"><span class="pre">src/scheduler.rs</span></code> and
+<code class="docutils literal notranslate"><span class="pre">src/deadline.rs</span></code> (policies), <code class="docutils literal notranslate"><span class="pre">src/v2.rs</span></code> (asynchronous lanes and SM partitions), <code class="docutils literal notranslate"><span class="pre">src/engine.rs</span></code>
+(graph launches), <code class="docutils literal notranslate"><span class="pre">src/flashinfer.rs</span></code> + <code class="docutils literal notranslate"><span class="pre">csrc/fi_plan.cu</span></code> (attention planning), <code class="docutils literal notranslate"><span class="pre">csrc/sampling.cu</span></code>
+(sampling kernels, also used by the Python runtime), <code class="docutils literal notranslate"><span class="pre">src/models/</span></code> (prompt builders),
+<code class="docutils literal notranslate"><span class="pre">third_party/flashinfer</span></code> (vendored FlashInfer headers).</p></li>
+</ul>
+</section>
+<section id="checks">
+<h2>Checks<a class="headerlink" href="#checks" title="Link to this heading">#</a></h2>
+<p>Python:</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>ruff<span class="w"> </span>format<span class="w"> </span>.
 ruff<span class="w"> </span>check<span class="w"> </span>.
 </pre></div>
 </div>
+<p>Rust (formatting settings in <code class="docutils literal notranslate"><span class="pre">rust/rustfmt.toml</span></code>):</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="nb">cd</span><span class="w"> </span>rust
+cargo<span class="w"> </span>fmt
+cargo<span class="w"> </span>clippy<span class="w"> </span>--release<span class="w"> </span>--all-targets<span class="w"> </span>--<span class="w"> </span>-D<span class="w"> </span>warnings
+cargo<span class="w"> </span><span class="nb">test</span><span class="w"> </span>--release
+</pre></div>
+</div>
+<p>The Rust unit tests cover what runs without a GPU: scheduling-policy math, text normalization of the prompt
+builders and the feature-pool allocator. Building the crate compiles CUDA sources, so <code class="docutils literal notranslate"><span class="pre">nvcc</span></code> is needed even
+for these checks.</p>
+</section>
+<section id="continuous-integration">
+<h2>Continuous integration<a class="headerlink" href="#continuous-integration" title="Link to this heading">#</a></h2>
+<p>CI runs on CPU-only GitHub runners:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">.github/workflows/ci.yml</span></code>: <code class="docutils literal notranslate"><span class="pre">ruff</span> <span class="pre">check</span></code>.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">.github/workflows/rust.yml</span></code>, with the Rust version pinned in <code class="docutils literal notranslate"><span class="pre">RUST_TOOLCHAIN</span></code> (bump it together with
+the fixes new <code class="docutils literal notranslate"><span class="pre">clippy</span></code> lints ask for):</p>
+<ul>
+<li><p><code class="docutils literal notranslate"><span class="pre">cargo</span> <span class="pre">fmt</span> <span class="pre">--check</span></code>, <code class="docutils literal notranslate"><span class="pre">cargo</span> <span class="pre">clippy</span> <span class="pre">-D</span> <span class="pre">warnings</span></code> and <code class="docutils literal notranslate"><span class="pre">cargo</span> <span class="pre">test</span></code>, after installing the CUDA
+compiler and runtime libraries (<code class="docutils literal notranslate"><span class="pre">.github/scripts/install-cuda-toolkit.sh</span></code>; no GPU or driver needed);</p></li>
+<li><p>a wheel with the extension, installed in a clean environment, whose <code class="docutils literal notranslate"><span class="pre">vox_serve._rt</span></code> must load and
+parse a command line;</p></li>
+<li><p>a wheel built without CUDA, which must not contain the extension and must fall back to the Python
+runtime.</p></li>
+</ul>
+</li>
+<li><p><code class="docutils literal notranslate"><span class="pre">.github/workflows/docs.yml</span></code>: builds and publishes this documentation (pushes to <code class="docutils literal notranslate"><span class="pre">main</span></code>).</p></li>
+</ul>
+<p>There is no GPU test suite. Validate changes that touch the GPU path by serving with both runtimes:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>localhost:8000/generate<span class="w"> </span>-F<span class="w"> </span><span class="s2">"text=Hello world"</span><span class="w"> </span>-F<span class="w"> </span><span class="s2">"streaming=true"</span><span class="w"> </span>-o<span class="w"> </span>out.wav
+vox-serve<span class="w"> </span>--runtime<span class="w"> </span>rust<span class="w"> </span>--model<span class="w"> </span>&lt;model-name&gt;<span class="w"> </span>--bench-requests<span class="w"> </span><span class="m">4</span><span class="w"> </span>--bench-out<span class="w"> </span>/tmp/out<span class="w"> </span>--greedy
+python<span class="w"> </span>rust/scripts/asr_check.py<span class="w"> </span>/tmp/out/bench_*.wav<span class="w">    </span><span class="c1"># Whisper transcripts</span>
+bash<span class="w"> </span>rust/scripts/smoke_model.sh<span class="w"> </span>&lt;model-name&gt;<span class="w">            </span><span class="c1"># the two steps above</span>
+</pre></div>
+</div>
+<p>Load benchmarks against a running server are in <code class="docutils literal notranslate"><span class="pre">benchmark/</span></code>, sample clients in <code class="docutils literal notranslate"><span class="pre">examples/</span></code>.</p>
 </section>
 <section id="build-documentation">
 <h2>Build documentation<a class="headerlink" href="#build-documentation" title="Link to this heading">#</a></h2>
@@ -506,10 +569,6 @@ ruff<span class="w"> </span>check<span class="w"> </span>.
 make<span class="w"> </span>-C<span class="w"> </span>docs<span class="w"> </span>html
 </pre></div>
 </div>
-</section>
-<section id="manual-validation">
-<h2>Manual validation<a class="headerlink" href="#manual-validation" title="Link to this heading">#</a></h2>
-<p>Send a request using <code class="docutils literal notranslate"><span class="pre">curl</span></code> or the scripts in <code class="docutils literal notranslate"><span class="pre">examples/</span></code>.</p>
 </section>
 </section>
 
@@ -533,6 +592,15 @@ make<span class="w"> </span>-C<span class="w"> </span>docs<span class="w"> </spa
         <p class="prev-next-title">Architecture</p>
       </div>
     </a>
+    <a class="right-next"
+       href="adding-a-model.html"
+       title="next page">
+      <div class="prev-next-info">
+        <p class="prev-next-subtitle">next</p>
+        <p class="prev-next-title">Adding a Model</p>
+      </div>
+      <i class="fa-solid fa-angle-right"></i>
+    </a>
 </div>
                 </footer>
               
@@ -553,9 +621,10 @@ make<span class="w"> </span>-C<span class="w"> </span>docs<span class="w"> </spa
     <ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#local-setup">Local setup</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#run-the-server">Run the server</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#formatting-and-linting">Formatting and linting</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#repository-layout">Repository layout</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#checks">Checks</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#continuous-integration">Continuous integration</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#build-documentation">Build documentation</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#manual-validation">Manual validation</a></li>
 </ul>
   </nav></div>
 

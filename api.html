@@ -225,12 +225,14 @@
 <li class="toctree-l1 current active"><a class="current reference internal" href="#">API Reference</a></li>
 
 <li class="toctree-l1"><a class="reference internal" href="cli.html">CLI Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="runtimes.html">Serving Runtimes</a></li>
 <li class="toctree-l1"><a class="reference internal" href="models.html">Supported Models</a></li>
 <li class="toctree-l1"><a class="reference internal" href="architecture.html">Architecture</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Contributing</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="development.html">Development</a></li>
+<li class="toctree-l1"><a class="reference internal" href="adding-a-model.html">Adding a Model</a></li>
 </ul>
 
     </div>
@@ -480,7 +482,32 @@
 </li>
 <li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#python-api">Python API</a><ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#package-overview">Package overview</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#key-modules">Key modules</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#module-vox_serve.cli">Key modules</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram"><code class="docutils literal notranslate"><span class="pre">LMProgram</span></code></a><ul class="nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram.audio_tokens"><code class="docutils literal notranslate"><span class="pre">LMProgram.audio_tokens()</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram.backbone_range"><code class="docutils literal notranslate"><span class="pre">LMProgram.backbone_range()</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram.compile_detok_targets"><code class="docutils literal notranslate"><span class="pre">LMProgram.compile_detok_targets()</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram.decode_tokens"><code class="docutils literal notranslate"><span class="pre">LMProgram.decode_tokens()</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram.detokenize"><code class="docutils literal notranslate"><span class="pre">LMProgram.detokenize()</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram.embed"><code class="docutils literal notranslate"><span class="pre">LMProgram.embed()</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram.fuse_lm_modules"><code class="docutils literal notranslate"><span class="pre">LMProgram.fuse_lm_modules()</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram.fused_stack_spec"><code class="docutils literal notranslate"><span class="pre">LMProgram.fused_stack_spec()</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram.head"><code class="docutils literal notranslate"><span class="pre">LMProgram.head()</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram.hook_preprocess"><code class="docutils literal notranslate"><span class="pre">LMProgram.hook_preprocess()</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram.lm_step_depth"><code class="docutils literal notranslate"><span class="pre">LMProgram.lm_step_depth()</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram.lm_step_head"><code class="docutils literal notranslate"><span class="pre">LMProgram.lm_step_head()</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram.lm_step_layers"><code class="docutils literal notranslate"><span class="pre">LMProgram.lm_step_layers()</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram.meta"><code class="docutils literal notranslate"><span class="pre">LMProgram.meta()</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram.preprocess"><code class="docutils literal notranslate"><span class="pre">LMProgram.preprocess()</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram.preprocess_streaming"><code class="docutils literal notranslate"><span class="pre">LMProgram.preprocess_streaming()</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram.sample_into"><code class="docutils literal notranslate"><span class="pre">LMProgram.sample_into()</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram.stop_tokens"><code class="docutils literal notranslate"><span class="pre">LMProgram.stop_tokens()</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram.token_kind"><code class="docutils literal notranslate"><span class="pre">LMProgram.token_kind()</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram.tokenize_stream_text"><code class="docutils literal notranslate"><span class="pre">LMProgram.tokenize_stream_text()</span></code></a></li>
+</ul>
+</li>
+</ul>
+</li>
 </ul>
 </li>
 </ul>
@@ -563,8 +590,369 @@
 </table>
 </div>
 </section>
-<section id="key-modules">
-<h2>Key modules<a class="headerlink" href="#key-modules" title="Link to this heading">#</a></h2>
+<section id="module-vox_serve.cli">
+<span id="key-modules"></span><h2>Key modules<a class="headerlink" href="#module-vox_serve.cli" title="Link to this heading">#</a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">vox-serve</span></code>: one command for the Rust and the Python serving runtime.</p>
+<p><code class="docutils literal notranslate"><span class="pre">--runtime</span> <span class="pre">auto</span></code> (the default) serves with the Rust runtime (the <code class="docutils literal notranslate"><span class="pre">vox_serve._rt</span></code> extension) and falls back
+to the Python runtime (<code class="docutils literal notranslate"><span class="pre">vox_serve.launch</span></code>) when the Rust one cannot serve the command line: the extension was
+not built (its build is optional at install time) or does not load, it was built against another FlashInfer
+version, or an argument exists only in the Python runtime. Without the extension, arguments only the Rust
+runtime has are ignored with a warning. <code class="docutils literal notranslate"><span class="pre">--runtime</span> <span class="pre">rust</span></code> and <code class="docutils literal notranslate"><span class="pre">--runtime</span> <span class="pre">python</span></code> pick one runtime without
+fallback. Errors after start-up never switch runtimes.</p>
+<p id="module-vox_serve.rt.program">Common structure of a graph program: the static buffers and captured stages of one model.</p>
+<p>A program owns the model weights and every persistent device buffer (KV cache, per-slot sampling
+state), declares the input/output arena fields and captures one CUDA graph per stage and shape
+bucket. The Rust runtime only ever sees the exported arenas, graph handles and <code class="docutils literal notranslate"><span class="pre">meta</span></code>.</p>
+<p>Conventions shared by every LM program (and relied on by the Rust runtime):</p>
+<ul class="simple">
+<li><p>rows: one row per token position processed this step. <code class="docutils literal notranslate"><span class="pre">tok[r]</span></code> holds the token ids (all
+codebooks) of row <code class="docutils literal notranslate"><span class="pre">r</span></code> unless <code class="docutils literal notranslate"><span class="pre">fb[r]</span> <span class="pre">!=</span> <span class="pre">0</span></code>, in which case the ids are read on device from
+<code class="docutils literal notranslate"><span class="pre">last_tok[row_slot[r]]</span></code> (the request’s previously sampled token), so the CPU never has to wait
+for the previous step’s output before launching the next one.</p></li>
+<li><p>requests: <code class="docutils literal notranslate"><span class="pre">N</span></code> per-request entries per graph. <code class="docutils literal notranslate"><span class="pre">last_row[i]</span></code> selects the row whose hidden state
+feeds the LM head for request <code class="docutils literal notranslate"><span class="pre">i</span></code>. Inactive / padding entries have <code class="docutils literal notranslate"><span class="pre">active[i]</span> <span class="pre">=</span> <span class="pre">0</span></code> and use
+the dummy slot <code class="docutils literal notranslate"><span class="pre">max_slots</span></code>.</p></li>
+<li><p>KV page 0 is a scratch page reserved for padding rows; the runtime never hands it to a request.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">out_kind[i]</span></code>: what request <code class="docutils literal notranslate"><span class="pre">i</span></code>’s sampled row is (<code class="docutils literal notranslate"><span class="pre">TOKEN_AUDIO</span></code> / <code class="docutils literal notranslate"><span class="pre">TOKEN_STOP</span></code> /
+<code class="docutils literal notranslate"><span class="pre">TOKEN_OTHER</span></code>), computed in the graph by <code class="docutils literal notranslate"><span class="pre">token_kind</span></code>. The Rust runtime reads it and never
+interprets token ids itself; its only per-model code builds prompts (<code class="docutils literal notranslate"><span class="pre">rust/src/models</span></code>).</p></li>
+</ul>
+<dl class="py class">
+<dt class="sig sig-object py" id="vox_serve.rt.program.LMProgram">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-prename descclassname"><span class="pre">vox_serve.rt.program.</span></span><span class="sig-name descname"><span class="pre">LMProgram</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">config</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">device</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/vox_serve/rt/program.html#LMProgram"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#vox_serve.rt.program.LMProgram" title="Link to this definition">#</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">Program</span></code></p>
+<p>Single-stage autoregressive LM followed by a chunked audio detokenizer.</p>
+<p>Subclasses provide the model (<code class="docutils literal notranslate"><span class="pre">load</span></code>), the forward pieces (<code class="docutils literal notranslate"><span class="pre">embed</span></code>, <code class="docutils literal notranslate"><span class="pre">backbone</span></code>,
+<code class="docutils literal notranslate"><span class="pre">head</span></code>), the detokenizer (<code class="docutils literal notranslate"><span class="pre">detokenize</span></code>) and model-specific <code class="docutils literal notranslate"><span class="pre">meta</span></code>.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>config</strong> (<a class="reference external" href="https://docs.python.org/3.12/library/typing.html#typing.Dict" title="(in Python v3.12)"><em>Dict</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3.12/library/stdtypes.html#str" title="(in Python v3.12)"><em>str</em></a><em>, </em><a class="reference external" href="https://docs.python.org/3.12/library/typing.html#typing.Any" title="(in Python v3.12)"><em>Any</em></a><em>]</em>)</p></li>
+<li><p><strong>device</strong> (<a class="reference external" href="https://docs.pytorch.org/docs/stable/tensor_attributes.html#torch.device" title="(in PyTorch v2.15)"><em>torch.device</em></a>)</p></li>
+</ul>
+</dd>
+</dl>
+<dl class="py method">
+<dt class="sig sig-object py" id="vox_serve.rt.program.LMProgram.audio_tokens">
+<span class="sig-name descname"><span class="pre">audio_tokens</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="_modules/vox_serve/rt/program.html#LMProgram.audio_tokens"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#vox_serve.rt.program.LMProgram.audio_tokens" title="Link to this definition">#</a></dt>
+<dd><p><code class="docutils literal notranslate"><span class="pre">[lo,</span> <span class="pre">hi)</span></code> of the codebook-0 tokens that are audio; the others are fed back but not
+detokenized (interleaved text). <code class="docutils literal notranslate"><span class="pre">None</span></code>: every token that does not stop generation is audio.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3.12/library/typing.html#typing.Tuple" title="(in Python v3.12)"><em>Tuple</em></a>[<a class="reference external" href="https://docs.python.org/3.12/library/functions.html#int" title="(in Python v3.12)">int</a>, <a class="reference external" href="https://docs.python.org/3.12/library/functions.html#int" title="(in Python v3.12)">int</a>] | None</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="vox_serve.rt.program.LMProgram.backbone_range">
+<span class="sig-name descname"><span class="pre">backbone_range</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">hidden</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">pos</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">attn</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">l0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">l1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">last</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/vox_serve/rt/program.html#LMProgram.backbone_range"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#vox_serve.rt.program.LMProgram.backbone_range" title="Link to this definition">#</a></dt>
+<dd><p>Layers [l0, l1) of the backbone (plus the final norm when <code class="docutils literal notranslate"><span class="pre">last</span></code>).</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>hidden</strong> (<a class="reference external" href="https://docs.pytorch.org/docs/stable/tensors.html#torch.Tensor" title="(in PyTorch v2.15)"><em>torch.Tensor</em></a>)</p></li>
+<li><p><strong>pos</strong> (<a class="reference external" href="https://docs.pytorch.org/docs/stable/tensors.html#torch.Tensor" title="(in PyTorch v2.15)"><em>torch.Tensor</em></a>)</p></li>
+<li><p><strong>attn</strong> (<em>RtAttention</em>)</p></li>
+<li><p><strong>l0</strong> (<a class="reference external" href="https://docs.python.org/3.12/library/functions.html#int" title="(in Python v3.12)"><em>int</em></a>)</p></li>
+<li><p><strong>l1</strong> (<a class="reference external" href="https://docs.python.org/3.12/library/functions.html#int" title="(in Python v3.12)"><em>int</em></a>)</p></li>
+<li><p><strong>last</strong> (<a class="reference external" href="https://docs.python.org/3.12/library/functions.html#bool" title="(in Python v3.12)"><em>bool</em></a>)</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="vox_serve.rt.program.LMProgram.compile_detok_targets">
+<span class="sig-name descname"><span class="pre">compile_detok_targets</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="_modules/vox_serve/rt/program.html#LMProgram.compile_detok_targets"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#vox_serve.rt.program.LMProgram.compile_detok_targets" title="Link to this definition">#</a></dt>
+<dd><p>(object, attribute) pairs of detokenizer functions to wrap in torch.compile. Default: the
+flow-matching estimator if the decoder has one (the bulk of its kernels; the vocoder around it
+keeps NumPy-backed state that Dynamo cannot guard), otherwise the whole <code class="docutils literal notranslate"><span class="pre">detokenize</span></code>.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="vox_serve.rt.program.LMProgram.decode_tokens">
+<span class="sig-name descname"><span class="pre">decode_tokens</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">hidden</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">arena</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">out_tok</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">n_req</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/vox_serve/rt/program.html#LMProgram.decode_tokens"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#vox_serve.rt.program.LMProgram.decode_tokens" title="Link to this definition">#</a></dt>
+<dd><p>hidden [N, H] (last row of every request) -&gt; sampled tokens written to out_tok [N, C].</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>hidden</strong> (<a class="reference external" href="https://docs.pytorch.org/docs/stable/tensors.html#torch.Tensor" title="(in PyTorch v2.15)"><em>torch.Tensor</em></a>)</p></li>
+<li><p><strong>arena</strong> (<em>Arena</em>)</p></li>
+<li><p><strong>out_tok</strong> (<a class="reference external" href="https://docs.pytorch.org/docs/stable/tensors.html#torch.Tensor" title="(in PyTorch v2.15)"><em>torch.Tensor</em></a>)</p></li>
+<li><p><strong>n_req</strong> (<a class="reference external" href="https://docs.python.org/3.12/library/functions.html#int" title="(in Python v3.12)"><em>int</em></a>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>None</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="vox_serve.rt.program.LMProgram.detokenize">
+<span class="sig-name descname"><span class="pre">detokenize</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">tokens</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/vox_serve/rt/program.html#LMProgram.detokenize"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#vox_serve.rt.program.LMProgram.detokenize" title="Link to this definition">#</a></dt>
+<dd><p>tokens [Bd, interval, C] int64 -&gt; float audio in [-1, 1] with Bd * detok_samples elements.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>tokens</strong> (<a class="reference external" href="https://docs.pytorch.org/docs/stable/tensors.html#torch.Tensor" title="(in PyTorch v2.15)"><em>torch.Tensor</em></a>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference external" href="https://docs.pytorch.org/docs/stable/tensors.html#torch.Tensor" title="(in PyTorch v2.15)">torch.Tensor</a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="vox_serve.rt.program.LMProgram.embed">
+<span class="sig-name descname"><span class="pre">embed</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">ids</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">arena</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">rows</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/vox_serve/rt/program.html#LMProgram.embed"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#vox_serve.rt.program.LMProgram.embed" title="Link to this definition">#</a></dt>
+<dd><p>ids: [rows, C] int64 -&gt; hidden [rows, H].</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>ids</strong> (<a class="reference external" href="https://docs.pytorch.org/docs/stable/tensors.html#torch.Tensor" title="(in PyTorch v2.15)"><em>torch.Tensor</em></a>)</p></li>
+<li><p><strong>arena</strong> (<em>Arena</em>)</p></li>
+<li><p><strong>rows</strong> (<a class="reference external" href="https://docs.python.org/3.12/library/functions.html#int" title="(in Python v3.12)"><em>int</em></a>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference external" href="https://docs.pytorch.org/docs/stable/tensors.html#torch.Tensor" title="(in PyTorch v2.15)">torch.Tensor</a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="vox_serve.rt.program.LMProgram.fuse_lm_modules">
+<span class="sig-name descname"><span class="pre">fuse_lm_modules</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="_modules/vox_serve/rt/program.html#LMProgram.fuse_lm_modules"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#vox_serve.rt.program.LMProgram.fuse_lm_modules" title="Link to this definition">#</a></dt>
+<dd><p>LM modules whose sibling q/k/v and gate/up projections <code class="docutils literal notranslate"><span class="pre">--fuse-lm</span></code> merges into single
+GEMMs (<code class="docutils literal notranslate"><span class="pre">vox_serve.fusion.projections</span></code>). Programs with Llama / Qwen-style layers list them here.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3.12/library/typing.html#typing.List" title="(in Python v3.12)"><em>List</em></a>[<a class="reference external" href="https://docs.pytorch.org/docs/stable/generated/torch.nn.Module.html#torch.nn.Module" title="(in PyTorch v2.15)">torch.nn.Module</a>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="vox_serve.rt.program.LMProgram.fused_stack_spec">
+<span class="sig-name descname"><span class="pre">fused_stack_spec</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="_modules/vox_serve/rt/program.html#LMProgram.fused_stack_spec"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#vox_serve.rt.program.LMProgram.fused_stack_spec" title="Link to this definition">#</a></dt>
+<dd><p>Arguments of <code class="docutils literal notranslate"><span class="pre">vox_serve.fusion.decoder_stack.FusedDecoderStack</span></code> for <code class="docutils literal notranslate"><span class="pre">--fuse-layers</span></code> (layers, norm,
+head counts, RoPE table), or None if the program’s backbone has no fused path.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3.12/library/typing.html#typing.Dict" title="(in Python v3.12)"><em>Dict</em></a>[<a class="reference external" href="https://docs.python.org/3.12/library/stdtypes.html#str" title="(in Python v3.12)">str</a>, <a class="reference external" href="https://docs.python.org/3.12/library/typing.html#typing.Any" title="(in Python v3.12)"><em>Any</em></a>] | None</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="vox_serve.rt.program.LMProgram.head">
+<span class="sig-name descname"><span class="pre">head</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">hidden</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/vox_serve/rt/program.html#LMProgram.head"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#vox_serve.rt.program.LMProgram.head" title="Link to this definition">#</a></dt>
+<dd><p>hidden [N, H] -&gt; logits [N, C, V].</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>hidden</strong> (<a class="reference external" href="https://docs.pytorch.org/docs/stable/tensors.html#torch.Tensor" title="(in PyTorch v2.15)"><em>torch.Tensor</em></a>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference external" href="https://docs.pytorch.org/docs/stable/tensors.html#torch.Tensor" title="(in PyTorch v2.15)">torch.Tensor</a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="vox_serve.rt.program.LMProgram.hook_preprocess">
+<span class="sig-name descname"><span class="pre">hook_preprocess</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">text</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">audio_path</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">model_kwargs</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/vox_serve/rt/program.html#LMProgram.hook_preprocess"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#vox_serve.rt.program.LMProgram.hook_preprocess" title="Link to this definition">#</a></dt>
+<dd><p><code class="docutils literal notranslate"><span class="pre">preprocess</span></code> for the Rust runtime’s <code class="docutils literal notranslate"><span class="pre">python</span></code> prompt builder.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>text</strong> (<a class="reference external" href="https://docs.python.org/3.12/library/stdtypes.html#str" title="(in Python v3.12)"><em>str</em></a>)</p></li>
+<li><p><strong>audio_path</strong> (<a class="reference external" href="https://docs.python.org/3.12/library/stdtypes.html#str" title="(in Python v3.12)"><em>str</em></a><em> | </em><em>None</em>)</p></li>
+<li><p><strong>model_kwargs</strong> (<a class="reference external" href="https://docs.python.org/3.12/library/typing.html#typing.Dict" title="(in Python v3.12)"><em>Dict</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3.12/library/stdtypes.html#str" title="(in Python v3.12)"><em>str</em></a><em>, </em><a class="reference external" href="https://docs.python.org/3.12/library/typing.html#typing.Any" title="(in Python v3.12)"><em>Any</em></a><em>]</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference external" href="https://docs.python.org/3.12/library/typing.html#typing.Dict" title="(in Python v3.12)"><em>Dict</em></a>[<a class="reference external" href="https://docs.python.org/3.12/library/stdtypes.html#str" title="(in Python v3.12)">str</a>, <a class="reference external" href="https://docs.python.org/3.12/library/typing.html#typing.Any" title="(in Python v3.12)"><em>Any</em></a>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="vox_serve.rt.program.LMProgram.lm_step_depth">
+<span class="sig-name descname"><span class="pre">lm_step_depth</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">arena</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">out</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">n_req</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/vox_serve/rt/program.html#LMProgram.lm_step_depth"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#vox_serve.rt.program.LMProgram.lm_step_depth" title="Link to this definition">#</a></dt>
+<dd><p>Second segment of a split LM step: the depth transformer and the token feedback.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>arena</strong> (<em>Arena</em>)</p></li>
+<li><p><strong>out</strong> (<em>Arena</em>)</p></li>
+<li><p><strong>n_req</strong> (<a class="reference external" href="https://docs.python.org/3.12/library/functions.html#int" title="(in Python v3.12)"><em>int</em></a>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>None</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="vox_serve.rt.program.LMProgram.lm_step_head">
+<span class="sig-name descname"><span class="pre">lm_step_head</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">arena</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">out</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">rows</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">n_req</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">attn</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/vox_serve/rt/program.html#LMProgram.lm_step_head"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#vox_serve.rt.program.LMProgram.lm_step_head" title="Link to this definition">#</a></dt>
+<dd><p>First segment of a split LM step: backbone + first head, hidden kept for the depth graph.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>arena</strong> (<em>Arena</em>)</p></li>
+<li><p><strong>out</strong> (<em>Arena</em>)</p></li>
+<li><p><strong>rows</strong> (<a class="reference external" href="https://docs.python.org/3.12/library/functions.html#int" title="(in Python v3.12)"><em>int</em></a>)</p></li>
+<li><p><strong>n_req</strong> (<a class="reference external" href="https://docs.python.org/3.12/library/functions.html#int" title="(in Python v3.12)"><em>int</em></a>)</p></li>
+<li><p><strong>attn</strong> (<em>RtAttention</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>None</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="vox_serve.rt.program.LMProgram.lm_step_layers">
+<span class="sig-name descname"><span class="pre">lm_step_layers</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">arena</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">out</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">rows</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">n_req</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">attn</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">l0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">l1</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/vox_serve/rt/program.html#LMProgram.lm_step_layers"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#vox_serve.rt.program.LMProgram.lm_step_layers" title="Link to this definition">#</a></dt>
+<dd><p>One layer group of a layer-split LM step. The first group embeds the inputs; the last one
+also runs the first head (codebook 0). Rows travel between groups in <code class="docutils literal notranslate"><span class="pre">seg_rows</span></code>.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>arena</strong> (<em>Arena</em>)</p></li>
+<li><p><strong>out</strong> (<em>Arena</em>)</p></li>
+<li><p><strong>rows</strong> (<a class="reference external" href="https://docs.python.org/3.12/library/functions.html#int" title="(in Python v3.12)"><em>int</em></a>)</p></li>
+<li><p><strong>n_req</strong> (<a class="reference external" href="https://docs.python.org/3.12/library/functions.html#int" title="(in Python v3.12)"><em>int</em></a>)</p></li>
+<li><p><strong>attn</strong> (<em>RtAttention</em>)</p></li>
+<li><p><strong>l0</strong> (<a class="reference external" href="https://docs.python.org/3.12/library/functions.html#int" title="(in Python v3.12)"><em>int</em></a>)</p></li>
+<li><p><strong>l1</strong> (<a class="reference external" href="https://docs.python.org/3.12/library/functions.html#int" title="(in Python v3.12)"><em>int</em></a>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>None</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="vox_serve.rt.program.LMProgram.meta">
+<span class="sig-name descname"><span class="pre">meta</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="_modules/vox_serve/rt/program.html#LMProgram.meta"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#vox_serve.rt.program.LMProgram.meta" title="Link to this definition">#</a></dt>
+<dd><p>Model constants for the Rust runtime: the prompt builder’s inputs (<code class="docutils literal notranslate"><span class="pre">kind</span></code> names the
+builder, or <code class="docutils literal notranslate"><span class="pre">prompt_builder</span></code>), plus <code class="docutils literal notranslate"><span class="pre">max_tokens</span></code>, <code class="docutils literal notranslate"><span class="pre">sampling</span></code>, <code class="docutils literal notranslate"><span class="pre">sample_rate</span></code> and, where
+they apply, <code class="docutils literal notranslate"><span class="pre">decode_mask</span></code>, <code class="docutils literal notranslate"><span class="pre">decode_row</span></code>, <code class="docutils literal notranslate"><span class="pre">preseed_frames</span></code> and <code class="docutils literal notranslate"><span class="pre">text_stream</span></code>.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3.12/library/typing.html#typing.Dict" title="(in Python v3.12)"><em>Dict</em></a>[<a class="reference external" href="https://docs.python.org/3.12/library/stdtypes.html#str" title="(in Python v3.12)">str</a>, <a class="reference external" href="https://docs.python.org/3.12/library/typing.html#typing.Any" title="(in Python v3.12)"><em>Any</em></a>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="vox_serve.rt.program.LMProgram.preprocess">
+<span class="sig-name descname"><span class="pre">preprocess</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">text</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">audio_path</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">model_kwargs</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/vox_serve/rt/program.html#LMProgram.preprocess"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#vox_serve.rt.program.LMProgram.preprocess" title="Link to this definition">#</a></dt>
+<dd><p>The prompt rows of a request. The Python runtime always builds prompts here, the Rust runtime
+when <code class="docutils literal notranslate"><span class="pre">meta[&quot;prompt_builder&quot;]</span></code> is <code class="docutils literal notranslate"><span class="pre">python</span></code>; a model’s Rust prompt builder must produce the same
+rows. Default: the <code class="docutils literal notranslate"><span class="pre">template</span></code> builder (<code class="docutils literal notranslate"><span class="pre">meta[&quot;prompt_template&quot;]</span></code>).</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>text</strong> (<a class="reference external" href="https://docs.python.org/3.12/library/stdtypes.html#str" title="(in Python v3.12)"><em>str</em></a>)</p></li>
+<li><p><strong>audio_path</strong> (<a class="reference external" href="https://docs.python.org/3.12/library/stdtypes.html#str" title="(in Python v3.12)"><em>str</em></a><em> | </em><em>None</em>)</p></li>
+<li><p><strong>model_kwargs</strong> (<a class="reference external" href="https://docs.python.org/3.12/library/typing.html#typing.Dict" title="(in Python v3.12)"><em>Dict</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3.12/library/stdtypes.html#str" title="(in Python v3.12)"><em>str</em></a><em>, </em><a class="reference external" href="https://docs.python.org/3.12/library/typing.html#typing.Any" title="(in Python v3.12)"><em>Any</em></a><em>]</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>Prompt</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="vox_serve.rt.program.LMProgram.preprocess_streaming">
+<span class="sig-name descname"><span class="pre">preprocess_streaming</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">text</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">audio_path</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">model_kwargs</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">first</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/vox_serve/rt/program.html#LMProgram.preprocess_streaming"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#vox_serve.rt.program.LMProgram.preprocess_streaming" title="Link to this definition">#</a></dt>
+<dd><p>Prompt of an input-streaming request whose only text token so far is <code class="docutils literal notranslate"><span class="pre">first</span></code>.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>text</strong> (<a class="reference external" href="https://docs.python.org/3.12/library/stdtypes.html#str" title="(in Python v3.12)"><em>str</em></a>)</p></li>
+<li><p><strong>audio_path</strong> (<a class="reference external" href="https://docs.python.org/3.12/library/stdtypes.html#str" title="(in Python v3.12)"><em>str</em></a><em> | </em><em>None</em>)</p></li>
+<li><p><strong>model_kwargs</strong> (<a class="reference external" href="https://docs.python.org/3.12/library/typing.html#typing.Dict" title="(in Python v3.12)"><em>Dict</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3.12/library/stdtypes.html#str" title="(in Python v3.12)"><em>str</em></a><em>, </em><a class="reference external" href="https://docs.python.org/3.12/library/typing.html#typing.Any" title="(in Python v3.12)"><em>Any</em></a><em>]</em>)</p></li>
+<li><p><strong>first</strong> (<a class="reference external" href="https://docs.python.org/3.12/library/functions.html#int" title="(in Python v3.12)"><em>int</em></a>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>Prompt</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="vox_serve.rt.program.LMProgram.sample_into">
+<span class="sig-name descname"><span class="pre">sample_into</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">logits</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">arena</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">out</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">n_req</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">salt</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">penalty</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#vox_serve.rt.program.LMProgram.sample_into" title="Link to this definition">#</a></dt>
+<dd><p>Samples logits [N, R, V] into out [N, R] (int32, row stride may exceed R).</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>logits</strong> (<a class="reference external" href="https://docs.pytorch.org/docs/stable/tensors.html#torch.Tensor" title="(in PyTorch v2.15)"><em>torch.Tensor</em></a>)</p></li>
+<li><p><strong>arena</strong> (<em>Arena</em>)</p></li>
+<li><p><strong>out</strong> (<a class="reference external" href="https://docs.pytorch.org/docs/stable/tensors.html#torch.Tensor" title="(in PyTorch v2.15)"><em>torch.Tensor</em></a>)</p></li>
+<li><p><strong>n_req</strong> (<a class="reference external" href="https://docs.python.org/3.12/library/functions.html#int" title="(in Python v3.12)"><em>int</em></a>)</p></li>
+<li><p><strong>salt</strong> (<a class="reference external" href="https://docs.python.org/3.12/library/functions.html#int" title="(in Python v3.12)"><em>int</em></a>)</p></li>
+<li><p><strong>penalty</strong> (<a class="reference external" href="https://docs.python.org/3.12/library/functions.html#bool" title="(in Python v3.12)"><em>bool</em></a>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>None</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="vox_serve.rt.program.LMProgram.stop_tokens">
+<span class="sig-name descname"><span class="pre">stop_tokens</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="_modules/vox_serve/rt/program.html#LMProgram.stop_tokens"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#vox_serve.rt.program.LMProgram.stop_tokens" title="Link to this definition">#</a></dt>
+<dd><p>Codebook-0 tokens that end generation.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3.12/library/typing.html#typing.List" title="(in Python v3.12)"><em>List</em></a>[<a class="reference external" href="https://docs.python.org/3.12/library/functions.html#int" title="(in Python v3.12)">int</a>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="vox_serve.rt.program.LMProgram.token_kind">
+<span class="sig-name descname"><span class="pre">token_kind</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">tok</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/vox_serve/rt/program.html#LMProgram.token_kind"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#vox_serve.rt.program.LMProgram.token_kind" title="Link to this definition">#</a></dt>
+<dd><p>tok [N, C] int32 (the sampled rows) -&gt; [N] int32 <code class="docutils literal notranslate"><span class="pre">TOKEN_*</span></code> codes. Runs inside the captured
+LM graph; the default classifies codebook 0 by <code class="docutils literal notranslate"><span class="pre">stop_tokens</span></code> and <code class="docutils literal notranslate"><span class="pre">audio_tokens</span></code>.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>tok</strong> (<a class="reference external" href="https://docs.pytorch.org/docs/stable/tensors.html#torch.Tensor" title="(in PyTorch v2.15)"><em>torch.Tensor</em></a>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference external" href="https://docs.pytorch.org/docs/stable/tensors.html#torch.Tensor" title="(in PyTorch v2.15)">torch.Tensor</a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="vox_serve.rt.program.LMProgram.tokenize_stream_text">
+<span class="sig-name descname"><span class="pre">tokenize_stream_text</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">text</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/vox_serve/rt/program.html#LMProgram.tokenize_stream_text"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#vox_serve.rt.program.LMProgram.tokenize_stream_text" title="Link to this definition">#</a></dt>
+<dd><p>Tokens of a streamed text chunk (input streaming; no special tokens).</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>text</strong> (<a class="reference external" href="https://docs.python.org/3.12/library/stdtypes.html#str" title="(in Python v3.12)"><em>str</em></a>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference external" href="https://docs.python.org/3.12/library/typing.html#typing.List" title="(in Python v3.12)"><em>List</em></a>[<a class="reference external" href="https://docs.python.org/3.12/library/functions.html#int" title="(in Python v3.12)">int</a>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
 </section>
 </section>
 
@@ -631,7 +1019,32 @@
 </li>
 <li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#python-api">Python API</a><ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#package-overview">Package overview</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#key-modules">Key modules</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#module-vox_serve.cli">Key modules</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram"><code class="docutils literal notranslate"><span class="pre">LMProgram</span></code></a><ul class="nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram.audio_tokens"><code class="docutils literal notranslate"><span class="pre">LMProgram.audio_tokens()</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram.backbone_range"><code class="docutils literal notranslate"><span class="pre">LMProgram.backbone_range()</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram.compile_detok_targets"><code class="docutils literal notranslate"><span class="pre">LMProgram.compile_detok_targets()</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram.decode_tokens"><code class="docutils literal notranslate"><span class="pre">LMProgram.decode_tokens()</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram.detokenize"><code class="docutils literal notranslate"><span class="pre">LMProgram.detokenize()</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram.embed"><code class="docutils literal notranslate"><span class="pre">LMProgram.embed()</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram.fuse_lm_modules"><code class="docutils literal notranslate"><span class="pre">LMProgram.fuse_lm_modules()</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram.fused_stack_spec"><code class="docutils literal notranslate"><span class="pre">LMProgram.fused_stack_spec()</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram.head"><code class="docutils literal notranslate"><span class="pre">LMProgram.head()</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram.hook_preprocess"><code class="docutils literal notranslate"><span class="pre">LMProgram.hook_preprocess()</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram.lm_step_depth"><code class="docutils literal notranslate"><span class="pre">LMProgram.lm_step_depth()</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram.lm_step_head"><code class="docutils literal notranslate"><span class="pre">LMProgram.lm_step_head()</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram.lm_step_layers"><code class="docutils literal notranslate"><span class="pre">LMProgram.lm_step_layers()</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram.meta"><code class="docutils literal notranslate"><span class="pre">LMProgram.meta()</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram.preprocess"><code class="docutils literal notranslate"><span class="pre">LMProgram.preprocess()</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram.preprocess_streaming"><code class="docutils literal notranslate"><span class="pre">LMProgram.preprocess_streaming()</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram.sample_into"><code class="docutils literal notranslate"><span class="pre">LMProgram.sample_into()</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram.stop_tokens"><code class="docutils literal notranslate"><span class="pre">LMProgram.stop_tokens()</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram.token_kind"><code class="docutils literal notranslate"><span class="pre">LMProgram.token_kind()</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram.tokenize_stream_text"><code class="docutils literal notranslate"><span class="pre">LMProgram.tokenize_stream_text()</span></code></a></li>
+</ul>
+</li>
+</ul>
+</li>
 </ul>
 </li>
 </ul>

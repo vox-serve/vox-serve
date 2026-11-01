@@ -54,7 +54,7 @@
     <link rel="index" title="Index" href="genindex.html" />
     <link rel="search" title="Search" href="search.html" />
     <link rel="next" title="Architecture" href="architecture.html" />
-    <link rel="prev" title="CLI Reference" href="cli.html" />
+    <link rel="prev" title="Serving Runtimes" href="runtimes.html" />
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
   <meta name="docsearch:version" content="0.0.1" />
@@ -225,12 +225,14 @@
 <li class="toctree-l1"><a class="reference internal" href="api.html">API Reference</a></li>
 
 <li class="toctree-l1"><a class="reference internal" href="cli.html">CLI Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="runtimes.html">Serving Runtimes</a></li>
 <li class="toctree-l1 current active"><a class="current reference internal" href="#">Supported Models</a></li>
 <li class="toctree-l1"><a class="reference internal" href="architecture.html">Architecture</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Contributing</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="development.html">Development</a></li>
+<li class="toctree-l1"><a class="reference internal" href="adding-a-model.html">Adding a Model</a></li>
 </ul>
 
     </div>
@@ -484,8 +486,8 @@
 current families, their shorthand codes, and a representative Hugging Face identifier.</p>
 <section id="text-to-speech-tts">
 <h2>Text-to-speech (TTS)<a class="headerlink" href="#text-to-speech-tts" title="Link to this heading">#</a></h2>
-<div class="pst-scrollable-table-container"><table class="table" id="id8">
-<caption><span class="caption-text">TTS model families</span><a class="headerlink" href="#id8" title="Link to this table">#</a></caption>
+<div class="pst-scrollable-table-container"><table class="table" id="id11">
+<caption><span class="caption-text">TTS model families</span><a class="headerlink" href="#id11" title="Link to this table">#</a></caption>
 <colgroup>
 <col style="width: 16.2%" />
 <col style="width: 40.5%" />
@@ -506,9 +508,17 @@ current families, their shorthand codes, and a representative Hugging Face ident
 <td><p><code class="docutils literal notranslate"><span class="pre">FunAudioLLM/CosyVoice2-0.5B</span></code> (<a class="reference external" href="https://huggingface.co/FunAudioLLM/CosyVoice2-0.5B">link</a>)</p></td>
 <td><p>TTS model developed by Alibaba. Using 0.5B LLM with flow matching + HiFT vocoder. Supports audio input for voice cloning.</p></td>
 </tr>
-<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">csm</span></code></p></td>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">cosyvoice3</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">FunAudioLLM/Fun-CosyVoice3-0.5B-2512</span></code> (<a class="reference external" href="https://huggingface.co/FunAudioLLM/Fun-CosyVoice3-0.5B-2512">link</a>)</p></td>
+<td><p>TTS model developed by Alibaba. Using 0.5B LLM with a flow-matching DiT + HiFT vocoder. Supports audio input for voice cloning.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">csm</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">sesame/csm-1b</span></code> (<a class="reference external" href="https://huggingface.co/sesame/csm-1b">link</a>)</p></td>
 <td><p>TTS model developed by Sesame. Using 1B LLM and depth-wise model with Mimi detokenizer.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">higgs-tts</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">bosonai/higgs-tts-3-4b</span></code> (<a class="reference external" href="https://huggingface.co/bosonai/higgs-tts-3-4b">link</a>)</p></td>
+<td><p>Higgs Audio v3 TTS developed by Boson AI. Using a Qwen3-4B LLM over 8 delayed codebooks with the Higgs Audio tokenizer. Supports audio input for voice cloning.</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">orpheus</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">canopylabs/orpheus-3b-0.1-ft</span></code> (<a class="reference external" href="https://huggingface.co/canopylabs/orpheus-3b-0.1-ft">link</a>)</p></td>
@@ -524,7 +534,11 @@ current families, their shorthand codes, and a representative Hugging Face ident
 </td>
 <td><p>TTS model developed by Alibaba Qwen team. Using 1.7B LLM with depth transformer and Mimi-like detokenizer.</p></td>
 </tr>
-<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">zonos</span></code></p></td>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">voxtral-tts</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">mistralai/Voxtral-4B-TTS-2603</span></code> (<a class="reference external" href="https://huggingface.co/mistralai/Voxtral-4B-TTS-2603">link</a>)</p></td>
+<td><p>TTS model developed by Mistral AI. Using a 4B LLM with a flow-matching acoustic head and a 37-codebook codec.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">zonos</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">Zyphra/Zonos-v0.1-transformer</span></code> (<a class="reference external" href="https://huggingface.co/Zyphra/Zonos-v0.1-transformer">link</a>)</p></td>
 <td><p>TTS model developed by Zyphra. Using 1B LLM with DAC detokenizer.</p></td>
 </tr>
@@ -534,8 +548,8 @@ current families, their shorthand codes, and a representative Hugging Face ident
 </section>
 <section id="speech-to-speech-sts">
 <h2>Speech-to-speech (STS)<a class="headerlink" href="#speech-to-speech-sts" title="Link to this heading">#</a></h2>
-<div class="pst-scrollable-table-container"><table class="table" id="id9">
-<caption><span class="caption-text">STS model families</span><a class="headerlink" href="#id9" title="Link to this table">#</a></caption>
+<div class="pst-scrollable-table-container"><table class="table" id="id12">
+<caption><span class="caption-text">STS model families</span><a class="headerlink" href="#id12" title="Link to this table">#</a></caption>
 <colgroup>
 <col style="width: 16.2%" />
 <col style="width: 40.5%" />
@@ -566,6 +580,7 @@ current families, their shorthand codes, and a representative Hugging Face ident
 <li><p>The examples above are representative model IDs. You can use local paths or other
 compatible variants within each family.</p></li>
 <li><p>Some families support audio input (STS). Refer to the model card for input requirements.</p></li>
+<li><p>Both runtimes serve every model (<a class="reference internal" href="runtimes.html"><span class="doc">Serving Runtimes</span></a>). To add a model, see <a class="reference internal" href="adding-a-model.html"><span class="doc">Adding a Model</span></a>.</p></li>
 </ul>
 </section>
 </section>
@@ -582,12 +597,12 @@ compatible variants within each family.</p></li>
                   
 <div class="prev-next-area">
     <a class="left-prev"
-       href="cli.html"
+       href="runtimes.html"
        title="previous page">
       <i class="fa-solid fa-angle-left"></i>
       <div class="prev-next-info">
         <p class="prev-next-subtitle">previous</p>
-        <p class="prev-next-title">CLI Reference</p>
+        <p class="prev-next-title">Serving Runtimes</p>
       </div>
     </a>
     <a class="right-next"

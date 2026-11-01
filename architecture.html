@@ -225,12 +225,14 @@
 <li class="toctree-l1"><a class="reference internal" href="api.html">API Reference</a></li>
 
 <li class="toctree-l1"><a class="reference internal" href="cli.html">CLI Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="runtimes.html">Serving Runtimes</a></li>
 <li class="toctree-l1"><a class="reference internal" href="models.html">Supported Models</a></li>
 <li class="toctree-l1 current active"><a class="current reference internal" href="#">Architecture</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Contributing</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="development.html">Development</a></li>
+<li class="toctree-l1"><a class="reference internal" href="adding-a-model.html">Adding a Model</a></li>
 </ul>
 
     </div>
@@ -482,33 +484,53 @@
 <h1>Architecture<a class="headerlink" href="#architecture" title="Link to this heading">#</a></h1>
 <section id="high-level-components">
 <h2>High-level components<a class="headerlink" href="#high-level-components" title="Link to this heading">#</a></h2>
-<p>VoxServe is organized as three cooperating roles (mirroring the paper):</p>
+<p>Every model is implemented once, as a <em>program</em>: the GPU stages of a decoding step (backbone, depth
+transformer, sampling, codec) captured as CUDA graphs over static buffers, plus its prompt building and
+model constants. Two runtimes serve programs through the same HTTP API and command line (<code class="docutils literal notranslate"><span class="pre">vox-serve</span></code>):</p>
 <ul class="simple">
-<li><p><strong>API server:</strong> FastAPI layer that accepts requests and streams audio responses.</p></li>
-<li><p><strong>Scheduler:</strong> orchestrates request lifecycles and decides which step to run next.</p></li>
-<li><p><strong>Worker/model runtime:</strong> executes model steps on GPU and runs the detokenizer.</p></li>
+<li><p><strong>Rust runtime</strong> (default, the <code class="docutils literal notranslate"><span class="pre">vox_serve._rt</span></code> extension built from <code class="docutils literal notranslate"><span class="pre">rust/</span></code>): HTTP server,
+scheduling policies (<code class="docutils literal notranslate"><span class="pre">base</span></code>, <code class="docutils literal notranslate"><span class="pre">online</span></code>, <code class="docutils literal notranslate"><span class="pre">offline</span></code>, <code class="docutils literal notranslate"><span class="pre">deadline</span></code>), KV-cache paging, attention
+planning and graph launches, with no Python on the per-step path. It overlaps the LM and the codec
+on separate streams or SM partitions of the GPU and spreads replicas over several GPUs.</p></li>
+<li><p><strong>Python runtime</strong>: a FastAPI server (<code class="docutils literal notranslate"><span class="pre">vox_serve/launch.py</span></code>) and one scheduler process per GPU,
+with the <code class="docutils literal notranslate"><span class="pre">base</span></code>, <code class="docutils literal notranslate"><span class="pre">online</span></code>, <code class="docutils literal notranslate"><span class="pre">offline</span></code>, <code class="docutils literal notranslate"><span class="pre">input_streaming</span></code> and <code class="docutils literal notranslate"><span class="pre">disaggregation</span></code> policies and
+optional asynchronous scheduling; its worker replays the programs’ graphs. <code class="docutils literal notranslate"><span class="pre">vox-serve</span></code> uses it when
+the extension is not installed (its build is optional: it needs a Rust toolchain and nvcc) or does
+not load, and for arguments only it takes; <code class="docutils literal notranslate"><span class="pre">--runtime</span> <span class="pre">python</span></code> selects it explicitly.</p></li>
 </ul>
+<p><a class="reference internal" href="runtimes.html"><span class="doc">Serving Runtimes</span></a> compares the two and describes how each one runs a step; <a class="reference internal" href="adding-a-model.html"><span class="doc">Adding a Model</span></a> describes the
+program interface.</p>
 </section>
 <section id="repository-map">
 <h2>Repository map<a class="headerlink" href="#repository-map" title="Link to this heading">#</a></h2>
 <ul class="simple">
-<li><p><code class="docutils literal notranslate"><span class="pre">vox_serve/launch.py</span></code>: API server entry point, CLI argument parsing.</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">vox_serve/scheduler/</span></code>: scheduling policies and request orchestration.</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">vox_serve/worker/</span></code>: GPU execution and pipeline logic.</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">vox_serve/model/</span></code>: model wrappers and unified interface implementations.</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">vox_serve/tokenizer/</span></code> and <code class="docutils literal notranslate"><span class="pre">vox_serve/encoder/</span></code>: audio/text tokenization and encoding utilities.</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">vox_serve/watermarker/</span></code>: optional watermarking pipeline.</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">examples/</span></code>: sample clients and usage patterns.</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">benchmark/</span></code>: performance measurement scripts.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">vox_serve/cli.py</span></code>: the <code class="docutils literal notranslate"><span class="pre">vox-serve</span></code> command (picks the runtime).</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">vox_serve/launch.py</span></code>, <code class="docutils literal notranslate"><span class="pre">vox_serve/scheduler/</span></code>, <code class="docutils literal notranslate"><span class="pre">vox_serve/worker/</span></code>: the Python runtime (API server,
+scheduling policies, and <code class="docutils literal notranslate"><span class="pre">ProgramWorker</span></code>, which fills a program’s inputs and replays its graphs).</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">vox_serve/model/&lt;name&gt;/</span></code>: one package per model. <code class="docutils literal notranslate"><span class="pre">program.py</span></code> is the implementation both runtimes
+run; <code class="docutils literal notranslate"><span class="pre">model.py</span></code> holds the PyTorch modules and weight loading it builds on. <code class="docutils literal notranslate"><span class="pre">model/__init__.py</span></code> maps
+model names to programs.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">vox_serve/rt/</span></code>: what programs share: <code class="docutils literal notranslate"><span class="pre">program.py</span></code> (the base program: buffers, graph capture,
+sampling, token kinds), <code class="docutils literal notranslate"><span class="pre">core.py</span></code> (arenas, attention, graph capture), <code class="docutils literal notranslate"><span class="pre">kernels.py</span></code> (sampling
+kernels, with a torch fallback) and <code class="docutils literal notranslate"><span class="pre">prompt.py</span></code> (prompts, model constants).</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">vox_serve/fusion/</span></code>: fused kernels the programs switch on with <code class="docutils literal notranslate"><span class="pre">--fuse-*</span></code> flags (both runtimes).</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">rust/</span></code>: the Rust runtime (<code class="docutils literal notranslate"><span class="pre">src/scheduler.rs</span></code>, <code class="docutils literal notranslate"><span class="pre">src/server.rs</span></code>, <code class="docutils literal notranslate"><span class="pre">src/engine.rs</span></code>) and the
+models’ prompt builders in Rust (<code class="docutils literal notranslate"><span class="pre">src/models</span></code>), which must produce the same rows as the programs’
+<code class="docutils literal notranslate"><span class="pre">preprocess</span></code>.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">vox_serve/tokenizer/</span></code> and <code class="docutils literal notranslate"><span class="pre">vox_serve/encoder/</span></code>: audio codecs and encoders.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">vox_serve/watermarker/</span></code>: optional watermarking.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">examples/</span></code>: sample clients. <code class="docutils literal notranslate"><span class="pre">benchmark/</span></code>: load benchmarks.</p></li>
 </ul>
 </section>
 <section id="execution-flow-simplified">
 <h2>Execution flow (simplified)<a class="headerlink" href="#execution-flow-simplified" title="Link to this heading">#</a></h2>
 <ol class="arabic simple">
-<li><p>The API server receives a request and enqueues it.</p></li>
-<li><p>The scheduler decides which step to execute (LM forward, sampling, detokenizer).</p></li>
-<li><p>The worker executes that step on GPU and returns the chunk.</p></li>
-<li><p>The API server streams the chunk to the client.</p></li>
+<li><p>Start-up: the program loads the model and captures every step stage as CUDA graphs.</p></li>
+<li><p>A request’s prompt is built by <code class="docutils literal notranslate"><span class="pre">Program.preprocess</span></code> (or by the model’s Rust prompt builder).</p></li>
+<li><p>Each step, the scheduler picks the requests to prefill or decode and the audio chunks to decode,
+fills the step’s inputs, plans attention and replays the graphs.</p></li>
+<li><p>The graphs sample the next tokens and classify them (audio, stop, other); decoded audio chunks are
+streamed to the client.</p></li>
 </ol>
 </section>
 </section>

@@ -53,7 +53,7 @@
     <script>DOCUMENTATION_OPTIONS.search_as_you_type = false;</script>
     <link rel="index" title="Index" href="genindex.html" />
     <link rel="search" title="Search" href="search.html" />
-    <link rel="next" title="Supported Models" href="models.html" />
+    <link rel="next" title="Serving Runtimes" href="runtimes.html" />
     <link rel="prev" title="vox_serve.worker.program_worker" href="_autosummary/vox_serve.worker.program_worker.html" />
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
@@ -225,12 +225,14 @@
 <li class="toctree-l1"><a class="reference internal" href="api.html">API Reference</a></li>
 
 <li class="toctree-l1 current active"><a class="current reference internal" href="#">CLI Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="runtimes.html">Serving Runtimes</a></li>
 <li class="toctree-l1"><a class="reference internal" href="models.html">Supported Models</a></li>
 <li class="toctree-l1"><a class="reference internal" href="architecture.html">Architecture</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Contributing</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="development.html">Development</a></li>
+<li class="toctree-l1"><a class="reference internal" href="adding-a-model.html">Adding a Model</a></li>
 </ul>
 
     </div>
@@ -465,7 +467,10 @@
             <nav aria-label="Page">
                 <ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#usage">Usage</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#arguments">Arguments</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#runtime">Runtime</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#common-arguments-both-runtimes">Common arguments (both runtimes)</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#python-runtime-only">Python runtime only</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#rust-runtime-only">Rust runtime only</a></li>
 </ul>
             </nav>
         </div>
@@ -479,71 +484,129 @@
                   
   <section id="cli-reference">
 <h1>CLI Reference<a class="headerlink" href="#cli-reference" title="Link to this heading">#</a></h1>
-<p>The CLI entrypoint is <code class="docutils literal notranslate"><span class="pre">vox-serve</span></code> (installed via pip), which maps to
-<code class="docutils literal notranslate"><span class="pre">python</span> <span class="pre">-m</span> <span class="pre">vox_serve.launch</span></code>.</p>
+<p>The CLI entrypoint is <code class="docutils literal notranslate"><span class="pre">vox-serve</span></code> (installed via pip; also <code class="docutils literal notranslate"><span class="pre">python</span> <span class="pre">-m</span> <span class="pre">vox_serve</span></code>).</p>
 <section id="usage">
 <h2>Usage<a class="headerlink" href="#usage" title="Link to this heading">#</a></h2>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>vox-serve<span class="w"> </span>--model<span class="w"> </span>&lt;model-name&gt;<span class="w"> </span>--port<span class="w"> </span><span class="m">8000</span>
 </pre></div>
 </div>
 </section>
-<section id="arguments">
-<h2>Arguments<a class="headerlink" href="#arguments" title="Link to this heading">#</a></h2>
+<section id="runtime">
+<h2>Runtime<a class="headerlink" href="#runtime" title="Link to this heading">#</a></h2>
 <dl class="simple">
-<dt><code class="docutils literal notranslate"><span class="pre">--model</span></code></dt><dd><p>Model name or local path to load for inference.
-Default: <code class="docutils literal notranslate"><span class="pre">canopylabs/orpheus-3b-0.1-ft</span></code>.</p>
-</dd>
-<dt><code class="docutils literal notranslate"><span class="pre">--scheduler-type</span></code></dt><dd><p>Scheduler backend implementation. One of: <code class="docutils literal notranslate"><span class="pre">base</span></code>, <code class="docutils literal notranslate"><span class="pre">online</span></code>, <code class="docutils literal notranslate"><span class="pre">offline</span></code>.</p>
-</dd>
-<dt><code class="docutils literal notranslate"><span class="pre">--async-scheduling</span></code></dt><dd><p>Enable async scheduling mode, which overlaps request handling and scheduler work.</p>
-</dd>
-<dt><code class="docutils literal notranslate"><span class="pre">--host</span></code></dt><dd><p>Bind address for the HTTP server. Default: <code class="docutils literal notranslate"><span class="pre">0.0.0.0</span></code>.</p>
-</dd>
-<dt><code class="docutils literal notranslate"><span class="pre">--port</span></code></dt><dd><p>TCP port for the HTTP server. Default: <code class="docutils literal notranslate"><span class="pre">8000</span></code>.</p>
-</dd>
-<dt><code class="docutils literal notranslate"><span class="pre">--max-batch-size</span></code></dt><dd><p>Maximum batch size used by the scheduler for inference.</p>
-</dd>
-<dt><code class="docutils literal notranslate"><span class="pre">--max-num-pages</span></code></dt><dd><p>Maximum number of KV cache pages for the scheduler backend.</p>
-</dd>
-<dt><code class="docutils literal notranslate"><span class="pre">--page-size</span></code></dt><dd><p>Size of each KV cache page (tokens per page).</p>
-</dd>
-<dt><code class="docutils literal notranslate"><span class="pre">--top-p</span></code></dt><dd><p>Top-p (nucleus) sampling threshold. When set, tokens are sampled from the smallest set
-whose cumulative probability exceeds this value.</p>
-</dd>
-<dt><code class="docutils literal notranslate"><span class="pre">--top-k</span></code></dt><dd><p>Top-k sampling threshold. When set, tokens are sampled from the k most likely candidates.</p>
-</dd>
-<dt><code class="docutils literal notranslate"><span class="pre">--min-p</span></code></dt><dd><p>Min-p sampling threshold. Filters out tokens with probability below this value.</p>
-</dd>
-<dt><code class="docutils literal notranslate"><span class="pre">--temperature</span></code></dt><dd><p>Sampling temperature to scale logits. Lower is more deterministic; higher is more random.</p>
-</dd>
-<dt><code class="docutils literal notranslate"><span class="pre">--max-tokens</span></code></dt><dd><p>Maximum number of tokens to generate per request.</p>
-</dd>
-<dt><code class="docutils literal notranslate"><span class="pre">--repetition-penalty</span></code></dt><dd><p>Penalize repeated tokens to reduce loops in generated output.</p>
-</dd>
-<dt><code class="docutils literal notranslate"><span class="pre">--repetition-window</span></code></dt><dd><p>Window size for repetition penalty.</p>
-</dd>
-<dt><code class="docutils literal notranslate"><span class="pre">--cfg-scale</span></code></dt><dd><p>Classifier-free guidance scale, where higher values strengthen conditioning.</p>
-</dd>
-<dt><code class="docutils literal notranslate"><span class="pre">--greedy</span></code></dt><dd><p>Use greedy decoding (disables top-k/top-p/min-p/temperature sampling).</p>
-</dd>
-<dt><code class="docutils literal notranslate"><span class="pre">--enable-cuda-graph</span></code></dt><dd><p>Enable CUDA graph optimization for the decode phase.</p>
-</dd>
-<dt><code class="docutils literal notranslate"><span class="pre">--disable-cuda-graph</span></code></dt><dd><p>Disable CUDA graph optimization for the decode phase.</p>
-</dd>
-<dt><code class="docutils literal notranslate"><span class="pre">--enable-disaggregation</span></code></dt><dd><p>Enable disaggregation mode (requires at least 2 GPUs).</p>
-</dd>
-<dt><code class="docutils literal notranslate"><span class="pre">--dp-size</span></code></dt><dd><p>Enable data parallel mode with N replicas (N &gt;= 1). Cannot be combined with
-<code class="docutils literal notranslate"><span class="pre">--enable-disaggregation</span></code> and requires N &lt;= available GPUs.</p>
-</dd>
-<dt><code class="docutils literal notranslate"><span class="pre">--enable-nvtx</span></code></dt><dd><p>Enable NVTX profiling for performance analysis.</p>
-</dd>
-<dt><code class="docutils literal notranslate"><span class="pre">--enable-torch-compile</span></code></dt><dd><p>Enable <code class="docutils literal notranslate"><span class="pre">torch.compile</span></code> optimization for model inference.</p>
-</dd>
-<dt><code class="docutils literal notranslate"><span class="pre">--log-level</span></code></dt><dd><p>Set log verbosity. One of: <code class="docutils literal notranslate"><span class="pre">DEBUG</span></code>, <code class="docutils literal notranslate"><span class="pre">INFO</span></code>, <code class="docutils literal notranslate"><span class="pre">WARNING</span></code>, <code class="docutils literal notranslate"><span class="pre">ERROR</span></code>, <code class="docutils literal notranslate"><span class="pre">CRITICAL</span></code>.</p>
-</dd>
-<dt><code class="docutils literal notranslate"><span class="pre">--socket-suffix</span></code></dt><dd><p>Append a suffix to IPC socket paths to avoid conflicts when running multiple instances.</p>
+<dt><code class="docutils literal notranslate"><span class="pre">--runtime</span> <span class="pre">auto|rust|python</span></code></dt><dd><p><code class="docutils literal notranslate"><span class="pre">auto</span></code> (default) serves with the Rust runtime, and with the Python runtime when the Rust extension
+is not installed or does not load, or when only the Python runtime takes the arguments (for example
+<code class="docutils literal notranslate"><span class="pre">--async-scheduling</span></code>). Without the extension, flags only the Rust runtime has are ignored with a
+warning. <code class="docutils literal notranslate"><span class="pre">rust</span></code> and <code class="docutils literal notranslate"><span class="pre">python</span></code> select one runtime without fallback; <code class="docutils literal notranslate"><span class="pre">python</span> <span class="pre">-m</span> <span class="pre">vox_serve.launch</span></code>
+is the Python runtime too.</p>
 </dd>
 </dl>
+</section>
+<section id="common-arguments-both-runtimes">
+<h2>Common arguments (both runtimes)<a class="headerlink" href="#common-arguments-both-runtimes" title="Link to this heading">#</a></h2>
+<dl class="simple">
+<dt><code class="docutils literal notranslate"><span class="pre">--model</span></code></dt><dd><p>Model name or Hugging Face repository. Default: <code class="docutils literal notranslate"><span class="pre">canopylabs/orpheus-3b-0.1-ft</span></code>.</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">--host</span></code> / <code class="docutils literal notranslate"><span class="pre">--port</span></code></dt><dd><p>Bind address and port of the HTTP server. Defaults: <code class="docutils literal notranslate"><span class="pre">0.0.0.0</span></code>, <code class="docutils literal notranslate"><span class="pre">8000</span></code>.</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">--max-batch-size</span></code></dt><dd><p>Maximum number of requests decoded together. Default: <code class="docutils literal notranslate"><span class="pre">8</span></code>.</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">--page-size</span></code> / <code class="docutils literal notranslate"><span class="pre">--max-num-pages</span></code></dt><dd><p>KV-cache page size (default <code class="docutils literal notranslate"><span class="pre">64</span></code>) and number of pages (default: enough for twice the batch at the
+maximum context).</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">--scheduler-type</span></code></dt><dd><p>Scheduling policy: <code class="docutils literal notranslate"><span class="pre">base</span></code> (default), <code class="docutils literal notranslate"><span class="pre">online</span></code> (requests close to an audio underrun first) or
+<code class="docutils literal notranslate"><span class="pre">offline</span></code> (throughput first). The Python runtime also has <code class="docutils literal notranslate"><span class="pre">input_streaming</span></code> (needed there for the
+input-streaming endpoints; the Rust runtime serves them with every policy and treats the name as
+<code class="docutils literal notranslate"><span class="pre">base</span></code>), the Rust runtime also <code class="docutils literal notranslate"><span class="pre">deadline</span></code>. <a class="reference internal" href="runtimes.html"><span class="doc">Serving Runtimes</span></a> describes the policies.</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">--max-tokens</span></code></dt><dd><p>Per-request token limit (prompt included), overriding the model’s default.</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">--temperature</span></code>, <code class="docutils literal notranslate"><span class="pre">--top-p</span></code>, <code class="docutils literal notranslate"><span class="pre">--top-k</span></code>, <code class="docutils literal notranslate"><span class="pre">--min-p</span></code>, <code class="docutils literal notranslate"><span class="pre">--repetition-penalty</span></code></dt><dd><p>Sampling parameters of every request, overriding the model’s defaults.</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">--greedy</span></code></dt><dd><p>Greedy decoding for every request (testing).</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">--detokenize-interval</span></code></dt><dd><p>Codec frames per decoded audio chunk (Qwen3-TTS). Default: the model’s.</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">--cfg-scale</span></code></dt><dd><p>Classifier-free guidance scale (Voxtral-TTS). Default: the model’s.</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">--dp-size</span></code></dt><dd><p>Data-parallel replicas, one per GPU <code class="docutils literal notranslate"><span class="pre">0..N-1</span></code>.</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">--enable-disaggregation</span></code></dt><dd><p>Run the codec on GPU 1 and the LM on GPU 0.</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">--enable-torch-compile</span></code></dt><dd><p>Compile the LM forward with <code class="docutils literal notranslate"><span class="pre">torch.compile</span></code> before capturing its graphs (slower start-up).</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">--fuse-lm</span></code>, <code class="docutils literal notranslate"><span class="pre">--fuse-layers</span></code>, <code class="docutils literal notranslate"><span class="pre">--fuse-codec</span></code>, <code class="docutils literal notranslate"><span class="pre">--fuse-depth</span></code>, <code class="docutils literal notranslate"><span class="pre">--fuse-talker</span></code>, <code class="docutils literal notranslate"><span class="pre">--compile-detok</span></code></dt><dd><p>Kernel fusion (<code class="docutils literal notranslate"><span class="pre">vox_serve/fusion</span></code>), model-specific: merged q/k/v and gate/up GEMMs (<code class="docutils literal notranslate"><span class="pre">--fuse-lm</span></code>), fused
+decoder layers (<code class="docutils literal notranslate"><span class="pre">--fuse-layers</span></code>: Higgs Audio v3, CosyVoice3), fused codec kernels (<code class="docutils literal notranslate"><span class="pre">--fuse-codec</span></code>:
+Higgs Audio v3, CosyVoice3), Qwen3-TTS depth transformer and talker (<code class="docutils literal notranslate"><span class="pre">--fuse-depth</span></code>, <code class="docutils literal notranslate"><span class="pre">--fuse-talker</span></code>),
+and <code class="docutils literal notranslate"><span class="pre">torch.compile</span></code> of the codec (<code class="docutils literal notranslate"><span class="pre">--compile-detok</span></code>). <code class="docutils literal notranslate"><span class="pre">vox-serve</span> <span class="pre">--help</span></code> lists the models of each.</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">--log-level</span></code></dt><dd><p><code class="docutils literal notranslate"><span class="pre">DEBUG</span></code>, <code class="docutils literal notranslate"><span class="pre">INFO</span></code> (default), <code class="docutils literal notranslate"><span class="pre">WARNING</span></code> or <code class="docutils literal notranslate"><span class="pre">ERROR</span></code>.</p>
+</dd>
+</dl>
+</section>
+<section id="python-runtime-only">
+<h2>Python runtime only<a class="headerlink" href="#python-runtime-only" title="Link to this heading">#</a></h2>
+<dl class="simple">
+<dt><code class="docutils literal notranslate"><span class="pre">--async-scheduling</span></code></dt><dd><p>Schedule the next step while the GPU runs the current one.</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">--disable-cuda-graph</span></code> / <code class="docutils literal notranslate"><span class="pre">--enable-cuda-graph</span></code></dt><dd><p>Run the model’s step functions eagerly instead of replaying CUDA graphs (for debugging model code).
+<code class="docutils literal notranslate"><span class="pre">--enable-cuda-graph</span></code> is the default.</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">--socket-suffix</span></code></dt><dd><p>Suffix of the IPC socket paths between the API server and the schedulers, to run several servers on
+one host.</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">--enable-nvtx</span></code></dt><dd><p>NVTX ranges around the steps, for profiling.</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">--repetition-window</span></code>, <code class="docutils literal notranslate"><span class="pre">--unroll-depth-cuda-graph</span></code></dt><dd><p>Accepted for compatibility, without effect: the repetition penalty covers every generated token, and
+the depth transformer is part of each step’s graph.</p>
+</dd>
+</dl>
+</section>
+<section id="rust-runtime-only">
+<h2>Rust runtime only<a class="headerlink" href="#rust-runtime-only" title="Link to this heading">#</a></h2>
+<dl class="simple">
+<dt><code class="docutils literal notranslate"><span class="pre">--max-context</span></code> / <code class="docutils literal notranslate"><span class="pre">--prefill-buckets</span></code></dt><dd><p>Maximum sequence length of a request (default <code class="docutils literal notranslate"><span class="pre">2048</span></code>) and the prefill graph sizes (default
+<code class="docutils literal notranslate"><span class="pre">256,512,1024,2048</span></code>, capped at the maximum context).</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">--max-prefills-per-step</span></code></dt><dd><p>Requests prefilled together in one step (default <code class="docutils literal notranslate"><span class="pre">1</span></code>).</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">--max-detok-batch-size</span></code></dt><dd><p>Largest codec batch captured as a graph (default: <code class="docutils literal notranslate"><span class="pre">--max-batch-size</span></code>); bounds codec graph memory.</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">--torch-compile-targets</span></code></dt><dd><p>Restrict <code class="docutils literal notranslate"><span class="pre">--enable-torch-compile</span></code> to these LM functions (e.g. <code class="docutils literal notranslate"><span class="pre">decode_head,decode_depth</span></code>).</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">--codec-gpu</span></code> / <code class="docutils literal notranslate"><span class="pre">--codec-sms</span></code></dt><dd><p>Run the codec on another GPU (or an SM partition of one shared by several replicas).</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">--overlap-detok</span></code>, <code class="docutils literal notranslate"><span class="pre">--async-engines</span></code>, <code class="docutils literal notranslate"><span class="pre">--sm-modes</span></code>, <code class="docutils literal notranslate"><span class="pre">--sm-mode</span></code>, <code class="docutils literal notranslate"><span class="pre">--urgent-lane</span></code>, <code class="docutils literal notranslate"><span class="pre">--stream-priorities</span></code></dt><dd><p>Run the LM and the codec concurrently: on separate streams, or on SM partitions of the GPU, with a
+high-priority lane for first audio chunks (<a class="reference internal" href="runtimes.html#running-the-lm-and-the-codec-concurrently"><span class="std std-ref">Running the LM and the codec concurrently</span></a>).</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">--urgent-max-batch</span></code></dt><dd><p>Largest urgent-lane batch (default <code class="docutils literal notranslate"><span class="pre">8</span></code>).</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">--lm-segments</span> <span class="pre">whole|depth|layers:&lt;k&gt;</span></code>, <code class="docutils literal notranslate"><span class="pre">--gate</span> <span class="pre">none|depth|layer:&lt;i&gt;</span></code></dt><dd><p>Capture Qwen3-TTS steps in segments (before the depth transformer, or in groups of <code class="docutils literal notranslate"><span class="pre">k</span></code> layers), and
+start codec batches only once the LM step reaches the named segment.</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">--dec-batch</span></code>, <code class="docutils literal notranslate"><span class="pre">--dec-max-batch</span></code>, <code class="docutils literal notranslate"><span class="pre">--dec-flush-ms</span></code>, <code class="docutils literal notranslate"><span class="pre">--dec-urgent-ms</span></code></dt><dd><p>Codec batching of the asynchronous engine: the ready chunks a batch waits for (default <code class="docutils literal notranslate"><span class="pre">0</span></code>: none), the
+largest batch without urgent chunks (default <code class="docutils literal notranslate"><span class="pre">0</span></code>: the largest captured), how close a playback deadline
+flushes a partial batch (default <code class="docutils literal notranslate"><span class="pre">50</span></code> ms), and how close makes a chunk urgent (default <code class="docutils literal notranslate"><span class="pre">100</span></code> ms).</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">--prefill-exclusive</span></code>, <code class="docutils literal notranslate"><span class="pre">--urgent-exclusive</span></code>, <code class="docutils literal notranslate"><span class="pre">--slack-urgency</span></code>, <code class="docutils literal notranslate"><span class="pre">--time-share</span></code></dt><dd><p>Asynchronous-engine variants: prefills never overlap codec batches; urgent codec batches run on all SMs
+while the LM waits; first chunks are scheduled by deadline (<code class="docutils literal notranslate"><span class="pre">--deadline-startup-ms</span></code>) instead of always
+urgent; LM steps and codec batches alternate on the whole GPU.</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">--deadline-startup-ms</span></code>, <code class="docutils literal notranslate"><span class="pre">--deadline-lm-step-ms</span></code>, <code class="docutils literal notranslate"><span class="pre">--deadline-codec-ms</span></code>, <code class="docutils literal notranslate"><span class="pre">--deadline-prefill-ms</span></code>, <code class="docutils literal notranslate"><span class="pre">--deadline-max-prefill-deferral-ms</span></code>, <code class="docutils literal notranslate"><span class="pre">--deadline-max-pending-chunks</span></code></dt><dd><p>First-audio target and cost estimates of the <code class="docutils literal notranslate"><span class="pre">deadline</span></code> policy (calibrate per model and GPU), the
+longest prefill deferral, and the number of audio chunks waiting for the codec at which a request’s LM
+steps pause (<code class="docutils literal notranslate"><span class="pre">0</span></code>, the default: never).</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">--bench-requests</span> <span class="pre">N</span></code> (with <code class="docutils literal notranslate"><span class="pre">--bench-text</span></code>, <code class="docutils literal notranslate"><span class="pre">--bench-audio</span></code>, <code class="docutils literal notranslate"><span class="pre">--bench-kwargs</span></code>, <code class="docutils literal notranslate"><span class="pre">--bench-out</span></code>)</dt><dd><p>Run N concurrent requests without HTTP, report their timings, optionally write their audio, and exit.</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">--trace-dir</span></code></dt><dd><p>Write the GPU time of every graph launch and every scheduling decision as JSON lines.</p>
+</dd>
+<dt><code class="docutils literal notranslate"><span class="pre">--prompt-builder</span> <span class="pre">python|template</span></code></dt><dd><p>Build prompts with the program’s <code class="docutils literal notranslate"><span class="pre">preprocess</span></code> (or the template builder) instead of the model’s Rust
+prompt builder: for bringing up a model, or checking a Rust builder against Python
+(<a class="reference internal" href="adding-a-model.html"><span class="doc">Adding a Model</span></a>).</p>
+</dd>
+</dl>
+<p><code class="docutils literal notranslate"><span class="pre">vox-serve</span> <span class="pre">--runtime</span> <span class="pre">rust</span> <span class="pre">--help</span></code> and <code class="docutils literal notranslate"><span class="pre">vox-serve</span> <span class="pre">--runtime</span> <span class="pre">python</span> <span class="pre">--help</span></code> list every flag;
+<code class="docutils literal notranslate"><span class="pre">rust/docs/v2_runtime_design.md</span></code> describes the asynchronous engine.</p>
 </section>
 </section>
 
@@ -568,11 +631,11 @@ whose cumulative probability exceeds this value.</p>
       </div>
     </a>
     <a class="right-next"
-       href="models.html"
+       href="runtimes.html"
        title="next page">
       <div class="prev-next-info">
         <p class="prev-next-subtitle">next</p>
-        <p class="prev-next-title">Supported Models</p>
+        <p class="prev-next-title">Serving Runtimes</p>
       </div>
       <i class="fa-solid fa-angle-right"></i>
     </a>
@@ -595,7 +658,10 @@ whose cumulative probability exceeds this value.</p>
   <nav id="pst-page-toc-nav" class="page-toc" aria-labelledby="pst-page-navigation-heading-2">
     <ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#usage">Usage</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#arguments">Arguments</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#runtime">Runtime</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#common-arguments-both-runtimes">Common arguments (both runtimes)</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#python-runtime-only">Python runtime only</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#rust-runtime-only">Rust runtime only</a></li>
 </ul>
   </nav></div>
 

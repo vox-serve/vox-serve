@@ -1,4 +1,4 @@
-vox\_serve.cli
+﻿vox\_serve.cli
 ==============
 
 .. automodule:: vox_serve.cli

@@ -1,0 +1,796 @@
+
+<!DOCTYPE html>
+
+
+<html lang="en" data-content_root="./" >
+
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>Serving Runtimes &#8212; VoxServe v0.0.1 Documentation</title>
+  
+  
+  
+  <script data-cfasync="false">
+    document.documentElement.dataset.mode = localStorage.getItem("mode") || "";
+    document.documentElement.dataset.theme = localStorage.getItem("theme") || "";
+  </script>
+  <!--
+    this give us a css class that will be invisible only if js is disabled
+  -->
+  <noscript>
+    <style>
+      .pst-js-only { display: none !important; }
+
+    </style>
+  </noscript>
+  
+  <!-- Loaded before other Sphinx assets -->
+  <link href="_static/styles/theme.css?digest=90905a2f556bf617f1a9" rel="stylesheet" />
+<link href="_static/styles/pydata-sphinx-theme.css?digest=90905a2f556bf617f1a9" rel="stylesheet" />
+
+    <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=8f2a1f02" />
+    <link rel="stylesheet" type="text/css" href="_static/styles/sphinx-book-theme.css?v=4418a689" />
+    <link rel="stylesheet" type="text/css" href="_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="_static/css/custom_log.css?v=229a0be7" />
+    <link rel="stylesheet" type="text/css" href="_static/css/custom_log.css?v=229a0be7" />
+  
+  <!-- So that users can add custom icons -->
+  <script defer src="_static/scripts/fontawesome.js?digest=90905a2f556bf617f1a9"></script>
+  <!-- Pre-loaded scripts that we'll load fully later -->
+  <link rel="preload" as="script" href="_static/scripts/bootstrap.js?digest=90905a2f556bf617f1a9" />
+<link rel="preload" as="script" href="_static/scripts/pydata-sphinx-theme.js?digest=90905a2f556bf617f1a9" />
+
+    <script src="_static/documentation_options.js?v=e645c8fa"></script>
+    <script src="_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="_static/copybutton.js?v=ccdb6887"></script>
+    <script src="_static/scripts/sphinx-book-theme.js?v=fab101a9"></script>
+    <script crossorigin="anonymous" integrity="sha256-Ae2Vz/4ePdIu6ZyI/5ZGsYnb+m0JlOmKPjt6XZ9JJkA=" src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.4/require.min.js"></script>
+    <script>DOCUMENTATION_OPTIONS.pagename = 'runtimes';</script>
+    <script>DOCUMENTATION_OPTIONS.search_as_you_type = false;</script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="Supported Models" href="models.html" />
+    <link rel="prev" title="CLI Reference" href="cli.html" />
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta name="docsearch:language" content="en"/>
+  <meta name="docsearch:version" content="0.0.1" />
+    <meta name="docbuild:last-update" content="Nov 01, 2026"/>
+  
+    
+    <script src="_static/searchtools.js"></script>
+    <script src="_static/language_data.js"></script>
+    <script src="searchindex.js"></script>
+  
+  </head>
+  <body data-default-mode="">
+  
+  
+  <div id="pst-skip-link" class="skip-link d-print-none"><a href="#main-content">Skip to main content</a></div>
+
+  
+  <div id="pst-scroll-pixel-helper"></div>
+  
+  <button type="button" class="btn rounded-pill" id="pst-back-to-top">
+    <i class="fa-solid fa-arrow-up"></i>Back to top</button>
+  
+  
+  
+  
+  <dialog id="pst-search-dialog">
+    
+<form class="bd-search d-flex align-items-center"
+      action="search.html"
+      method="get">
+  <i class="fa-solid fa-magnifying-glass"></i>
+  <input type="search"
+         class="form-control"
+         name="q"
+         placeholder="Search..."
+         aria-label="Search..."
+         autocomplete="off"
+         autocorrect="off"
+         autocapitalize="off"
+         spellcheck="false"/>
+  <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd>K</kbd></span>
+</form>
+  </dialog>
+
+  <div class="pst-async-banner-revealer d-none">
+  <aside id="bd-header-version-warning" class="d-none d-print-none" aria-label="Version warning"></aside>
+</div>
+
+  
+    <header id="pst-header" class="bd-header navbar navbar-expand-lg bd-navbar d-print-none">
+<div class="bd-header__inner bd-page-width">
+  <button class="pst-navbar-icon sidebar-toggle primary-toggle" aria-label="Site navigation">
+    <span class="fa-solid fa-bars"></span>
+  </button>
+  
+  
+  <div class="col-lg-9 navbar-header-items">
+    
+    
+    <div class="navbar-header-items__end">
+      
+        <div class="navbar-item navbar-persistent--container">
+          
+
+<button class="btn search-button-field search-button__button pst-js-only" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+ <i class="fa-solid fa-magnifying-glass"></i>
+ <span class="search-button__default-text">Search</span>
+ <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+</button>
+        </div>
+      
+      
+    </div>
+    
+  </div>
+  
+  
+    <div class="navbar-persistent--mobile">
+
+<button class="btn search-button-field search-button__button pst-js-only" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+ <i class="fa-solid fa-magnifying-glass"></i>
+ <span class="search-button__default-text">Search</span>
+ <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+</button>
+    </div>
+  
+
+  
+    <button class="pst-navbar-icon sidebar-toggle secondary-toggle" aria-label="On this page">
+      <span class="fa-solid fa-outdent"></span>
+    </button>
+  
+</div>
+
+    </header>
+  
+
+  <div class="bd-container">
+    <div class="bd-container__inner bd-page-width">
+      
+      
+      
+      <dialog id="pst-primary-sidebar-modal"></dialog>
+      <div id="pst-primary-sidebar" class="bd-sidebar-primary bd-sidebar">
+        
+
+  
+  <div class="sidebar-header-items sidebar-primary__section">
+    
+    
+    
+    
+  </div>
+  
+    <div class="sidebar-primary-items__start sidebar-primary__section">
+        <div class="sidebar-primary-item">
+
+  
+    
+  
+
+<a class="navbar-brand logo" href="index.html">
+  
+  
+  
+  
+  
+    
+    
+      
+    
+    
+    <img src="_static/logo-light.png" class="logo__image only-light" alt="VoxServe v0.0.1 Documentation - Home"/>
+    <img src="_static/logo-light.png" class="logo__image only-dark pst-js-only" alt="VoxServe v0.0.1 Documentation - Home"/>
+  
+  
+</a></div>
+        <div class="sidebar-primary-item">
+
+<button class="btn search-button-field search-button__button pst-js-only" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+ <i class="fa-solid fa-magnifying-glass"></i>
+ <span class="search-button__default-text">Search</span>
+ <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+</button></div>
+        <div class="sidebar-primary-item"><nav class="bd-links bd-docs-nav" aria-label="Main">
+    <div class="bd-toc-item navbar-nav active">
+        <p aria-level="2" class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="quickstart.html">Quickstart</a></li>
+<li class="toctree-l1"><a class="reference internal" href="concepts.html">Core Concepts</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Usage Guides</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1 has-children"><a class="reference internal" href="usage/index.html">Usage Guides</a><details open="open"><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l2"><a class="reference internal" href="usage/orpheus.html">Orpheus</a></li>
+<li class="toctree-l2"><a class="reference internal" href="usage/csm.html">CSM</a></li>
+<li class="toctree-l2"><a class="reference internal" href="usage/zonos.html">Zonos</a></li>
+<li class="toctree-l2"><a class="reference internal" href="usage/chatterbox.html">Chatterbox</a></li>
+<li class="toctree-l2"><a class="reference internal" href="usage/cosyvoice2.html">CosyVoice2</a></li>
+<li class="toctree-l2"><a class="reference internal" href="usage/qwen3-tts.html">Qwen3-TTS</a></li>
+<li class="toctree-l2"><a class="reference internal" href="usage/glm-voice.html">GLM-4-Voice</a></li>
+<li class="toctree-l2"><a class="reference internal" href="usage/step-audio.html">Step-Audio-2</a></li>
+</ul>
+</details></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul class="current nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="api.html">API Reference</a></li>
+
+<li class="toctree-l1"><a class="reference internal" href="cli.html">CLI Reference</a></li>
+<li class="toctree-l1 current active"><a class="current reference internal" href="#">Serving Runtimes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="models.html">Supported Models</a></li>
+<li class="toctree-l1"><a class="reference internal" href="architecture.html">Architecture</a></li>
+</ul>
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">Contributing</span></p>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="development.html">Development</a></li>
+<li class="toctree-l1"><a class="reference internal" href="adding-a-model.html">Adding a Model</a></li>
+</ul>
+
+    </div>
+</nav></div>
+    </div>
+  
+  
+  <div class="sidebar-primary-items__end sidebar-primary__section">
+      <div class="sidebar-primary-item">
+<div id="ethical-ad-placement"
+      class="flat"
+      data-ea-publisher="readthedocs"
+      data-ea-type="readthedocs-sidebar"
+      data-ea-manual="true">
+</div></div>
+  </div>
+
+
+      </div>
+      
+      <main id="main-content" class="bd-main" role="main">
+        
+        
+
+<div class="sbt-scroll-pixel-helper"></div>
+
+          <div class="bd-content">
+            <div class="bd-article-container">
+              
+              <div class="bd-header-article d-print-none">
+<div class="header-article-items header-article__inner">
+  
+    <div class="header-article-items__start">
+      
+        <div class="header-article-item"><button class="sidebar-toggle primary-toggle btn btn-sm" title="Toggle primary sidebar" data-bs-placement="bottom" data-bs-toggle="tooltip">
+  <span class="fa-solid fa-bars"></span>
+</button></div>
+      
+    </div>
+  
+  
+    <div class="header-article-items__end">
+      
+        <div class="header-article-item">
+
+<div class="article-header-buttons">
+
+
+
+
+
+<div class="dropdown dropdown-source-buttons">
+  <button class="btn dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" aria-label="Source repositories">
+    <i class="fab fa-github"></i>
+  </button>
+  <ul class="dropdown-menu">
+      
+      
+      
+      <li><a href="https://github.com/vox-serve/vox-serve" target="_blank"
+   class="btn btn-sm btn-source-repository-button dropdown-item"
+   title="Source repository"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fab fa-github"></i>
+  </span>
+<span class="btn__text-container">Repository</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li><a href="https://github.com/vox-serve/vox-serve/blob/main/runtimes.rst?plain=1" target="_blank"
+   class="btn btn-sm btn-source-file-button dropdown-item"
+   title="Show source"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-code"></i>
+  </span>
+<span class="btn__text-container">Show source</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li><a href="https://github.com/vox-serve/vox-serve/edit/main/runtimes.rst" target="_blank"
+   class="btn btn-sm btn-source-edit-button dropdown-item"
+   title="Suggest edit"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-pencil-alt"></i>
+  </span>
+<span class="btn__text-container">Suggest edit</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li><a href="https://github.com/vox-serve/vox-serve/issues/new?title=Issue%20on%20page%20%2Fruntimes.html&body=Your%20issue%20content%20here." target="_blank"
+   class="btn btn-sm btn-source-issues-button dropdown-item"
+   title="Open an issue"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-lightbulb"></i>
+  </span>
+<span class="btn__text-container">Open issue</span>
+</a>
+</li>
+      
+  </ul>
+</div>
+
+
+
+
+
+
+<div class="dropdown dropdown-download-buttons">
+  <button class="btn dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" aria-label="Download this page">
+    <i class="fas fa-download"></i>
+  </button>
+  <ul class="dropdown-menu">
+      
+      
+      
+      <li><a href="_sources/runtimes.rst" target="_blank"
+   class="btn btn-sm btn-download-source-button dropdown-item"
+   title="Download source file"
+   data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-file"></i>
+  </span>
+<span class="btn__text-container">.rst</span>
+</a>
+</li>
+      
+      
+      
+      
+      <li>
+<button onclick="window.print()"
+  class="btn btn-sm btn-download-pdf-button dropdown-item"
+  title="Print to PDF"
+  data-bs-placement="left" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-file-pdf"></i>
+  </span>
+<span class="btn__text-container">.pdf</span>
+</button>
+</li>
+      
+  </ul>
+</div>
+
+
+
+
+<button onclick="toggleFullScreen()"
+  class="btn btn-sm btn-fullscreen-button pst-navbar-icon"
+  title="Fullscreen mode"
+  data-bs-placement="bottom" data-bs-toggle="tooltip"
+>
+  
+
+<span class="btn__icon-container">
+  <i class="fas fa-expand"></i>
+  </span>
+
+</button>
+
+
+
+<div class="theme-switch-container dropdown pst-js-only" data-bs-toggle="tooltip" data-bs-placement="bottom" title="Color mode">
+  <button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button dropdown-toggle" aria-label="Color mode" data-bs-toggle="dropdown">
+    <i class="theme-switch fa-solid fa-sun fa-lg fa-fw" data-mode="light" title="Light"></i>
+    <i class="theme-switch fa-solid fa-moon fa-lg fa-fw" data-mode="dark" title="Dark"></i>
+    <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg fa-fw" data-mode="auto" title="System Settings"></i>
+  </button>
+  <ul class="dropdown-menu dropdown-menu-end">
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="auto"><i class="fa-solid fa-circle-half-stroke fa-lg fa-fw me-1"></i>System Settings</button></li>
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="light"><i class="fa-solid fa-sun fa-lg fa-fw me-1"></i>Light</button></li>
+    <li><button class="dropdown-item d-flex align-items-center theme-change-button" data-mode="dark"><i class="fa-solid fa-moon fa-lg fa-fw me-1"></i>Dark</button></li>
+  </ul>
+</div>
+
+
+<button class="btn btn-sm pst-navbar-icon search-button search-button__button pst-js-only" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="fa-solid fa-magnifying-glass fa-lg"></i>
+</button>
+<button class="sidebar-toggle secondary-toggle btn btn-sm pst-navbar-icon" title="Toggle secondary sidebar" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <span class="fa-solid fa-list"></span>
+</button>
+</div></div>
+      
+    </div>
+  
+</div>
+</div>
+              
+              
+
+<div id="jb-print-docs-body" class="onlyprint">
+    <h1>Serving Runtimes</h1>
+    <!-- Table of contents -->
+    <div id="print-main-content">
+        <div id="jb-print-toc">
+            
+            <div>
+                <h2> Contents </h2>
+            </div>
+            <nav aria-label="Page">
+                <ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#choosing-a-runtime">Choosing a runtime</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#installing-the-rust-runtime">Installing the Rust runtime</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#how-the-rust-runtime-works">How the Rust runtime works</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#scheduling-policies">Scheduling policies</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#running-the-lm-and-the-codec-concurrently">Running the LM and the codec concurrently</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#several-gpus">Several GPUs</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#benchmarking-without-http">Benchmarking without HTTP</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#the-python-runtime">The Python runtime</a></li>
+</ul>
+            </nav>
+        </div>
+    </div>
+</div>
+
+              
+                
+<div id="searchbox"></div>
+                <article class="bd-article">
+                  
+  <section id="serving-runtimes">
+<h1>Serving Runtimes<a class="headerlink" href="#serving-runtimes" title="Link to this heading">#</a></h1>
+<p>VoxServe has two serving runtimes. Both run the same model implementations (one <em>program</em> per model,
+see <a class="reference internal" href="adding-a-model.html"><span class="doc">Adding a Model</span></a>), accept the same core arguments and serve the same HTTP API (<a class="reference internal" href="api.html"><span class="doc">API Reference</span></a>).</p>
+<div class="pst-scrollable-table-container"><table class="table">
+<colgroup>
+<col style="width: 20.0%" />
+<col style="width: 40.0%" />
+<col style="width: 40.0%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"></th>
+<th class="head"><p>Rust runtime (default)</p></th>
+<th class="head"><p>Python runtime</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>Selected with</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">vox-serve</span></code> (or <code class="docutils literal notranslate"><span class="pre">--runtime</span> <span class="pre">rust</span></code>)</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--runtime</span> <span class="pre">python</span></code> or <code class="docutils literal notranslate"><span class="pre">python</span> <span class="pre">-m</span> <span class="pre">vox_serve.launch</span></code>; also the automatic fallback (below)</p></td>
+</tr>
+<tr class="row-odd"><td><p>Serving loop</p></td>
+<td><p>Rust: an HTTP server and one scheduler thread per GPU, with no Python on the per-step path</p></td>
+<td><p>Python: a FastAPI server plus one scheduler process per GPU, connected over ZMQ</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--scheduler-type</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">base</span></code>, <code class="docutils literal notranslate"><span class="pre">online</span></code>, <code class="docutils literal notranslate"><span class="pre">offline</span></code>, <code class="docutils literal notranslate"><span class="pre">deadline</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">base</span></code>, <code class="docutils literal notranslate"><span class="pre">online</span></code>, <code class="docutils literal notranslate"><span class="pre">offline</span></code>, <code class="docutils literal notranslate"><span class="pre">input_streaming</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p>Overlap</p></td>
+<td><p>LM and codec run concurrently: on separate streams, on SM partitions of the GPU, or with an
+urgent lane for first audio chunks</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--async-scheduling</span></code> schedules the next step while the GPU runs the current one</p></td>
+</tr>
+<tr class="row-even"><td><p>Several GPUs</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--dp-size</span></code>, <code class="docutils literal notranslate"><span class="pre">--enable-disaggregation</span></code>, <code class="docutils literal notranslate"><span class="pre">--codec-gpu</span></code> / <code class="docutils literal notranslate"><span class="pre">--codec-sms</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--dp-size</span></code>, <code class="docutils literal notranslate"><span class="pre">--enable-disaggregation</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p>Debugging</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--bench-requests</span></code> (requests without HTTP), <code class="docutils literal notranslate"><span class="pre">--trace-dir</span></code>, <code class="docutils literal notranslate"><span class="pre">--prompt-builder</span> <span class="pre">python</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--disable-cuda-graph</span></code> (eager execution), <code class="docutils literal notranslate"><span class="pre">--enable-nvtx</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p>Needs</p></td>
+<td><p>the <code class="docutils literal notranslate"><span class="pre">vox_serve._rt</span></code> extension, compiled at install time (Rust toolchain + CUDA compiler)</p></td>
+<td><p>nothing beyond the Python package</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<section id="choosing-a-runtime">
+<h2>Choosing a runtime<a class="headerlink" href="#choosing-a-runtime" title="Link to this heading">#</a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">vox-serve</span> <span class="pre">--runtime</span> <span class="pre">auto</span></code> (the default) serves with the Rust runtime and switches to the Python runtime
+when the Rust runtime cannot serve the command line:</p>
+<ul class="simple">
+<li><p>the extension is not installed (its build is optional and is skipped without a Rust toolchain or <code class="docutils literal notranslate"><span class="pre">nvcc</span></code>)
+or does not load;</p></li>
+<li><p>the extension was built against a different FlashInfer version than the installed <code class="docutils literal notranslate"><span class="pre">flashinfer-python</span></code>;</p></li>
+<li><p>an argument exists only in the Python runtime (<code class="docutils literal notranslate"><span class="pre">--async-scheduling</span></code>, <code class="docutils literal notranslate"><span class="pre">--disable-cuda-graph</span></code>, …).</p></li>
+</ul>
+<p>The reason is printed on stderr. When the Python runtime serves because the extension is missing, arguments
+that only the Rust runtime has are dropped with a warning. <code class="docutils literal notranslate"><span class="pre">--runtime</span> <span class="pre">rust</span></code> and <code class="docutils literal notranslate"><span class="pre">--runtime</span> <span class="pre">python</span></code> select
+one runtime and never fall back, and an error after start-up never switches runtimes.</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>vox-serve<span class="w"> </span>--model<span class="w"> </span>qwen3-tts<span class="w">                        </span><span class="c1"># Rust runtime if available, else Python</span>
+vox-serve<span class="w"> </span>--runtime<span class="w"> </span>rust<span class="w"> </span>--model<span class="w"> </span>qwen3-tts<span class="w">         </span><span class="c1"># Rust runtime or an error explaining why not</span>
+vox-serve<span class="w"> </span>--runtime<span class="w"> </span>python<span class="w"> </span>--model<span class="w"> </span>qwen3-tts<span class="w">       </span><span class="c1"># Python runtime</span>
+vox-serve<span class="w"> </span>--runtime<span class="w"> </span>rust<span class="w"> </span>--help<span class="w">                    </span><span class="c1"># every Rust-runtime flag</span>
+vox-serve<span class="w"> </span>--runtime<span class="w"> </span>python<span class="w"> </span>--help<span class="w">                  </span><span class="c1"># every Python-runtime flag</span>
+</pre></div>
+</div>
+</section>
+<section id="installing-the-rust-runtime">
+<h2>Installing the Rust runtime<a class="headerlink" href="#installing-the-rust-runtime" title="Link to this heading">#</a></h2>
+<p>The extension <code class="docutils literal notranslate"><span class="pre">vox_serve._rt</span></code> is compiled by <code class="docutils literal notranslate"><span class="pre">pip</span> <span class="pre">install</span></code> from the <code class="docutils literal notranslate"><span class="pre">rust/</span></code> crate (setuptools-rust)
+when these are available:</p>
+<ul class="simple">
+<li><p>a Rust toolchain (<code class="docutils literal notranslate"><span class="pre">cargo</span></code>; CI uses Rust 1.90, <a class="reference external" href="https://rustup.rs">rustup</a> installs it);</p></li>
+<li><p>the CUDA 12 toolkit with <code class="docutils literal notranslate"><span class="pre">nvcc</span></code>, found through <code class="docutils literal notranslate"><span class="pre">CUDA_HOME</span></code> (default <code class="docutils literal notranslate"><span class="pre">/usr/local/cuda-12</span></code>).</p></li>
+</ul>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>git<span class="w"> </span>clone<span class="w"> </span>https://github.com/vox-serve/vox-serve.git<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nb">cd</span><span class="w"> </span>vox-serve
+pip<span class="w"> </span>install<span class="w"> </span>-e<span class="w"> </span>.<span class="w">                       </span><span class="c1"># builds the extension (a few minutes), or skips it with a warning</span>
+vox-serve<span class="w"> </span>--runtime<span class="w"> </span>rust<span class="w"> </span>--help<span class="w">        </span><span class="c1"># fails with the reason if the extension is unavailable</span>
+</pre></div>
+</div>
+<p>Without these tools the installation still succeeds, and <code class="docutils literal notranslate"><span class="pre">vox-serve</span></code> serves with the Python runtime.
+Python changes take effect immediately in an editable install; after changing Rust or CUDA sources, run
+<code class="docutils literal notranslate"><span class="pre">pip</span> <span class="pre">install</span> <span class="pre">-e</span> <span class="pre">.</span></code> again.</p>
+<p>Build options (environment variables):</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">VOX_CUDA_ARCHS</span></code>: comma-separated SM architectures of the sampling kernels, e.g. <code class="docutils literal notranslate"><span class="pre">90</span></code> for H100 only
+(default: <code class="docutils literal notranslate"><span class="pre">80,86,89,90,100,120</span></code>, limited to those <code class="docutils literal notranslate"><span class="pre">nvcc</span></code> supports). One architecture builds faster.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">FLASHINFER_INCLUDE</span></code>: FlashInfer headers to plan attention with, instead of the copy vendored in
+<code class="docutils literal notranslate"><span class="pre">rust/third_party/flashinfer</span></code>. Their version must equal the <code class="docutils literal notranslate"><span class="pre">flashinfer-python</span></code> package
+(<code class="docutils literal notranslate"><span class="pre">rust/third_party/flashinfer/update.sh</span></code> re-vendors them).</p></li>
+</ul>
+<p>The extension links the CUDA runtime (<code class="docutils literal notranslate"><span class="pre">libcudart.so.12</span></code>) dynamically and uses the copy PyTorch loads, so
+the Rust runtime and PyTorch share CUDA graphs and streams. A wheel must never bundle its own
+<code class="docutils literal notranslate"><span class="pre">libcudart</span></code> (<code class="docutils literal notranslate"><span class="pre">auditwheel</span> <span class="pre">repair</span> <span class="pre">--exclude</span> <span class="pre">libcudart.so.12</span></code>).</p>
+</section>
+<section id="how-the-rust-runtime-works">
+<h2>How the Rust runtime works<a class="headerlink" href="#how-the-rust-runtime-works" title="Link to this heading">#</a></h2>
+<ol class="arabic simple">
+<li><p><strong>Start-up (Python).</strong> <code class="docutils literal notranslate"><span class="pre">vox-serve</span></code> loads <code class="docutils literal notranslate"><span class="pre">vox_serve._rt</span></code> and hands it the command line. For every
+GPU replica, the extension calls <code class="docutils literal notranslate"><span class="pre">vox_serve.rt.build_engine</span></code> in the same interpreter: it builds the
+model’s program, which loads the weights and captures every stage of a step as CUDA graphs over static
+buffers. The result is an <em>engine spec</em> (JSON): the device addresses and field layouts of the input and
+output arenas, a graph handle per stage and batch size, the attention configuration, and the program’s
+<code class="docutils literal notranslate"><span class="pre">meta</span></code> (model constants and prompt-builder inputs).</p></li>
+<li><p><strong>Serving (Rust).</strong> An HTTP server (<code class="docutils literal notranslate"><span class="pre">rust/src/server.rs</span></code>) passes requests to one scheduler thread per
+replica (<code class="docutils literal notranslate"><span class="pre">rust/src/scheduler.rs</span></code>). Each step, the scheduler selects audio chunks to decode and a
+batch of requests to prefill or decode, writes the step’s inputs into pinned host memory, copies them to
+the GPU in one transfer, plans paged-KV attention with FlashInfer’s planner (compiled into the
+extension), launches the graphs (<code class="docutils literal notranslate"><span class="pre">rust/src/engine.rs</span></code>) and copies the outputs back. The graphs have
+already sampled the next tokens and classified them (<code class="docutils literal notranslate"><span class="pre">out_kind</span></code>: audio, stop or other), so the
+scheduler never interprets token ids; decoded audio chunks are streamed to the clients.</p></li>
+<li><p><strong>Per-request Python.</strong> Python only runs again to build prompts that need it: the <code class="docutils literal notranslate"><span class="pre">python</span></code> prompt
+builder (the program’s <code class="docutils literal notranslate"><span class="pre">preprocess</span></code>) and hooks such as reference-audio encoding or phonemization.
+Prompts of most models are built in Rust (<code class="docutils literal notranslate"><span class="pre">rust/src/models</span></code>).</p></li>
+</ol>
+<section id="scheduling-policies">
+<h3>Scheduling policies<a class="headerlink" href="#scheduling-policies" title="Link to this heading">#</a></h3>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">base</span></code> (default): new requests are prefilled first, every running request decodes, and audio chunks
+are decoded as soon as they are ready.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">online</span></code>: a streaming request is <em>pressing</em> until its first audio chunk and again when its client is
+about a second from running out of buffered audio; a non-streaming request is pressing once its tokens
+are all generated. Pressing requests decode first, and audio is decoded only in steps that have a
+pressing chunk, which other ready chunks join while the batch has room.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">offline</span></code>: audio is decoded only while no admitted request is generating tokens; for batch jobs, not
+streaming.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">deadline</span></code>: audio chunks are decoded in order of their playback deadlines, and new requests by their
+first-audio deadline (<code class="docutils literal notranslate"><span class="pre">--deadline-startup-ms</span></code>); prefills are deferred, for at most
+<code class="docutils literal notranslate"><span class="pre">--deadline-max-prefill-deferral-ms</span></code>, while running streams are about to underrun. Calibrate the
+<code class="docutils literal notranslate"><span class="pre">--deadline-lm-step-ms</span></code> / <code class="docutils literal notranslate"><span class="pre">--deadline-codec-ms</span></code> / <code class="docutils literal notranslate"><span class="pre">--deadline-prefill-ms</span></code> cost estimates per model
+and GPU.</p></li>
+</ul>
+<p>Input-streaming requests (<code class="docutils literal notranslate"><span class="pre">/generate/stream/...</span></code>) work with every policy; <code class="docutils literal notranslate"><span class="pre">input_streaming</span></code> is accepted
+as a name of <code class="docutils literal notranslate"><span class="pre">base</span></code>.</p>
+</section>
+<section id="running-the-lm-and-the-codec-concurrently">
+<h3>Running the LM and the codec concurrently<a class="headerlink" href="#running-the-lm-and-the-codec-concurrently" title="Link to this heading">#</a></h3>
+<p>By default a step runs the codec, then the LM, on one stream. These flags overlap them:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">--overlap-detok</span></code>: the codec runs on its own stream, asynchronously to the LM steps.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">--async-engines</span></code>: the LM and codec lanes each keep one batch in flight and are collected by their
+completion events.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">--sm-modes</span> <span class="pre">24,48</span></code> and <code class="docutils literal notranslate"><span class="pre">--sm-mode</span></code>: SM partitions of the GPU (green contexts), given as the codec’s SM
+counts. Every decode and codec graph is captured once per partition, so switching partitions only
+selects other graphs. For example, <code class="docutils literal notranslate"><span class="pre">--sm-modes</span> <span class="pre">32</span> <span class="pre">--sm-mode</span> <span class="pre">1</span></code> gives the codec 32 SMs and the LM the
+rest; <code class="docutils literal notranslate"><span class="pre">--sm-mode</span> <span class="pre">adaptive</span></code> picks the partition from latencies measured while serving.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">--urgent-lane</span></code>: a third, high-priority codec lane on all SMs for first chunks and chunks close to
+their playback deadline (Qwen3-TTS, Orpheus, Zonos, CSM, CosyVoice3).</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">--lm-segments</span> <span class="pre">depth</span></code> / <code class="docutils literal notranslate"><span class="pre">layers:&lt;k&gt;</span></code> with <code class="docutils literal notranslate"><span class="pre">--gate</span></code>: Qwen3-TTS steps captured in segments, so codec
+batches can start at a segment boundary.</p></li>
+</ul>
+<p>The best partition and flags depend on the model and the GPU; measure with a load benchmark
+(<code class="docutils literal notranslate"><span class="pre">benchmark/</span></code>). <code class="docutils literal notranslate"><span class="pre">rust/docs/v2_runtime_design.md</span></code> describes the asynchronous engine and every flag.</p>
+</section>
+<section id="several-gpus">
+<h3>Several GPUs<a class="headerlink" href="#several-gpus" title="Link to this heading">#</a></h3>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">--dp-size</span> <span class="pre">N</span></code>: one replica (engine and scheduler thread) per GPU <code class="docutils literal notranslate"><span class="pre">0..N-1</span></code>.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">--enable-disaggregation</span></code>: the LM on GPU 0 and the codec on GPU 1.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">--codec-gpu</span> <span class="pre">G</span></code> (with <code class="docutils literal notranslate"><span class="pre">--codec-sms</span> <span class="pre">N</span></code>): the codec of every replica on GPU <code class="docutils literal notranslate"><span class="pre">G</span></code>, optionally on an
+<code class="docutils literal notranslate"><span class="pre">N</span></code>-SM partition of it that its replicas share.</p></li>
+</ul>
+</section>
+<section id="benchmarking-without-http">
+<h3>Benchmarking without HTTP<a class="headerlink" href="#benchmarking-without-http" title="Link to this heading">#</a></h3>
+<p><code class="docutils literal notranslate"><span class="pre">--bench-requests</span> <span class="pre">N</span></code> runs <code class="docutils literal notranslate"><span class="pre">N</span></code> concurrent requests through the scheduler, logs each request’s time to
+first audio, latency, audio length and finish reason and the overall real-time factor, and exits.
+<code class="docutils literal notranslate"><span class="pre">--bench-out</span> <span class="pre">DIR</span></code> writes their audio, <code class="docutils literal notranslate"><span class="pre">--greedy</span></code> makes runs repeatable, and <code class="docutils literal notranslate"><span class="pre">--bench-text</span></code> /
+<code class="docutils literal notranslate"><span class="pre">--bench-audio</span></code> / <code class="docutils literal notranslate"><span class="pre">--bench-kwargs</span></code> set the request.</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>vox-serve<span class="w"> </span>--model<span class="w"> </span>qwen3-tts<span class="w"> </span>--bench-requests<span class="w"> </span><span class="m">8</span><span class="w"> </span>--bench-out<span class="w"> </span>/tmp/qwen3<span class="w"> </span>--greedy
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">--trace-dir</span> <span class="pre">DIR</span></code> writes the GPU time of every graph launch and every scheduling decision as JSON lines.</p>
+</section>
+</section>
+<section id="the-python-runtime">
+<h2>The Python runtime<a class="headerlink" href="#the-python-runtime" title="Link to this heading">#</a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">vox_serve/launch.py</span></code> starts a FastAPI server and one scheduler process per GPU
+(<code class="docutils literal notranslate"><span class="pre">vox_serve/scheduler_entry.py</span></code>), which talk over ZMQ. <code class="docutils literal notranslate"><span class="pre">Scheduler._step</span></code> (<code class="docutils literal notranslate"><span class="pre">vox_serve/scheduler/base.py</span></code>)
+admits and retires requests, selects the chunks to decode and the requests to run, and calls the worker;
+the policies are subclasses (<code class="docutils literal notranslate"><span class="pre">online.py</span></code>, <code class="docutils literal notranslate"><span class="pre">offline.py</span></code>, <code class="docutils literal notranslate"><span class="pre">input_streaming.py</span></code>, and
+<code class="docutils literal notranslate"><span class="pre">disaggregation.py</span></code> for <code class="docutils literal notranslate"><span class="pre">--enable-disaggregation</span></code>). The worker (<code class="docutils literal notranslate"><span class="pre">vox_serve/worker/program_worker.py</span></code>)
+builds the same program as the Rust runtime, fills its input arenas from the requests, replays its graphs
+(or, with <code class="docutils literal notranslate"><span class="pre">--disable-cuda-graph</span></code>, runs the captured functions eagerly, which is useful when debugging
+model code) and turns the outputs back into request state. Without the extension, the sampling kernels
+come from a PyTorch fallback (<code class="docutils literal notranslate"><span class="pre">vox_serve/rt/kernels.py</span></code>).</p>
+</section>
+</section>
+
+
+                </article>
+              
+
+              
+              
+              
+              
+                <footer class="prev-next-footer d-print-none">
+                  
+<div class="prev-next-area">
+    <a class="left-prev"
+       href="cli.html"
+       title="previous page">
+      <i class="fa-solid fa-angle-left"></i>
+      <div class="prev-next-info">
+        <p class="prev-next-subtitle">previous</p>
+        <p class="prev-next-title">CLI Reference</p>
+      </div>
+    </a>
+    <a class="right-next"
+       href="models.html"
+       title="next page">
+      <div class="prev-next-info">
+        <p class="prev-next-subtitle">next</p>
+        <p class="prev-next-title">Supported Models</p>
+      </div>
+      <i class="fa-solid fa-angle-right"></i>
+    </a>
+</div>
+                </footer>
+              
+            </div>
+            
+            
+              
+                <dialog id="pst-secondary-sidebar-modal"></dialog>
+                <div id="pst-secondary-sidebar" class="bd-sidebar-secondary bd-toc"><div class="sidebar-secondary-items sidebar-secondary__inner">
+
+
+  <div class="sidebar-secondary-item"><div
+    id="pst-page-navigation-heading-2"
+    class="page-toc tocsection onthispage">
+    <i class="fa-solid fa-list"></i> Contents
+  </div>
+  <nav id="pst-page-toc-nav" class="page-toc" aria-labelledby="pst-page-navigation-heading-2">
+    <ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#choosing-a-runtime">Choosing a runtime</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#installing-the-rust-runtime">Installing the Rust runtime</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#how-the-rust-runtime-works">How the Rust runtime works</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#scheduling-policies">Scheduling policies</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#running-the-lm-and-the-codec-concurrently">Running the LM and the codec concurrently</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#several-gpus">Several GPUs</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#benchmarking-without-http">Benchmarking without HTTP</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#the-python-runtime">The Python runtime</a></li>
+</ul>
+  </nav></div>
+
+</div></div>
+              
+            
+          </div>
+          <footer class="bd-footer-content">
+            
+<div class="bd-footer-content__inner container">
+  
+  <div class="footer-item">
+    
+<p class="component-author">
+By VoxServe Team
+</p>
+
+  </div>
+  
+  <div class="footer-item">
+    
+
+  <p class="copyright">
+    
+      © Copyright 2025-2026, VoxServe Team.
+      <br/>
+    
+  </p>
+
+  </div>
+  
+  <div class="footer-item">
+    <p class="last-updated">
+  Last updated on Nov 01, 2026.
+  <br/>
+</p>
+  </div>
+  
+  <div class="footer-item">
+    
+  </div>
+  
+</div>
+          </footer>
+        
+
+      </main>
+    </div>
+  </div>
+  
+  <!-- Scripts loaded after <body> so the DOM is not blocked -->
+  <script defer src="_static/scripts/bootstrap.js?digest=90905a2f556bf617f1a9"></script>
+<script defer src="_static/scripts/pydata-sphinx-theme.js?digest=90905a2f556bf617f1a9"></script>
+
+  <footer class="bd-footer">
+  </footer>
+  </body>
+</html>

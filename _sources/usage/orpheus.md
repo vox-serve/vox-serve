@@ -7,7 +7,7 @@ Orpheus is a 3B parameter text-to-speech model developed by Canopy Labs, using a
 Start the server:
 
 ```bash
-python -m vox_serve.launch --model canopylabs/orpheus-3b-0.1-ft --port 8000
+vox-serve --model canopylabs/orpheus-3b-0.1-ft --port 8000
 ```
 
 Generate speech:
@@ -87,7 +87,7 @@ curl -X POST "http://localhost:8000/generate" \
 ## CLI Options
 
 ```bash
-python -m vox_serve.launch \
+vox-serve \
   --model canopylabs/orpheus-3b-0.1-ft \
   --port 8000 \
   --temperature 0.7 \

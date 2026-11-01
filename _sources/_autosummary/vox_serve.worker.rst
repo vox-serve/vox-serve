@@ -1,4 +1,4 @@
-vox\_serve.worker
+﻿vox\_serve.worker
 =================
 
 .. automodule:: vox_serve.worker

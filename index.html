@@ -222,12 +222,14 @@
 <li class="toctree-l1"><a class="reference internal" href="api.html">API Reference</a></li>
 
 <li class="toctree-l1"><a class="reference internal" href="cli.html">CLI Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="runtimes.html">Serving Runtimes</a></li>
 <li class="toctree-l1"><a class="reference internal" href="models.html">Supported Models</a></li>
 <li class="toctree-l1"><a class="reference internal" href="architecture.html">Architecture</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Contributing</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="development.html">Development</a></li>
+<li class="toctree-l1"><a class="reference internal" href="adding-a-model.html">Adding a Model</a></li>
 </ul>
 
     </div>
@@ -513,12 +515,22 @@ text-to-speech (TTS) and speech-to-speech (STS) workloads.</p>
 </li>
 <li class="toctree-l1"><a class="reference internal" href="api.html#python-api">Python API</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="api.html#package-overview">Package overview</a></li>
-<li class="toctree-l2"><a class="reference internal" href="api.html#key-modules">Key modules</a></li>
+<li class="toctree-l2"><a class="reference internal" href="api.html#module-vox_serve.cli">Key modules</a></li>
 </ul>
 </li>
 <li class="toctree-l1"><a class="reference internal" href="cli.html">CLI Reference</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="cli.html#usage">Usage</a></li>
-<li class="toctree-l2"><a class="reference internal" href="cli.html#arguments">Arguments</a></li>
+<li class="toctree-l2"><a class="reference internal" href="cli.html#runtime">Runtime</a></li>
+<li class="toctree-l2"><a class="reference internal" href="cli.html#common-arguments-both-runtimes">Common arguments (both runtimes)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="cli.html#python-runtime-only">Python runtime only</a></li>
+<li class="toctree-l2"><a class="reference internal" href="cli.html#rust-runtime-only">Rust runtime only</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="runtimes.html">Serving Runtimes</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="runtimes.html#choosing-a-runtime">Choosing a runtime</a></li>
+<li class="toctree-l2"><a class="reference internal" href="runtimes.html#installing-the-rust-runtime">Installing the Rust runtime</a></li>
+<li class="toctree-l2"><a class="reference internal" href="runtimes.html#how-the-rust-runtime-works">How the Rust runtime works</a></li>
+<li class="toctree-l2"><a class="reference internal" href="runtimes.html#the-python-runtime">The Python runtime</a></li>
 </ul>
 </li>
 <li class="toctree-l1"><a class="reference internal" href="models.html">Supported Models</a><ul>
@@ -539,6 +551,7 @@ text-to-speech (TTS) and speech-to-speech (STS) workloads.</p>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Contributing</span></p>
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="development.html">Development</a></li>
+<li class="toctree-l1"><a class="reference internal" href="adding-a-model.html">Adding a Model</a></li>
 </ul>
 </div>
 </section>

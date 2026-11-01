@@ -7,7 +7,7 @@ CSM-1B is a text-to-speech model developed by Sesame, featuring a depth-wise arc
 Start the server:
 
 ```bash
-python -m vox_serve.launch --model sesame/csm-1b --port 8000
+vox-serve --model sesame/csm-1b --port 8000
 ```
 
 Generate speech:
@@ -99,7 +99,7 @@ curl -X POST "http://localhost:8000/generate" \
 ## CLI Options
 
 ```bash
-python -m vox_serve.launch \
+vox-serve \
   --model sesame/csm-1b \
   --port 8000 \
   --temperature 0.7 \
