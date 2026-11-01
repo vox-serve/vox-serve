@@ -213,7 +213,7 @@ class VoxtralTTSProgram(LMProgram):
             get_logger(__name__).warning("Voxtral voice %r not in registry; falling back to %r", requested, default)
             requested = None
         voice = voices[requested or default]
-        C = self.n_codebooks
+        C = m["n_codebooks"]
         tokens: List[int] = []
         mask: List[int] = []
 

@@ -340,7 +340,7 @@ class HiggsTTSProgram(LMProgram):
     def preprocess(self, text: str, audio_path: Optional[str], model_kwargs: Dict[str, Any]) -> Prompt:
         """Rows ``[id, 0, ..]`` (text) or eight delayed codes (audio): ``<|tts|> [<|ref_text|> ref_text]
         [<|ref_audio|> ref codes] <|text|> text <|audio|>``, the brackets only with reference audio."""
-        ids = self.special_ids
+        ids = self.spec_meta["special_ids"]
         tokens: List[int] = []
         mask: List[int] = []
 
