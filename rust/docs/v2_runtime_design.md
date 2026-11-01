@@ -51,7 +51,7 @@ HTTP / bench ─► Scheduler (one host thread per GPU)
 | `--async-engines` | Asynchronous LM and detok lanes (implies `--overlap-detok`); mode 0 only unless `--sm-modes` |
 | `--sm-modes 24,48,68` | Green-context splits by detok SM count (implies `--async-engines`) |
 | `--sm-mode <m>` / `auto:<rows>:<m>` / `adaptive` | Fixed mode; mode `m` once at least `rows` requests are decoding; or the mode with the lowest predicted time per step from latencies measured online per (mode, size), exploring unmeasured modes every 8 steps |
-| `--lm-segments depth` / `layers:<k>` | Split Qwen3-TTS steps before the depth transformer, and optionally into k-layer groups |
+| `--lm-segments depth` / `layers:<k>` | Split Qwen3-TTS steps before the depth transformer, and optionally into k-layer groups (asynchronous engine only) |
 | `--gate depth` / `layer:<i>` | Non-urgent detok batches start only once the LM's latest step reached its depth graph / layer group i |
 | `--dec-batch N` | Continuation chunks wait until at least N are ready, then take all ready (first chunks and near-deadline chunks never wait) |
 | `--dec-max-batch N` | Largest non-urgent batch: bounds how long an urgent chunk waits behind a background batch |
