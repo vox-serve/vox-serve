@@ -38,6 +38,10 @@ Text-to-speech (TTS)
        | ``Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign``
        | (`link <https://huggingface.co/collections/Qwen/qwen3-tts>`_)
      - TTS model developed by Alibaba Qwen team. Using 1.7B LLM with depth transformer and Mimi-like detokenizer.
+   * - ``vibevoice``
+     - ``microsoft/VibeVoice-Realtime-0.5B`` (`link <https://huggingface.co/microsoft/VibeVoice-Realtime-0.5B>`_)
+     - Real-time TTS model developed by Microsoft. A Qwen2.5-0.5B split into text and speech layers, a diffusion
+       head producing continuous 7.5 Hz acoustic latents, and a causal acoustic decoder. Preset voices only.
    * - ``voxtral-tts``
      - ``mistralai/Voxtral-4B-TTS-2603`` (`link <https://huggingface.co/mistralai/Voxtral-4B-TTS-2603>`_)
      - TTS model developed by Mistral AI. Using a 4B LLM with a flow-matching acoustic head and a 37-codebook codec.
