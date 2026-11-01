@@ -1,7 +1,19 @@
 name: CI
-on: push
+# Pull requests (including those from forks, whose pushes never reach this repository) and pushes to main.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  # One run per pull request (a new push cancels the previous one); every commit on main gets its own run.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  build:
+  lint:
+    name: ruff
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -9,10 +21,10 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install dependencies
+      - name: Install ruff (the version pinned in pyproject.toml's lint group)
         run: |
           python -m pip install --upgrade pip
-          pip install ruff==0.17.3
+          pip install --group lint
       - name: Run Ruff
         # Use GitHub’s annotation format so lint errors show inline
         run: ruff check --output-format=github .
@@ -32,7 +44,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cpu
           python -c 'import tomllib; print("\n".join(tomllib.load(open("pyproject.toml", "rb"))["project"]["dependencies"]))' > /tmp/requirements.txt
-          pip install -r /tmp/requirements.txt pytest
+          pip install -r /tmp/requirements.txt --group test
       - name: Run the tests
         # From the source tree, without the Rust extension (the prompt parity test runs in rust.yml).
         run: python -m pytest tests -v

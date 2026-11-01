@@ -73,6 +73,11 @@ Documentation = "https://github.com/vox-serve/vox-serve#readme"
 [project.scripts]
 vox-serve = "vox_serve.cli:main"  # Rust runtime, Python runtime as fallback (--runtime auto|rust|python)
 
+# Development tools, the versions CI uses: `pip install --group lint` (pip >= 25.1) or `uv pip install --group lint`.
+[dependency-groups]
+lint = ["ruff==0.17.3"]
+test = ["pytest>=8"]
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["vox_serve*"]
