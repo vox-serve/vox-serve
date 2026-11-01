@@ -1,5 +1,9 @@
 <p align="center">
-  <img src="docs/_static/images/logo-dark.png" alt="VoxServe Logo" width="320" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/_static/images/logo-dark.png">
+    <source media="(prefers-color-scheme: light)" srcset="docs/_static/images/logo-light.png">
+    <img src="docs/_static/images/logo-dark.png" alt="VoxServe Logo" width="320" />
+  </picture>
 </p>
 
 <h1 align="center">VoxServe</h1>
@@ -15,8 +19,8 @@ VoxServe delivers low-latency, high-throughput inference for Speech Language Mod
 
 ## News
 
-- **[2025-02]** Blog post: [Light-Speed Qwen3-TTS Serving at Scale with VoxServe](https://vox-serve.github.io/2026/02/09/qwen3-tts-support.html)
-- **[2025-02]** Paper released: [VoxServe: A Streaming-Centric Serving System for Speech Language Models](https://arxiv.org/abs/2602.00269)
+- **[2026-02]** Blog post: [Light-Speed Qwen3-TTS Serving at Scale with VoxServe](https://vox-serve.github.io/2026/02/09/qwen3-tts-support.html)
+- **[2026-02]** Paper released: [VoxServe: A Streaming-Centric Serving System for Speech Language Models](https://arxiv.org/abs/2602.00269)
 
 ## Quick Start
 
@@ -33,8 +37,16 @@ Or install from source:
 git clone https://github.com/vox-serve/vox-serve.git
 cd vox-serve
 pip install -e .
-python -m vox_serve.launch --model <model-name> --port <port-number>
+vox-serve --model <model-name> --port <port-number>
 ```
+
+`vox-serve` serves with a Rust runtime (the `vox_serve._rt` extension) and uses the Python runtime, which
+runs the same model implementations, when the extension is unavailable or when only the Python runtime
+takes the arguments (e.g. `--async-scheduling`); `--runtime python` selects it explicitly. The PyPI wheel
+for Linux x86_64 contains the extension. Elsewhere, and from source, `pip install` builds it, which needs a
+Rust toolchain and the CUDA compiler (`nvcc`); without them, `pip install` still succeeds and installs the
+Python runtime only. `vox-serve --help` lists the options; the
+[runtimes documentation](https://vox-serve.github.io/vox-serve/runtimes.html) compares the two runtimes.
 
 Send requests to the server:
 
@@ -63,9 +75,15 @@ VoxServe supports the following TTS and STS models:
 | `qwen3-tts` | TTS | [Qwen3-TTS-1.7B](https://huggingface.co/collections/Qwen/qwen3-tts) |
 | `zonos` | TTS | [Zonos-v0.1](https://huggingface.co/Zyphra/Zonos-v0.1-transformer) |
 | `glm` | STS | [GLM-4-Voice-9B](https://huggingface.co/zai-org/glm-4-voice-9b) |
+| `voxtral-tts` | TTS | [Voxtral-4B-TTS](https://huggingface.co/mistralai/Voxtral-4B-TTS-2603) |
+| `cosyvoice3` | TTS | [Fun-CosyVoice3-0.5B](https://huggingface.co/FunAudioLLM/Fun-CosyVoice3-0.5B-2512) |
+| `higgs-tts` | TTS | [Higgs Audio v3 TTS](https://huggingface.co/bosonai/higgs-tts-3-4b) |
 | `step` | STS | [Step-Audio-2-Mini](https://huggingface.co/stepfun-ai/Step-Audio-2-mini) |
 
 See the [models documentation](https://vox-serve.github.io/vox-serve/models.html) for detailed information. More models coming soon.
+
+Each model is one Python package (`vox_serve/model/<name>/`) that both runtimes serve; see
+[Adding a Model](https://vox-serve.github.io/vox-serve/adding-a-model.html) to add one.
 
 ## Demos
 

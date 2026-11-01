@@ -20,9 +20,15 @@ Text-to-speech (TTS)
    * - ``cosyvoice2``
      - ``FunAudioLLM/CosyVoice2-0.5B`` (`link <https://huggingface.co/FunAudioLLM/CosyVoice2-0.5B>`_)
      - TTS model developed by Alibaba. Using 0.5B LLM with flow matching + HiFT vocoder. Supports audio input for voice cloning.
+   * - ``cosyvoice3``
+     - ``FunAudioLLM/Fun-CosyVoice3-0.5B-2512`` (`link <https://huggingface.co/FunAudioLLM/Fun-CosyVoice3-0.5B-2512>`_)
+     - TTS model developed by Alibaba. Using 0.5B LLM with a flow-matching DiT + HiFT vocoder. Supports audio input for voice cloning.
    * - ``csm``
      - ``sesame/csm-1b`` (`link <https://huggingface.co/sesame/csm-1b>`_)
      - TTS model developed by Sesame. Using 1B LLM and depth-wise model with Mimi detokenizer.
+   * - ``higgs-tts``
+     - ``bosonai/higgs-tts-3-4b`` (`link <https://huggingface.co/bosonai/higgs-tts-3-4b>`_)
+     - Higgs Audio v3 TTS developed by Boson AI. Using a Qwen3-4B LLM over 8 delayed codebooks with the Higgs Audio tokenizer. Supports audio input for voice cloning.
    * - ``orpheus``
      - ``canopylabs/orpheus-3b-0.1-ft`` (`link <https://huggingface.co/canopylabs/orpheus-3b-0.1-ft>`_)
      - TTS model developed by Canopy Labs. Using 3B LLM with SNAC detokenizer.
@@ -32,6 +38,9 @@ Text-to-speech (TTS)
        | ``Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign``
        | (`link <https://huggingface.co/collections/Qwen/qwen3-tts>`_)
      - TTS model developed by Alibaba Qwen team. Using 1.7B LLM with depth transformer and Mimi-like detokenizer.
+   * - ``voxtral-tts``
+     - ``mistralai/Voxtral-4B-TTS-2603`` (`link <https://huggingface.co/mistralai/Voxtral-4B-TTS-2603>`_)
+     - TTS model developed by Mistral AI. Using a 4B LLM with a flow-matching acoustic head and a 37-codebook codec.
    * - ``zonos``
      - ``Zyphra/Zonos-v0.1-transformer`` (`link <https://huggingface.co/Zyphra/Zonos-v0.1-transformer>`_)
      - TTS model developed by Zyphra. Using 1B LLM with DAC detokenizer.
@@ -59,3 +68,4 @@ Notes
 - The examples above are representative model IDs. You can use local paths or other
   compatible variants within each family.
 - Some families support audio input (STS). Refer to the model card for input requirements.
+- Both runtimes serve every model (:doc:`runtimes`). To add a model, see :doc:`adding-a-model`.

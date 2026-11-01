@@ -9,7 +9,7 @@ Qwen3-TTS is a state-of-the-art text-to-speech model from Alibaba's Qwen team. V
 Uses predefined speaker embeddings for consistent, high-quality voices.
 
 ```bash
-python -m vox_serve.launch --model Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice --port 8000
+vox-serve --model Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice --port 8000
 ```
 
 ```python
@@ -29,7 +29,7 @@ See the [model config](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoi
 Clone any voice using a reference audio sample and its transcript.
 
 ```bash
-python -m vox_serve.launch --model Qwen/Qwen3-TTS-12Hz-1.7B-Base --port 8000
+vox-serve --model Qwen/Qwen3-TTS-12Hz-1.7B-Base --port 8000
 ```
 
 ```python
@@ -48,7 +48,7 @@ This mode uses in-context learning to adapt the model to the reference voice.
 Generate voices based on natural language descriptions.
 
 ```bash
-python -m vox_serve.launch --model Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign --port 8000
+vox-serve --model Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign --port 8000
 ```
 
 ```python
@@ -64,7 +64,9 @@ response = requests.post("http://localhost:8000/generate", json={
 We also support input text streaming mode, ideal for connecting with text LLM to build a voice chatbot. For this, start the server with input streaming scheduler:
 
 ```bash
-python -m vox_serve.launch --model Qwen/Qwen3-TTS-12Hz-1.7B-Base --port 8000 --scheduler input_streaming
+vox-serve --model Qwen/Qwen3-TTS-12Hz-1.7B-Base --port 8000 --scheduler-type input_streaming
 ```
 
 And see the example client script [here](https://github.com/vox-serve/vox-serve/tree/main/examples/input_streaming).
+
+With input streaming, the Base model clones a voice from its speaker embedding only, because in-context learning needs the whole text up front: without reference audio it uses the default voice, and a request with reference audio must set `x_vector_only_mode` to true.

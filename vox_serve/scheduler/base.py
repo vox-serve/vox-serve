@@ -8,8 +8,9 @@ import zmq
 import zmq.asyncio
 
 from ..requests import Request
+from ..sampling import SamplingConfig
 from ..utils import get_logger
-from ..worker import CudaGraphWorker, ModelWorker
+from ..worker import ProgramWorker
 
 
 class Scheduler:
@@ -35,10 +36,13 @@ class Scheduler:
         enable_disaggregation: bool = False,
         enable_nvtx: bool = False,
         enable_torch_compile: bool = False,
+        unroll_depth_cuda_graph: bool = False,
         async_scheduling: bool = False,
         dp_rank: int = 0,
         dp_size: int = 1,
         detokenize_interval: int = None,
+        program_options: dict = None,
+        model_worker=None,
     ):
         self.device = device
         self.max_batch_size = max_batch_size
@@ -59,44 +63,35 @@ class Scheduler:
 
         self.logger.info(f"Using {'async' if async_scheduling else 'sync'} scheduling mode")
 
-        # Choose worker based on user configuration
-        worker_kwargs = {
-            "model_name": model_name_or_path,
-            "max_batch_size": max_batch_size,
-            "top_p": top_p,
-            "top_k": top_k,
-            "min_p": min_p,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "repetition_penalty": repetition_penalty,
-            "repetition_window": repetition_window,
-            "cfg_scale": cfg_scale,
-            "greedy": greedy,
-            "max_num_pages": max_num_pages,
-            "page_size": page_size,
-            "enable_nvtx": enable_nvtx,
-            "enable_torch_compile": enable_torch_compile,
-            "dp_rank": dp_rank,
-            "dp_size": dp_size,
-            "detokenize_interval": detokenize_interval,
-        }
-
-        # Simplified worker selection logic
-        if enable_disaggregation:
-            worker_kwargs["detokenizer_device"] = "cuda:1"
-
-        if enable_cuda_graph:
-            opt_text = " with disaggregation optimization" if enable_disaggregation else " with CUDA graph optimization"
-            self.logger.info(f"Using CudaGraphWorker{opt_text}")
-            self.model_worker = CudaGraphWorker(**worker_kwargs)
+        # The worker runs the model's program (vox_serve.model.<model>.program); tests pass a stand-in.
+        if model_worker is not None:
+            self.model_worker = model_worker
         else:
-            opt_text = (
-                " with disaggregation optimization"
-                if enable_disaggregation
-                else " without CUDA graph optimization"
+            self.logger.info(f"Using ProgramWorker{'' if enable_cuda_graph else ' without CUDA graphs'}")
+            self.model_worker = ProgramWorker(
+                model_name=model_name_or_path,
+                max_batch_size=max_batch_size,
+                top_p=top_p,
+                top_k=top_k,
+                min_p=min_p,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                repetition_penalty=repetition_penalty,
+                repetition_window=repetition_window,
+                cfg_scale=cfg_scale,
+                greedy=greedy,
+                max_num_pages=max_num_pages,
+                page_size=page_size,
+                enable_cuda_graph=enable_cuda_graph,
+                enable_nvtx=enable_nvtx,
+                enable_torch_compile=enable_torch_compile,
+                unroll_depth_cuda_graph=unroll_depth_cuda_graph,
+                detokenizer_device="cuda:1" if enable_disaggregation else None,
+                dp_rank=dp_rank,
+                dp_size=dp_size,
+                detokenize_interval=detokenize_interval,
+                program_options=program_options,
             )
-            self.logger.info(f"Using ModelWorker{opt_text}")
-            self.model_worker = ModelWorker(**worker_kwargs)
 
         self.active_requests: List[Request] = []
 
@@ -148,6 +143,8 @@ class Scheduler:
 
         # Prepare LM inputs outside the worker and run either prefill or decode
         lm_inputs = self.model_worker.prepare_lm_inputs(lm_requests, detokenize_requests)
+        for message in self._accepted_messages(lm_requests):
+            self.result_socket.send(message)
 
         # run detokenization if needed
         self.model_worker.run_detokenize(detokenize_requests)
@@ -175,6 +172,8 @@ class Scheduler:
 
         # Prepare LM inputs outside the worker and run either prefill or decode
         lm_inputs = self.model_worker.prepare_lm_inputs(lm_requests, detokenize_requests)
+        for message in self._accepted_messages(lm_requests):
+            await self.result_socket.send(message)
 
         async def run_model():
             # run detokenization if needed
@@ -240,13 +239,8 @@ class Scheduler:
         lm_requests = []
 
         # Get worker limitations
-        if isinstance(self.model_worker, CudaGraphWorker):
-            max_prefill_batch_size = self.model_worker.prefill_graph_batch_size
-            max_seq_len = max(self.model_worker.cuda_graph_seq_len_buckets)
-        else:
-            # Fallback for non-CUDA graph worker
-            max_prefill_batch_size = self.max_batch_size
-            max_seq_len = 1024  # Default assumption
+        max_prefill_batch_size = self.model_worker.prefill_graph_batch_size
+        max_seq_len = max(self.model_worker.cuda_graph_seq_len_buckets)
 
         # Separate prefill and decode requests
         prefill_requests = []
@@ -332,6 +326,16 @@ class Scheduler:
 
         return detokenize_requests
 
+    def _accepted_messages(self, lm_requests) -> List[bytes]:
+        """``request_id|ACCEPTED|`` for each request whose prompt the worker has just built: the API server
+        starts a streaming response only then, so that a request whose prompt fails gets an error status."""
+        messages = []
+        for req in lm_requests:
+            if not req.accepted_sent and req.input_length is not None and not req.done_lm_generation:
+                req.accepted_sent = True
+                messages.append(req.request_id.encode("utf-8") + b"|ACCEPTED|")
+        return messages
+
     def _send_responses(self, detokenize_requests):
         """
         Send responses back to clients for detokenized requests (sync version).
@@ -352,7 +356,8 @@ class Scheduler:
                 self.result_socket.send(message)
 
             # send completion notification for finished requests
-            if req.done_all:
+            if req.done_all and not req.completion_sent:
+                req.completion_sent = True
                 self.model_worker.free_kv_cache(req)
                 completion_message = {"status": "completed", "reason": req.finish_reason or "unknown"}
                 # Send completion message: request_id|COMPLETION|json_data
@@ -382,7 +387,8 @@ class Scheduler:
                 await self.result_socket.send(message)
 
             # send completion notification for finished requests
-            if req.done_all:
+            if req.done_all and not req.completion_sent:
+                req.completion_sent = True
                 self.model_worker.free_kv_cache(req)
                 completion_message = {"status": "completed", "reason": req.finish_reason or "unknown"}
                 # Send completion message: request_id|COMPLETION|json_data
@@ -421,6 +427,10 @@ class Scheduler:
                 is_pressing=request_dict.get("is_streaming", False), # at first, streaming requests are pressing
                 model_kwargs=request_dict.get("model_kwargs", {}),
             )
+
+            cfg_alpha = new_request.model_kwargs.get("cfg_alpha")
+            if cfg_alpha is not None:
+                new_request.sampling_config = SamplingConfig(cfg_scale=float(cfg_alpha))
 
             self.logger.debug("new_request=%s", new_request)
             return new_request

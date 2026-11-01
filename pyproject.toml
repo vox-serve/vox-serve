@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=70", "setuptools-rust>=1.10", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -20,7 +20,9 @@ classifiers = [
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: Apache Software License",
-    "Operating System :: OS Independent",
+    "Operating System :: POSIX :: Linux",
+    "Environment :: GPU :: NVIDIA CUDA :: 12",
+    "Programming Language :: Rust",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
@@ -33,7 +35,8 @@ requires-python = ">=3.12"
 dependencies = [
     "diffusers==0.34.0",
     "fastapi==0.116.1",
-    "flashinfer-python==0.2.11.post1",
+    "cuda-python>=12.8,<13",
+    "flashinfer-python==0.2.11.post1",  # also rust/third_party/flashinfer (update.sh)
     "huggingface-hub==0.34.0",
     "librosa==0.10.2.post1",
     "numpy==1.26.4",
@@ -67,12 +70,26 @@ Issues = "https://github.com/vox-serve/vox-serve/issues"
 Documentation = "https://github.com/vox-serve/vox-serve#readme"
 
 [project.scripts]
-vox-serve = "vox_serve.launch:main"
+vox-serve = "vox_serve.cli:main"  # Rust runtime, Python runtime as fallback (--runtime auto|rust|python)
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["vox_serve*"]
-exclude = ["tests*", "benchmark*", "examples*"]
+
+# The Rust runtime (rust/) builds into the extension module vox_serve._rt next to the Python package. It
+# needs cargo and nvcc ($CUDA_HOME, default /usr/local/cuda-12); VOX_CUDA_ARCHS=90 limits the sampling
+# kernels to one GPU architecture for faster local builds. The build is optional: without a toolchain, or
+# if it fails, the package installs without it and `vox-serve` runs the Python runtime.
+# Wheels must never bundle libcudart (auditwheel repair --exclude libcudart.so.12): the extension has to
+# share the copy torch loads, one CUDA runtime per process.
+[[tool.setuptools-rust.ext-modules]]
+target = "vox_serve._rt"
+path = "rust/Cargo.toml"
+binding = "PyO3"
+features = ["extension-module"]
+debug = false   # also for editable installs (setuptools-rust's default there is a debug build)
+strip = "All"
+optional = true
 
 [tool.ruff]
 exclude = [".git", ".ruff_cache", ".venv"] 
@@ -98,6 +115,7 @@ ignore = [
     "PLR0912", # Too many branches
     "PLR0913", # Too many arguments in function definition
     "PLR0915", # Too many statements
+    "PLR0917", # Too many positional arguments
     "PLR2004", # Magic value used in comparison
     "PLW0603", # Using the global statement
     "PLW2901", # Loop variable overwritten by assignment target

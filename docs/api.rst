@@ -15,7 +15,8 @@ Parameters (multipart form)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 - ``text`` (string, required): Input prompt.
-- ``audio`` (file, optional): Input audio for STS-capable models.
+- ``audio`` (file, optional): Input audio for STS-capable models. The Rust runtime accepts request
+  bodies up to 100 MiB.
 - ``streaming`` (bool, optional, default ``true``):
   - ``true`` streams WAV chunks as they are produced.
   - ``false`` returns a single WAV file after completion.
@@ -23,8 +24,15 @@ Parameters (multipart form)
 Response
 ^^^^^^^^
 
-- Streaming mode: ``audio/wav`` with chunked transfer.
+- Streaming mode: ``audio/wav`` with chunked transfer. With the Rust runtime, a request that fails
+  after streaming has started (an error, the timeout, or its engine stopping) aborts the connection
+  instead of ending the body cleanly, so truncated audio is never reported as complete.
 - Non-streaming mode: ``audio/wav`` file download.
+
+Errors are JSON objects ``{"detail": "<reason>"}``. A request with input the model does not accept, such as
+an unknown ``voice`` or ``speaker``, or audio for a model without audio input, gets ``400`` with the reason,
+also in streaming mode: the streaming response starts only once the request's prompt is built. A busy
+server answers ``429``; server errors and timeouts are ``500``.
 
 Examples
 ^^^^^^^^
@@ -58,6 +66,10 @@ JSON payload:
 
    {"status": "healthy"}
 
+With the Rust runtime, once an engine has stopped (e.g. after a CUDA error) the endpoint returns 503
+with ``{"status": "unhealthy", "failed_engines": [<rank>, ...]}`` until the server is restarted;
+requests are routed to the remaining engines, or get 503 when none is left.
+
 Python API
 ==========
 
@@ -73,7 +85,14 @@ Package overview
 Key modules
 -----------
 
+.. automodule:: vox_serve.cli
+   :members:
+
 .. automodule:: vox_serve.launch
    :members:
    :undoc-members:
+   :show-inheritance:
+
+.. automodule:: vox_serve.rt.program
+   :members: LMProgram
    :show-inheritance:
