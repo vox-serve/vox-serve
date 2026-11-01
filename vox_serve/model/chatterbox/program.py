@@ -4,7 +4,8 @@ The prompt embedding mixes four row kinds, selected per row by the input mask (c
   0 conditioning row ``tok`` of the (constant, default-voice) ``cond_enc`` output,
   1 text row: ``text_emb(tok) + text_pos_emb(pos - cond_len)``,
   2 speech-start row: ``speech_emb(tok) + speech_pos_emb(0)``,
-  3 generated speech: ``speech_emb(tok) + speech_pos_emb(clamp(pos - 45))`` (decode rows).
+  3 generated speech (decode rows): ``speech_emb(tok) + speech_pos_emb(i + 1)`` for the i-th generated
+    token (0-based), as the reference's ``T3.inference``; the program counts each slot's tokens.
 The Perth watermark is applied to every detokenized chunk inside the detok graph.
 """
 
@@ -21,8 +22,6 @@ from ...rt.watermark import istft
 from .model import ChatterboxModel
 
 COND, TEXT, SPEECH_START, SPEECH = 0, 1, 2, 3
-# Speech position offset hard-coded by the reference implementation (see ChatterboxModel.forward).
-SPEECH_POS_OFFSET = 45
 
 
 def punc_norm(text: str) -> str:
@@ -120,10 +119,17 @@ class ChatterboxProgram(LMProgram):
         )
         speech_tok = m.speech_emb(tok.clamp(0, cfg.speech_tokens_dict_size - 1))
         start = speech_tok + m.speech_pos_emb(torch.zeros_like(pos))
-        speech = speech_tok + m.speech_pos_emb((pos - SPEECH_POS_OFFSET).clamp(0, cfg.max_speech_tokens))
+        # A decode row feeds back its request's latest token: the 1-based index of that generated token.
+        speech_pos = self.req_ntok[arena["row_slot"][:rows].long()].long()
+        speech = speech_tok + m.speech_pos_emb(speech_pos.clamp(0, cfg.max_speech_tokens))
         h = torch.where(kind == COND, cond, text)
         h = torch.where(kind == SPEECH_START, start, h)
         return torch.where(kind == SPEECH, speech, h)
+
+    def allocate_state(self) -> None:
+        super().allocate_state()
+        # Per LM slot: how many tokens the request has generated.
+        self.req_ntok = torch.zeros(self.max_slots + 1, dtype=torch.int32, device=self.device)
 
     def fuse_lm_modules(self):
         return [self.model.model.tfmr]
@@ -133,6 +139,12 @@ class ChatterboxProgram(LMProgram):
 
     def head(self, hidden: torch.Tensor) -> torch.Tensor:
         return self.model.model.speech_head(hidden)[:, None, :]
+
+    def decode_tokens(self, hidden: torch.Tensor, arena: Arena, out_tok: torch.Tensor, n_req: int) -> None:
+        super().decode_tokens(hidden, arena, out_tok, n_req)
+        slot = arena["slot"][:n_req].long()
+        first = arena["first"][:n_req] != 0
+        self.req_ntok.index_copy_(0, slot, torch.where(first, 1, self.req_ntok[slot] + 1))
 
     def detokenize(self, tokens: torch.Tensor) -> torch.Tensor:
         audio = self.model.postprocess(tokens).reshape(tokens.shape[0], -1)
