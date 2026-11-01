@@ -1103,15 +1103,17 @@ impl Scheduler {
         self.cfg.v2.background_mode(decoding.min(self.max_bs), self.decode_mode, self.decode_by_mode.len())
     }
 
-    /// First chunks and chunks whose playback deadline is near. With `slack_urgency`, first chunks
-    /// are urgent only near their startup deadline too, and the margin covers the largest batch.
+    /// First chunks and chunks whose playback deadline is near (`chunk_urgent`). With
+    /// `slack_urgency`, the margin also covers the largest batch.
     fn is_urgent(&self, i: usize, now: Instant) -> bool {
         let r = &self.reqs[i];
-        if !self.cfg.v2.slack_urgency {
-            return r.first_send.is_none() || self.audio_deadline(i, now) < self.cfg.v2.urgent;
-        }
-        let batch = self.dt_cost.iter().map(|(_, c)| *c).fold(0.0, f64::max);
-        self.audio_deadline(i, now) < self.cfg.v2.urgent + batch
+        let v2 = &self.cfg.v2;
+        let margin = if v2.slack_urgency {
+            v2.urgent + self.dt_cost.iter().map(|(_, c)| *c).fold(0.0, f64::max)
+        } else {
+            v2.urgent
+        };
+        chunk_urgent(r.streaming, r.first_send.is_some(), self.audio_deadline(i, now), v2.slack_urgency, margin)
     }
 
     /// Detok selection for the asynchronous loop: urgent chunks go at once; other ready chunks wait
@@ -1305,12 +1307,7 @@ impl Scheduler {
 
     fn audio_deadline(&self, i: usize, now: Instant) -> f64 {
         let r = &self.reqs[i];
-        let end = r.playback_end.unwrap_or(r.received + Duration::from_secs_f64(self.cfg.deadline.startup));
-        if end >= now {
-            (end - now).as_secs_f64()
-        } else {
-            -(now - end).as_secs_f64()
-        }
+        playback_deadline(r.streaming, r.playback_end, r.received, self.cfg.deadline.startup, now)
     }
 
     fn pending_chunks(&self, i: usize) -> usize {
@@ -1813,6 +1810,35 @@ fn is_pressing(
     }
 }
 
+/// Seconds until a request's next audio is due (negative: late): a stream's first chunk
+/// `startup` after arrival, later chunks when the audio sent so far has played (`playback_end`). A
+/// non-streaming request has no playback deadline: it is never late, so it neither defers prefills
+/// nor goes ahead of streams, and uses the capacity they leave.
+fn playback_deadline(
+    streaming: bool,
+    playback_end: Option<Instant>,
+    received: Instant,
+    startup: f64,
+    now: Instant,
+) -> f64 {
+    if !streaming {
+        return f64::INFINITY;
+    }
+    let end = playback_end.unwrap_or(received + Duration::from_secs_f64(startup));
+    if end >= now {
+        (end - now).as_secs_f64()
+    } else {
+        -(now - end).as_secs_f64()
+    }
+}
+
+/// v2: whether a chunk skips batching (and takes the urgent lane): a stream's first chunk (unless
+/// `slack_urgency`: then it competes by its startup deadline) or a chunk due within `margin`.
+/// Non-streaming chunks are never urgent.
+fn chunk_urgent(streaming: bool, first_sent: bool, deadline: f64, slack_urgency: bool, margin: f64) -> bool {
+    streaming && ((!slack_urgency && !first_sent) || deadline < margin)
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum DetokReady {
     /// Not prefilled yet, or fewer than a chunk of new frames.
@@ -1925,6 +1951,48 @@ mod tests {
         assert!(!is_pressing(true, false, ago(0.5), 5.0, 1.0, now));
         // Sent 3.5 s ago: the last chunk starts in 0.5 s.
         assert!(is_pressing(true, false, ago(3.5), 5.0, 1.0, now));
+    }
+
+    #[test]
+    fn deadlines() {
+        let now = Instant::now();
+        let received = now - Duration::from_secs(2);
+        // A stream's first chunk was due 0.5 s after arrival: 1.5 s late.
+        assert!((playback_deadline(true, None, received, 0.5, now) + 1.5).abs() < 1e-6);
+        // Later chunks are due when the audio sent so far has played.
+        let end = Some(now + Duration::from_secs(1));
+        assert!((playback_deadline(true, end, received, 0.5, now) - 1.0).abs() < 1e-6);
+        // Non-streaming: never late, so it never defers a prefill and its LM rows and chunks sort
+        // after every stream's.
+        let d = playback_deadline(false, None, received, 0.5, now);
+        assert_eq!(d, f64::INFINITY);
+        let cfg = DeadlineConfig {
+            startup: 0.5,
+            lm_step: 0.01,
+            codec: 0.01,
+            prefill: 0.03,
+            max_prefill_deferral: 0.1,
+            max_pending_chunks: 0,
+        };
+        let slack = deadline::lm_slack(d, 2, 0.8, 10, &cfg);
+        assert_eq!(slack, f64::INFINITY);
+        assert!(!deadline::defer_prefill(slack.min(d - cfg.codec), 0.0, &cfg));
+        assert!(deadline::lm_slack(100.0, 5, 0.8, 0, &cfg) < slack);
+    }
+
+    #[test]
+    fn urgency() {
+        // (streaming, first_sent, deadline, slack_urgency, margin)
+        assert!(chunk_urgent(true, false, 0.4, false, 0.1), "a first chunk");
+        assert!(!chunk_urgent(true, false, 0.4, true, 0.1), "a first chunk competing by deadline");
+        assert!(chunk_urgent(true, false, 0.05, true, 0.1));
+        assert!(chunk_urgent(true, true, 0.05, false, 0.1), "near its playback deadline");
+        assert!(!chunk_urgent(true, true, 0.4, false, 0.1));
+        // Non-streaming: never, before or after its first chunk.
+        for slack_urgency in [false, true] {
+            assert!(!chunk_urgent(false, false, f64::INFINITY, slack_urgency, 0.1));
+            assert!(!chunk_urgent(false, true, f64::INFINITY, slack_urgency, 0.1));
+        }
     }
 
     #[test]
