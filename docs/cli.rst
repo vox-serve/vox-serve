@@ -124,7 +124,8 @@ Rust runtime only
 
 ``--lm-segments whole|depth|layers:<k>``, ``--gate none|depth|layer:<i>``
   Capture Qwen3-TTS steps in segments (before the depth transformer, or in groups of ``k`` layers), and
-  start codec batches only once the LM step reaches the named segment.
+  start codec batches only once the LM step reaches the named segment. Segments need the asynchronous
+  engine (``--async-engines`` or a flag that implies it).
 
 ``--dec-batch``, ``--dec-max-batch``, ``--dec-flush-ms``, ``--dec-urgent-ms``
   Codec batching of the asynchronous engine: the ready chunks a batch waits for (default ``0``: none), the

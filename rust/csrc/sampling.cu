@@ -142,8 +142,11 @@ __global__ void __launch_bounds__(kThreads) sample_kernel(
     return;
   }
 
-  // Pass 1: max / argmax (first index wins ties, like torch.argmax).
-  MaxIdx mi{-INFINITY, INT_MAX};
+  // Pass 1: max / argmax (first index wins ties, like torch.argmax). NaNs never win `v > mi.v`; the start
+  // index 0 is what a row without any value above -inf (all NaN or all -inf) returns, greedy or sampled
+  // (nothing passes the filters below, so the draw falls back to best.i), as the torch fallback does.
+  // It must be a valid token id: the caller feeds it back as the next input and into the codec.
+  MaxIdx mi{-INFINITY, 0};
   for (int i = threadIdx.x; i < V; i += blockDim.x) {
     float v = to_float(x[i]);
     if (v > mi.v) mi = MaxIdx{v, i};

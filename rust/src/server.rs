@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::body::Body;
-use axum::extract::{FromRequest, Multipart, Path, Request, State};
+use axum::extract::{DefaultBodyLimit, FromRequest, Multipart, Path, Request, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -26,6 +26,10 @@ use crate::wav;
 const TIMEOUT: Duration = Duration::from_secs(600);
 /// Input streaming: text buffered before the prompt is built (as in `scheduler/input_streaming.py`).
 const MIN_INITIAL_TEXT_CHARS: usize = 20;
+/// Largest request body: multipart uploads and `/v1/audio/speech` JSON with base64 reference audio
+/// (axum's default of 2 MiB rejects about 12 s of 44.1 kHz stereo WAV; the Python runtime has no
+/// limit). 100 MiB is about 10 minutes of 44.1 kHz stereo 16-bit audio.
+const MAX_BODY_BYTES: usize = 100 << 20;
 
 /// One engine (data-parallel replica): its scheduler queue and model logic (whose hooks and
 /// feature pool belong to that engine).
@@ -101,6 +105,7 @@ pub fn router(state: AppState) -> Router {
         .route("/generate/stream/{rid}/audio", get(stream_audio))
         .route("/generate/stream/{rid}/end", post(stream_end))
         .route("/v1/audio/speech", post(speech))
+        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(tower_http::cors::CorsLayer::permissive())
         .with_state(state)
 }
@@ -514,4 +519,53 @@ async fn stream_audio(State(state): State<AppState>, Path(rid): Path<String>) ->
         rx
     };
     streaming_wav(&rid, state.model().sample_rate(), rx)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tower::ServiceExt;
+
+    fn app(upload_dir: &std::path::Path) -> (Router, crossbeam_channel::Receiver<Submit>) {
+        let meta = json!({"prompt_builder": "python", "n_codebooks": 1, "max_tokens": 16});
+        let model = Arc::new(crate::models::load(&meta, None).unwrap());
+        let (tx, rx) = crossbeam_channel::bounded(4);
+        let rank = Rank { tx, model, load: Default::default() };
+        (router(AppState::new(vec![rank], upload_dir.to_path_buf())), rx)
+    }
+
+    async fn status(app: Router, req: axum::http::Request<Body>) -> StatusCode {
+        app.oneshot(req).await.unwrap().status()
+    }
+
+    /// Bodies past axum's 2 MiB default reach the handlers (which reject these for other reasons).
+    #[tokio::test]
+    async fn accepts_bodies_over_2_mib() {
+        let dir = std::env::temp_dir().join(format!("vox_rt_test_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (app, _rx) = app(&dir);
+        let big = 3 << 20;
+
+        // Invalid base64 past the limit: 400 from the handler instead of 413 from `Json`.
+        let body = json!({"input": "hi", "ref_audio": format!("data:audio/wav;base64,{}", "!".repeat(big))});
+        let req = axum::http::Request::post("/v1/audio/speech")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        assert_eq!(status(app.clone(), req).await, StatusCode::BAD_REQUEST);
+
+        // An uploaded clip past the limit is saved; the missing `text` field gets 422 instead of the
+        // multipart error's 400.
+        let mut body = b"--b\r\nContent-Disposition: form-data; name=\"audio\"; filename=\"ref.wav\"\r\n\r\n".to_vec();
+        body.resize(body.len() + big, 0);
+        body.extend_from_slice(b"\r\n--b--\r\n");
+        let req = axum::http::Request::post("/generate")
+            .header(header::CONTENT_TYPE, "multipart/form-data; boundary=b")
+            .body(Body::from(body))
+            .unwrap();
+        assert_eq!(status(app, req).await, StatusCode::UNPROCESSABLE_ENTITY);
+        let saved: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().metadata().unwrap().len()).collect();
+        assert_eq!(saved, [big as u64]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

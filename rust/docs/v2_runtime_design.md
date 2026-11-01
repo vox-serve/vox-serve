@@ -33,9 +33,10 @@ HTTP / bench ─► Scheduler (one host thread per GPU)
 * **Urgent lane** (`--urgent-lane`). A third lane with its own input / output arenas, its own graphs
   (batch 1–8, whole GPU, own memory pool) and, for Qwen3-TTS, its own codec work state, on a
   high-priority stream. First chunks and chunks whose playback deadline is within `--dec-urgent-ms` go
-  there at once, even while a long background detok batch runs on the partition; a request never has
-  two chunks in flight (stateful codecs decode in order). Supported where the detokenizer keeps no
-  shared scratch state between calls, or keeps one per lane: Qwen3-TTS, Orpheus, Zonos, CSM.
+  there at once, even while a long background detok batch runs on the partition (non-streaming
+  requests have no playback deadline and are never urgent); a request never has two chunks in flight
+  (stateful codecs decode in order). Supported where the detokenizer keeps no shared scratch state
+  between calls, or keeps one per lane: Qwen3-TTS, Orpheus, Zonos, CSM.
 * **GPU-side ordering.** `cudaStreamWaitEvent` only, no host waits: a detok batch can wait for the
   latest `depth_start` (`--gate depth`) or the LM's `done`; the LM lane can wait for the detok lane's
   `done` (exclusive prefill / urgent batches).
@@ -51,7 +52,7 @@ HTTP / bench ─► Scheduler (one host thread per GPU)
 | `--async-engines` | Asynchronous LM and detok lanes (implies `--overlap-detok`); mode 0 only unless `--sm-modes` |
 | `--sm-modes 24,48,68` | Green-context splits by detok SM count (implies `--async-engines`) |
 | `--sm-mode <m>` / `auto:<rows>:<m>` / `adaptive` | Fixed mode; mode `m` once at least `rows` requests are decoding; or the mode with the lowest predicted time per step from latencies measured online per (mode, size), exploring unmeasured modes every 8 steps |
-| `--lm-segments depth` / `layers:<k>` | Split Qwen3-TTS steps before the depth transformer, and optionally into k-layer groups |
+| `--lm-segments depth` / `layers:<k>` | Split Qwen3-TTS steps before the depth transformer, and optionally into k-layer groups (asynchronous engine only) |
 | `--gate depth` / `layer:<i>` | Non-urgent detok batches start only once the LM's latest step reached its depth graph / layer group i |
 | `--dec-batch N` | Continuation chunks wait until at least N are ready, then take all ready (first chunks and near-deadline chunks never wait) |
 | `--dec-max-batch N` | Largest non-urgent batch: bounds how long an urgent chunk waits behind a background batch |

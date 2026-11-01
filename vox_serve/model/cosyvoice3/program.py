@@ -40,7 +40,7 @@ from ...fusion.hift import hift_decode_cl
 from ...fusion.seg_attention import seg_attention
 from ...rt.core import Arena, EngineSpecBuilder, RtAttention
 from ...rt.kernels import ops
-from ...rt.program import TOKEN_AUDIO, TOKEN_OTHER, TOKEN_STOP, LMProgram
+from ...rt.program import TOKEN_AUDIO, TOKEN_OTHER, TOKEN_STOP, LMProgram, pcm16
 from ...rt.prompt import Prompt, ResourceBusyError
 from ...tokenizer.cosyvoice3 import (
     BLOCK_FRAMES,
@@ -537,8 +537,7 @@ class CosyVoice3Program(LMProgram):
         self.slot_chunk.index_copy_(0, slot, chunk)
         pcm, n = self._hift_chunk(mel, slot, reset, c_len, last)
         audio = out["audio"][:bd]
-        # Truncation toward zero, matching numpy's (x * 32767).astype(np.int16).
-        audio[:, :-1].copy_((pcm * 32767).to(torch.int16))
+        audio[:, :-1].copy_(pcm16(pcm))
         audio[:, -1].copy_(n.to(torch.int16))
 
     # ---- meta -------------------------------------------------------------------------------------

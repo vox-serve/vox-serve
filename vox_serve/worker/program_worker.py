@@ -75,6 +75,16 @@ def _pick(graphs: List[Tuple[int, GraphEntry]], n: int) -> Optional[Tuple[int, G
     return next(((k, g) for k, g in graphs if k >= n), None)
 
 
+def final_chunk(done_lm: bool, start: int, n_frames: int, interval: int, step: int, holds_back: bool) -> bool:
+    """Whether the codec chunk at frame ``start`` is the last one of a request with ``n_frames`` audio frames:
+    its tokens are all generated (``done_lm``) and the chunk emits the rest of its audio. Chunks start
+    ``step`` frames apart. A chunk emits its whole ``interval``-frame window, unless the codec takes
+    ``dt_last`` (``holds_back``): then each chunk keeps look-ahead audio back for the next one, and only a
+    chunk that no other follows (``start + step >= n_frames``, run with ``dt_last = 1``) emits all of it.
+    The request is finished once its last chunk has been decoded."""
+    return done_lm and start + (step if holds_back else interval) >= n_frames
+
+
 class ProgramWorker:
     def __init__(
         self,
@@ -185,6 +195,7 @@ class ProgramWorker:
             self.audio = builder.dt_outputs["audio"]
             self.audio_h = torch.zeros(self.audio.shape, dtype=self.audio.dtype).pin_memory()
             self.audio_done = torch.cuda.Event()
+        self.detok_holds_back = "dt_last" in self.dt_host.f  # see final_chunk
         self.builder = builder  # keeps the graphs and arenas alive
         self.logger.info(
             "%s ready: %d decode / %d prefill / %d detok graphs%s",
@@ -528,16 +539,19 @@ class ProgramWorker:
                 self._detokenize(batch)
             self.nvtx_range_pop()
         for req in requests:
-            n_frames = len(req.lm_output_audio_tokens)
             if req.done_lm_generation and (
-                not req.audio_decode_idx or req.audio_decode_idx[-1] + self.detokenize_interval >= n_frames
+                not req.audio_decode_idx or self._final_chunk(req, req.audio_decode_idx[-1])
             ):
                 req.done_all = True
+
+    def _final_chunk(self, req: Request, start: int) -> bool:
+        iv, n_frames = self.detokenize_interval, len(req.lm_output_audio_tokens)
+        step = iv - self.detokenize_overlap
+        return final_chunk(req.done_lm_generation, start, n_frames, iv, step, self.detok_holds_back)
 
     def _detokenize(self, chunks: List[Tuple[Request, int]]) -> None:
         bd, graph = _pick(self.detok_graphs, len(chunks))
         iv = self.detokenize_interval
-        step = iv - self.detokenize_overlap
         with torch.cuda.device(self.detok_device):
             f = self.dt_host.acquire()
             if "dt_len" in f and "dt_last" in f:  # valid frames of the window, and whether no chunk follows
@@ -546,7 +560,7 @@ class ProgramWorker:
                         req, start = chunks[k]
                         n_frames = len(req.lm_output_audio_tokens)
                         f["dt_len"][k] = min(start + iv, n_frames) - start
-                        f["dt_last"][k] = int(req.done_lm_generation and start + step >= n_frames)
+                        f["dt_last"][k] = int(self._final_chunk(req, start))
                     else:
                         f["dt_len"][k], f["dt_last"][k] = 0, 0
             if "dt_slot" in f and "dt_reset" in f:

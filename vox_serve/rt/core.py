@@ -1,4 +1,4 @@
-"""Static buffers, FlashInfer attention and CUDA-graph capture for the Rust runtime.
+"""Static buffers, FlashInfer attention and CUDA-graph capture for both serving runtimes.
 
 The Rust runtime drives every captured graph through three kinds of memory exported from here:
 
@@ -11,8 +11,11 @@ The Rust runtime drives every captured graph through three kinds of memory expor
   (``PrefillPlan``, linked into the Rust binary) and writes the result straight into the workspace
   that the captured kernels read from.
 
-Graphs are captured with ``keep_graph=True``; Rust instantiates and launches them from the raw
-``cudaGraph_t`` handle, so ``CUDAGraph.replay`` is never used at serving time.
+For the Rust runtime (``build_engine``) graphs are captured with ``keep_graph=True``: Rust
+instantiates and launches them from the raw ``cudaGraph_t`` handle and never calls
+``CUDAGraph.replay``, so torch never instantiates them. The Python runtime (``ProgramWorker``) uses
+the builder in-process and launches graphs with ``CUDAGraph.replay``; torch instantiates each of its
+graphs at the end of the capture, so no request pays for it.
 """
 
 import importlib
@@ -271,7 +274,11 @@ def green_split(device: torch.device, dec_sms: int):
 
 
 class EngineSpecBuilder:
-    """Collects everything the Rust runtime needs and keeps the backing tensors alive."""
+    """Captures a program's graphs, collects its arenas and ``meta`` and keeps the backing tensors alive.
+
+    ``keep_graph``: keep each graph's ``cudaGraph_t`` uninstantiated for ``export`` (the Rust runtime);
+    otherwise torch instantiates it at the end of the capture.
+    """
 
     def __init__(
         self,
@@ -281,8 +288,10 @@ class EngineSpecBuilder:
         sm_modes: Optional[List[int]] = None,
         urgent_lane: bool = False,
         detok_sms: Optional[int] = None,
+        keep_graph: bool = False,
     ):
         self.device = device
+        self.keep_graph = keep_graph
         self.inputs = Arena("inputs", device)
         self.outputs = Arena("outputs", device)
         # Disaggregation: the detokenizer runs with its own arenas and stream, asynchronously to the
@@ -357,7 +366,7 @@ class EngineSpecBuilder:
         torch.cuda.current_stream(device).wait_stream(stream)
         torch.cuda.synchronize(device)
 
-        graph = torch.cuda.CUDAGraph(keep_graph=True)
+        graph = torch.cuda.CUDAGraph(keep_graph=self.keep_graph)
         with torch.cuda.device(device), torch.cuda.graph(graph, pool=self.pool(family), stream=stream):
             fn()
         torch.cuda.synchronize(device)
@@ -455,6 +464,7 @@ def build_engine(config_json: str) -> str:
             sm_modes=sm_modes,
             urgent_lane=urgent,
             detok_sms=config.get("detok_sms"),
+            keep_graph=True,
         )
         program.build(builder)
     _ENGINE_KEEPALIVE.append((program, builder))

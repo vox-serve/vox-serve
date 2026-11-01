@@ -681,13 +681,7 @@ impl Scheduler {
             self.emit_audio(&chunks, 0);
         }
         let mut finished: Vec<usize> = completions;
-        for (i, ch) in chunks.iter().enumerate() {
-            let _ = i;
-            let r = &self.reqs[ch.req];
-            if r.done_lm && ch.start + self.detok_interval >= r.n_frames && !finished.contains(&ch.req) {
-                finished.push(ch.req);
-            }
-        }
+        self.push_finished(&chunks, &mut finished);
         if let Some(b) = &lm {
             self.consume_lm(b);
         }
@@ -716,12 +710,7 @@ impl Scheduler {
                 })
                 .collect();
             self.emit_audio(&chunks, 0);
-            for ch in &chunks {
-                let r = &self.reqs[ch.req];
-                if r.done_lm && ch.start + self.detok_interval >= r.n_frames {
-                    finished.push(ch.req);
-                }
-            }
+            self.push_finished(&chunks, &mut finished);
         }
         let mut launched = false;
         if self.inflight.is_none() {
@@ -929,10 +918,12 @@ impl Scheduler {
             .collect()
     }
 
+    /// Requests that `chunks` (just decoded) finish: those whose last chunk is among them.
     fn push_finished(&self, chunks: &[DetokChunk], finished: &mut Vec<usize>) {
+        let (iv, st, holds_back) = (self.detok_interval, self.detok_step, self.f.dt_last.is_some());
         for ch in chunks {
             let r = &self.reqs[ch.req];
-            if r.done_lm && ch.start + self.detok_interval >= r.n_frames {
+            if final_chunk(r.done_lm, ch.start, r.n_frames, iv, st, holds_back) {
                 finished.push(ch.req);
             }
         }
@@ -1103,15 +1094,17 @@ impl Scheduler {
         self.cfg.v2.background_mode(decoding.min(self.max_bs), self.decode_mode, self.decode_by_mode.len())
     }
 
-    /// First chunks and chunks whose playback deadline is near. With `slack_urgency`, first chunks
-    /// are urgent only near their startup deadline too, and the margin covers the largest batch.
+    /// First chunks and chunks whose playback deadline is near (`chunk_urgent`). With
+    /// `slack_urgency`, the margin also covers the largest batch.
     fn is_urgent(&self, i: usize, now: Instant) -> bool {
         let r = &self.reqs[i];
-        if !self.cfg.v2.slack_urgency {
-            return r.first_send.is_none() || self.audio_deadline(i, now) < self.cfg.v2.urgent;
-        }
-        let batch = self.dt_cost.iter().map(|(_, c)| *c).fold(0.0, f64::max);
-        self.audio_deadline(i, now) < self.cfg.v2.urgent + batch
+        let v2 = &self.cfg.v2;
+        let margin = if v2.slack_urgency {
+            v2.urgent + self.dt_cost.iter().map(|(_, c)| *c).fold(0.0, f64::max)
+        } else {
+            v2.urgent
+        };
+        chunk_urgent(r.streaming, r.first_send.is_some(), self.audio_deadline(i, now), v2.slack_urgency, margin)
     }
 
     /// Detok selection for the asynchronous loop: urgent chunks go at once; other ready chunks wait
@@ -1305,12 +1298,7 @@ impl Scheduler {
 
     fn audio_deadline(&self, i: usize, now: Instant) -> f64 {
         let r = &self.reqs[i];
-        let end = r.playback_end.unwrap_or(r.received + Duration::from_secs_f64(self.cfg.deadline.startup));
-        if end >= now {
-            (end - now).as_secs_f64()
-        } else {
-            -(now - end).as_secs_f64()
-        }
+        playback_deadline(r.streaming, r.playback_end, r.received, self.cfg.deadline.startup, now)
     }
 
     fn pending_chunks(&self, i: usize) -> usize {
@@ -1611,7 +1599,7 @@ impl Scheduler {
                     Some(ch) => {
                         let r = &self.reqs[ch.req];
                         let len = (ch.start + iv).min(r.n_frames) - ch.start;
-                        (len as i32, i32::from(r.done_lm && ch.start + st >= r.n_frames))
+                        (len as i32, i32::from(final_chunk(r.done_lm, ch.start, r.n_frames, iv, st, true)))
                     }
                     None => (0, 0),
                 };
@@ -1813,6 +1801,35 @@ fn is_pressing(
     }
 }
 
+/// Seconds until a request's next audio is due (negative: late): a stream's first chunk
+/// `startup` after arrival, later chunks when the audio sent so far has played (`playback_end`). A
+/// non-streaming request has no playback deadline: it is never late, so it neither defers prefills
+/// nor goes ahead of streams, and uses the capacity they leave.
+fn playback_deadline(
+    streaming: bool,
+    playback_end: Option<Instant>,
+    received: Instant,
+    startup: f64,
+    now: Instant,
+) -> f64 {
+    if !streaming {
+        return f64::INFINITY;
+    }
+    let end = playback_end.unwrap_or(received + Duration::from_secs_f64(startup));
+    if end >= now {
+        (end - now).as_secs_f64()
+    } else {
+        -(now - end).as_secs_f64()
+    }
+}
+
+/// v2: whether a chunk skips batching (and takes the urgent lane): a stream's first chunk (unless
+/// `slack_urgency`: then it competes by its startup deadline) or a chunk due within `margin`.
+/// Non-streaming chunks are never urgent.
+fn chunk_urgent(streaming: bool, first_sent: bool, deadline: f64, slack_urgency: bool, margin: f64) -> bool {
+    streaming && ((!slack_urgency && !first_sent) || deadline < margin)
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum DetokReady {
     /// Not prefilled yet, or fewer than a chunk of new frames.
@@ -1858,6 +1875,17 @@ fn chunk_starts(
         out.push(next);
     }
     out
+}
+
+/// Whether the chunk at frame `start` is the last one of a request with `n_frames` audio frames: its
+/// tokens are all generated and the chunk emits the rest of its audio (the request is finished once it
+/// is decoded). Chunks start `st` frames apart. A chunk emits its whole `iv`-frame window, unless the
+/// codec takes `dt_last` (`holds_back`): then each chunk keeps look-ahead audio back for the next one,
+/// and only a chunk that no other follows (`start + st >= n_frames`, run with `dt_last = 1`) emits all
+/// of it. (Holding audio back for the next chunk implies overlapping windows, `st < iv`: a chunk
+/// scheduled before the tokens are all generated then always has a successor.)
+fn final_chunk(done_lm: bool, start: usize, n_frames: usize, iv: usize, st: usize, holds_back: bool) -> bool {
+    done_lm && start + if holds_back { st } else { iv } >= n_frames
 }
 
 /// Online policy: chunks per pressing request (`counts` ready each) within a batch of `cap`: all of
@@ -1928,6 +1956,48 @@ mod tests {
     }
 
     #[test]
+    fn deadlines() {
+        let now = Instant::now();
+        let received = now - Duration::from_secs(2);
+        // A stream's first chunk was due 0.5 s after arrival: 1.5 s late.
+        assert!((playback_deadline(true, None, received, 0.5, now) + 1.5).abs() < 1e-6);
+        // Later chunks are due when the audio sent so far has played.
+        let end = Some(now + Duration::from_secs(1));
+        assert!((playback_deadline(true, end, received, 0.5, now) - 1.0).abs() < 1e-6);
+        // Non-streaming: never late, so it never defers a prefill and its LM rows and chunks sort
+        // after every stream's.
+        let d = playback_deadline(false, None, received, 0.5, now);
+        assert_eq!(d, f64::INFINITY);
+        let cfg = DeadlineConfig {
+            startup: 0.5,
+            lm_step: 0.01,
+            codec: 0.01,
+            prefill: 0.03,
+            max_prefill_deferral: 0.1,
+            max_pending_chunks: 0,
+        };
+        let slack = deadline::lm_slack(d, 2, 0.8, 10, &cfg);
+        assert_eq!(slack, f64::INFINITY);
+        assert!(!deadline::defer_prefill(slack.min(d - cfg.codec), 0.0, &cfg));
+        assert!(deadline::lm_slack(100.0, 5, 0.8, 0, &cfg) < slack);
+    }
+
+    #[test]
+    fn urgency() {
+        // (streaming, first_sent, deadline, slack_urgency, margin)
+        assert!(chunk_urgent(true, false, 0.4, false, 0.1), "a first chunk");
+        assert!(!chunk_urgent(true, false, 0.4, true, 0.1), "a first chunk competing by deadline");
+        assert!(chunk_urgent(true, false, 0.05, true, 0.1));
+        assert!(chunk_urgent(true, true, 0.05, false, 0.1), "near its playback deadline");
+        assert!(!chunk_urgent(true, true, 0.4, false, 0.1));
+        // Non-streaming: never, before or after its first chunk.
+        for slack_urgency in [false, true] {
+            assert!(!chunk_urgent(false, false, f64::INFINITY, slack_urgency, 0.1));
+            assert!(!chunk_urgent(false, true, f64::INFINITY, slack_urgency, 0.1));
+        }
+    }
+
+    #[test]
     fn readiness() {
         use DetokReady::*;
         assert_eq!(detok_ready(false, false, 0, 10, 4), Wait, "not prefilled");
@@ -1952,6 +2022,70 @@ mod tests {
         // The budget (one chunk per step for stateful codecs).
         assert_eq!(chunk_starts(0, 10, 4, 4, true, 1), vec![0]);
         assert_eq!(chunk_starts(0, 10, 4, 4, true, 0), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn last_chunk() {
+        // A codec that emits its whole window: the first chunk whose window reaches the last frame.
+        assert!(final_chunk(true, 8, 10, 4, 4, false));
+        assert!(!final_chunk(false, 8, 10, 4, 4, false), "tokens still being generated");
+        assert!(!final_chunk(true, 4, 10, 4, 4, false));
+        // Look-ahead (`dt_last`): the chunk that no other follows, not the first window reaching the end.
+        assert!(final_chunk(true, 12, 16, 4, 3, false));
+        assert!(!final_chunk(true, 12, 16, 4, 3, true));
+        assert!(final_chunk(true, 15, 16, 4, 3, true));
+    }
+
+    /// A request with `n` frames and a stateful codec (one chunk at a time): frame `k` is generated in
+    /// step `k` and the stop token in step `n + 1`; a chunk is selected and filled with the state of its
+    /// step and collected `lag` steps later (0: the synchronous step; 1: the codec lane of the
+    /// overlapped loops, after the next LM step). Returns `(start, dt_last)` of every chunk decoded
+    /// until the request finished.
+    fn decode_request(n: usize, iv: usize, st: usize, holds_back: bool, lag: usize) -> Vec<(usize, bool)> {
+        let state = |k: usize| (k.min(n), k > n);
+        let (mut decoded, mut next) = (Vec::new(), 0);
+        for k in 0..4 * n + 8 {
+            let (frames, done) = state(k);
+            match detok_ready(true, done, next, frames, iv) {
+                DetokReady::Wait => continue,
+                DetokReady::Complete => return decoded,
+                DetokReady::Chunk => {}
+            }
+            decoded.push((next, final_chunk(done, next, frames, iv, st, true)));
+            let (frames, done) = state(k + lag);
+            if final_chunk(done, next, frames, iv, st, holds_back) {
+                return decoded;
+            }
+            next += st;
+        }
+        panic!("request of {n} frames never finished");
+    }
+
+    #[test]
+    fn requests_end_with_their_last_chunk() {
+        // Higgs Audio v3 (52-row windows 25 apart) and CosyVoice3 (30 / 25) hold audio back (issue #65).
+        for (iv, st) in [(52, 25), (30, 25), (4, 3), (4, 4)] {
+            for n in 1..300 {
+                for lag in [0, 1] {
+                    for holds_back in [true, false] {
+                        if holds_back && st == iv {
+                            continue; // holding audio back for the next chunk implies overlapping windows
+                        }
+                        let d = decode_request(n, iv, st, holds_back, lag);
+                        let starts: Vec<usize> = d.iter().map(|c| c.0).collect();
+                        assert_eq!(starts, (0..d.len()).map(|i| i * st).collect::<Vec<_>>(), "{n} frames");
+                        let (start, last) = *d.last().unwrap();
+                        if holds_back {
+                            // The last chunk runs with dt_last = 1 and emits the held-back audio.
+                            assert!(last && start + st >= n, "{iv}/{st}, {n} frames, lag {lag}: {d:?}");
+                            assert!(d[..d.len() - 1].iter().all(|c| !c.1), "{d:?}");
+                        } else {
+                            assert!(start + iv >= n, "{iv}/{st}, {n} frames, lag {lag}: {d:?}");
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
