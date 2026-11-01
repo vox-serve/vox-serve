@@ -536,7 +536,8 @@
 <h3>Parameters (multipart form)<a class="headerlink" href="#parameters-multipart-form" title="Link to this heading">#</a></h3>
 <ul class="simple">
 <li><p><code class="docutils literal notranslate"><span class="pre">text</span></code> (string, required): Input prompt.</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">audio</span></code> (file, optional): Input audio for STS-capable models.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">audio</span></code> (file, optional): Input audio for STS-capable models. The Rust runtime accepts request
+bodies up to 100 MiB.</p></li>
 <li><p><code class="docutils literal notranslate"><span class="pre">streaming</span></code> (bool, optional, default <code class="docutils literal notranslate"><span class="pre">true</span></code>):
 - <code class="docutils literal notranslate"><span class="pre">true</span></code> streams WAV chunks as they are produced.
 - <code class="docutils literal notranslate"><span class="pre">false</span></code> returns a single WAV file after completion.</p></li>
