@@ -3,7 +3,7 @@
 import torch
 import torchaudio
 
-# Key used by the Python worker (``ModelWorker.watermark_key``).
+# Fixed message (5 bytes) that SilentCipher embeds in every watermarked chunk.
 SILENTCIPHER_KEY = [11, 91, 60, 147, 209]
 
 
@@ -25,11 +25,13 @@ def istft(spec: torch.Tensor, n_fft: int, hop: int, window: torch.Tensor) -> tor
 
 
 class SilentCipherBatched(torch.nn.Module):
-    """Batched equivalent of ``ModelWorker.run_watermark`` with the SilentCipher 44.1 kHz model.
+    """Batched SilentCipher watermarking with the 44.1 kHz model and ``SILENTCIPHER_KEY``.
 
-    Every chunk has the same length (``n_samples`` at ``sr``), so the message carrier, STFT sizes
-    and resampling are fixed at construction. Silent chunks (zero power) are only resampled to
-    44.1 kHz and back, as in the reference, which skips encoding them.
+    The reference processes one chunk at a time: resample it to 44.1 kHz, encode it with
+    ``Model.encode_wav`` (``vox_serve/watermarker/silentcipher.py``, message SDR 36 dB) and resample
+    it back to ``sr``. Here every chunk has the same length (``n_samples`` at ``sr``), so the message
+    carrier, STFT sizes and resampling are fixed at construction. Silent chunks (zero power) are only
+    resampled to 44.1 kHz and back, as in the reference, which skips encoding them.
     """
 
     def __init__(self, sr: int, n_samples: int, device: torch.device, key=SILENTCIPHER_KEY, message_sdr: float = 36):
