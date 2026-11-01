@@ -285,7 +285,9 @@ class HiggsTTSProgram(LMProgram):
             lanes.append((builder.du_inputs, max(self._urgent_sizes())))
         for dinp, nb in lanes:
             dinp.add("dt_len", (nb,), torch.int32)  # valid rows of the window
-            dinp.add("dt_last", (nb,), torch.int32)  # unused (the window length already says it)
+            # Unused here (the window length says it), but declaring it makes the runtimes finish a request
+            # only after its last chunk, which emits the frames earlier chunks kept as look-ahead.
+            dinp.add("dt_last", (nb,), torch.int32)
 
     def allocate_state(self) -> None:
         super().allocate_state()
