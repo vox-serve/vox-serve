@@ -1124,18 +1124,13 @@ impl Scheduler {
         let mut cand = Vec::new();
         let mut completions = Vec::new();
         for (i, r) in self.reqs.iter().enumerate() {
-            if (r.slot.is_none() && !r.done_lm) || self.chunk_in_flight(r.key) {
+            if self.chunk_in_flight(r.key) {
                 continue;
             }
-            let next = r.next_detok(st);
-            if r.done_lm {
-                if next < r.n_frames {
-                    cand.push(i);
-                } else {
-                    completions.push(i);
-                }
-            } else if next + iv <= r.n_frames {
-                cand.push(i);
+            match detok_ready(r.slot.is_some(), r.done_lm, r.next_detok(st), r.n_frames, iv) {
+                DetokReady::Chunk => cand.push(i),
+                DetokReady::Complete => completions.push(i),
+                DetokReady::Wait => {}
             }
         }
         cand.sort_by(|&a, &b| {
@@ -1202,21 +1197,10 @@ impl Scheduler {
         self.free_pages.append(&mut r.pages);
     }
 
-    /// Online policy: a stream is pressing until its first chunk and from 1 s before its buffered
-    /// audio runs out. A non-streaming request is pressing once its tokens are all generated:
-    /// audio is only decoded together with pressing chunks, so it would otherwise never be decoded
-    /// while no stream is pressing.
     fn update_pressing(&mut self) {
         let now = Instant::now();
         for r in &mut self.reqs {
-            r.pressing = if !r.streaming {
-                r.done_lm
-            } else if let Some(first) = r.first_send {
-                let latest_start = r.total_sent_secs - r.last_chunk_secs;
-                now + Duration::from_secs(1) >= first + Duration::from_secs_f64(latest_start)
-            } else {
-                true
-            };
+            r.pressing = is_pressing(r.streaming, r.done_lm, r.first_send, r.total_sent_secs, r.last_chunk_secs, now);
         }
     }
 
@@ -1234,34 +1218,16 @@ impl Scheduler {
 
         let mut candidates = Vec::new();
         for (i, r) in self.reqs.iter().enumerate() {
-            if r.slot.is_none() && !r.done_lm {
-                continue; // not prefilled yet
-            }
-            let next = r.next_detok(st);
-            if r.done_lm {
-                if next < r.n_frames {
-                    candidates.push(i);
-                } else {
-                    completions.push(i);
-                }
-            } else if next + iv <= r.n_frames {
-                candidates.push(i);
+            match detok_ready(r.slot.is_some(), r.done_lm, r.next_detok(st), r.n_frames, iv) {
+                DetokReady::Chunk => candidates.push(i),
+                DetokReady::Complete => completions.push(i),
+                DetokReady::Wait => {}
             }
         }
 
-        // Assign up to `budget` chunk start indices to request `i`.
-        let assign = |r: &Req, budget: usize, out: &mut Vec<usize>| {
-            let mut budget = budget.min(per_req);
-            let mut next = r.next_detok(st);
-            while budget > 0 && next + iv <= r.n_frames {
-                out.push(next);
-                next += st;
-                budget -= 1;
-            }
-            if r.done_lm && budget > 0 && next < r.n_frames {
-                out.push(next);
-            }
-        };
+        // Up to `budget` chunk start indices of request `r`.
+        let assign =
+            |r: &Req, budget: usize| chunk_starts(r.next_detok(st), r.n_frames, iv, st, r.done_lm, budget.min(per_req));
 
         match self.cfg.policy {
             Policy::Deadline => {
@@ -1284,9 +1250,7 @@ impl Scheduler {
                 }
             }
             Policy::Offline => {
-                // Requests waiting for admission do not count: they may wait for the codec state
-                // slot of a finished request, which is only freed once its audio is decoded.
-                if self.reqs.iter().any(|r| r.slot.is_some() && !r.done_lm) {
+                if !offline_may_decode(self.reqs.iter().map(|r| (r.slot.is_some(), r.done_lm))) {
                     return (chunks, completions);
                 }
                 for &i in &candidates {
@@ -1294,8 +1258,7 @@ impl Scheduler {
                     if budget == 0 {
                         break;
                     }
-                    let mut starts = Vec::new();
-                    assign(&self.reqs[i], budget, &mut starts);
+                    let starts = assign(&self.reqs[i], budget);
                     chunks.extend(starts.into_iter().map(|s| DetokChunk { req: i, start: s, row: 0 }));
                 }
             }
@@ -1313,38 +1276,13 @@ impl Scheduler {
                         (remaining / st + usize::from(r.done_lm && remaining > 0)).min(per_req)
                     })
                     .collect();
-                let total: usize = counts.iter().sum();
-                let assigned: Vec<usize> = if total <= cap {
-                    counts
-                } else {
-                    let mut a: Vec<usize> = counts.iter().map(|&c| (c * cap / total).max(1)).collect();
-                    let mut sum: usize = a.iter().sum();
-                    while sum > cap {
-                        let mut changed = false;
-                        for x in a.iter_mut() {
-                            if *x > 1 {
-                                *x -= 1;
-                                sum -= 1;
-                                changed = true;
-                                if sum <= cap {
-                                    break;
-                                }
-                            }
-                        }
-                        // More pressing requests than slots: Python would spin forever here.
-                        if !changed {
-                            break;
-                        }
-                    }
-                    a
-                };
+                let assigned = online_budgets(counts, cap);
                 for (k, &i) in critical.iter().enumerate() {
                     let budget = assigned[k].min(cap.saturating_sub(chunks.len()));
                     if budget == 0 {
                         continue;
                     }
-                    let mut starts = Vec::new();
-                    assign(&self.reqs[i], budget, &mut starts);
+                    let starts = assign(&self.reqs[i], budget);
                     chunks.extend(starts.into_iter().map(|s| DetokChunk { req: i, start: s, row: 0 }));
                 }
                 for &i in &relaxed {
@@ -1352,8 +1290,7 @@ impl Scheduler {
                     if budget == 0 {
                         break;
                     }
-                    let mut starts = Vec::new();
-                    assign(&self.reqs[i], budget, &mut starts);
+                    let starts = assign(&self.reqs[i], budget);
                     chunks.extend(starts.into_iter().map(|s| DetokChunk { req: i, start: s, row: 0 }));
                 }
             }
@@ -1449,10 +1386,9 @@ impl Scheduler {
             if rows + r.prompt_len > max_rows {
                 break;
             }
-            let positions = r.prompt_len.max(self.model.max_tokens() + 1).min(self.max_context);
-            let n_pages = positions.div_ceil(self.page_size);
-            let no_dt_slot = self.free_dt_slots.as_ref().is_some_and(|f| f.is_empty());
-            if self.free_slots.is_empty() || no_dt_slot || self.free_pages.len() < n_pages {
+            let n_pages = kv_pages_needed(r.prompt_len, self.model.max_tokens(), self.max_context, self.page_size);
+            let free_dt = self.free_dt_slots.as_ref().map(Vec::len);
+            if !can_admit(self.free_slots.len(), free_dt, self.free_pages.len(), n_pages) {
                 break;
             }
             let slot = self.free_slots.pop().unwrap();
@@ -1852,4 +1788,199 @@ fn pick(graphs: &[(usize, GraphId)], n: usize) -> Option<GraphId> {
 
 fn key_of(graphs: &[(usize, GraphId)], id: GraphId) -> usize {
     graphs.iter().find(|(_, g)| *g == id).map(|(k, _)| *k).unwrap()
+}
+
+// ---- policy decisions (pure, unit-tested below) ---------------------------------------------------
+
+/// Online policy: a stream is pressing until its first chunk and from 1 s before its last received
+/// chunk starts playing (`first_send` + the audio sent before that chunk). A non-streaming request is
+/// pressing once its tokens are all generated: audio is only decoded together with pressing chunks, so
+/// it would otherwise never be decoded while no stream is pressing.
+fn is_pressing(
+    streaming: bool,
+    done_lm: bool,
+    first_send: Option<Instant>,
+    sent_secs: f64,
+    last_chunk_secs: f64,
+    now: Instant,
+) -> bool {
+    if !streaming {
+        return done_lm;
+    }
+    match first_send {
+        Some(first) => now + Duration::from_secs(1) >= first + Duration::from_secs_f64(sent_secs - last_chunk_secs),
+        None => true,
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum DetokReady {
+    /// Not prefilled yet, or fewer than a chunk of new frames.
+    Wait,
+    /// A chunk can be decoded.
+    Chunk,
+    /// Everything is decoded: only the completion message is left.
+    Complete,
+}
+
+/// Where a request stands for detokenization; `next` is the start frame of its next chunk.
+fn detok_ready(admitted: bool, done_lm: bool, next: usize, n_frames: usize, iv: usize) -> DetokReady {
+    if done_lm {
+        if next < n_frames {
+            DetokReady::Chunk
+        } else {
+            DetokReady::Complete
+        }
+    } else if admitted && next + iv <= n_frames {
+        DetokReady::Chunk
+    } else {
+        DetokReady::Wait
+    }
+}
+
+/// Start frames of up to `budget` chunks from `next`: full `iv`-frame windows `st` frames apart and,
+/// once the tokens are all generated, the final partial window.
+fn chunk_starts(
+    mut next: usize,
+    n_frames: usize,
+    iv: usize,
+    st: usize,
+    done_lm: bool,
+    mut budget: usize,
+) -> Vec<usize> {
+    let mut out = Vec::new();
+    while budget > 0 && next + iv <= n_frames {
+        out.push(next);
+        next += st;
+        budget -= 1;
+    }
+    if done_lm && budget > 0 && next < n_frames {
+        out.push(next);
+    }
+    out
+}
+
+/// Online policy: chunks per pressing request (`counts` ready each) within a batch of `cap`: all of
+/// them if they fit, else proportionally, at least one each while possible.
+fn online_budgets(counts: Vec<usize>, cap: usize) -> Vec<usize> {
+    let total: usize = counts.iter().sum();
+    if total <= cap {
+        return counts;
+    }
+    let mut a: Vec<usize> = counts.iter().map(|&c| (c * cap / total).max(1)).collect();
+    let mut sum: usize = a.iter().sum();
+    while sum > cap {
+        let mut changed = false;
+        for x in a.iter_mut() {
+            if *x > 1 {
+                *x -= 1;
+                sum -= 1;
+                changed = true;
+                if sum <= cap {
+                    break;
+                }
+            }
+        }
+        // More pressing requests than slots: the caller stops at `cap` chunks.
+        if !changed {
+            break;
+        }
+    }
+    a
+}
+
+/// Offline policy: audio is decoded only while no admitted request is generating, given `(admitted,
+/// done_lm)` per request. Requests waiting for admission do not count: they may wait for the codec
+/// state slot of a finished request, which is only freed once its audio is decoded.
+fn offline_may_decode(mut reqs: impl Iterator<Item = (bool, bool)>) -> bool {
+    !reqs.any(|(admitted, done_lm)| admitted && !done_lm)
+}
+
+/// KV pages a request reserves at admission: its prompt or `max_tokens + 1` positions, whichever is
+/// longer, up to the maximum context (as `ProgramWorker` does).
+fn kv_pages_needed(prompt_len: usize, max_tokens: usize, max_context: usize, page_size: usize) -> usize {
+    prompt_len.max(max_tokens + 1).min(max_context).div_ceil(page_size)
+}
+
+/// Admission needs an LM slot, a codec state slot (stateful codecs: `free_dt_slots` is `Some`) and the
+/// request's KV pages.
+fn can_admit(free_slots: usize, free_dt_slots: Option<usize>, free_pages: usize, n_pages: usize) -> bool {
+    free_slots > 0 && free_dt_slots != Some(0) && free_pages >= n_pages
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pressing() {
+        let now = Instant::now();
+        let ago = |s: f64| Some(now - Duration::from_secs_f64(s));
+        // Non-streaming: pressing exactly once the tokens are all generated.
+        assert!(!is_pressing(false, false, None, 0.0, 0.0, now));
+        assert!(is_pressing(false, true, None, 0.0, 0.0, now));
+        // A stream without audio yet.
+        assert!(is_pressing(true, false, None, 0.0, 0.0, now));
+        // Five 1 s chunks sent 0.5 s ago: the last one starts playing in 3.5 s.
+        assert!(!is_pressing(true, false, ago(0.5), 5.0, 1.0, now));
+        // Sent 3.5 s ago: the last chunk starts in 0.5 s.
+        assert!(is_pressing(true, false, ago(3.5), 5.0, 1.0, now));
+    }
+
+    #[test]
+    fn readiness() {
+        use DetokReady::*;
+        assert_eq!(detok_ready(false, false, 0, 10, 4), Wait, "not prefilled");
+        assert_eq!(detok_ready(true, false, 4, 7, 4), Wait, "fewer than a chunk of new frames");
+        assert_eq!(detok_ready(true, false, 4, 8, 4), Chunk);
+        assert_eq!(detok_ready(true, true, 4, 5, 4), Chunk, "the final partial chunk");
+        assert_eq!(detok_ready(true, true, 8, 8, 4), Complete);
+        // A request that failed before admission (no audio) only needs its completion.
+        assert_eq!(detok_ready(false, true, 0, 0, 4), Complete);
+    }
+
+    #[test]
+    fn starts() {
+        // While generating: full windows only.
+        assert_eq!(chunk_starts(0, 10, 4, 4, false, 9), vec![0, 4]);
+        // Once done: the partial window too.
+        assert_eq!(chunk_starts(0, 10, 4, 4, true, 9), vec![0, 4, 8]);
+        assert_eq!(chunk_starts(8, 10, 4, 4, true, 9), vec![8]);
+        assert_eq!(chunk_starts(10, 10, 4, 4, true, 9), Vec::<usize>::new());
+        // Overlapping windows (step < interval).
+        assert_eq!(chunk_starts(0, 10, 4, 3, false, 9), vec![0, 3, 6]);
+        // The budget (one chunk per step for stateful codecs).
+        assert_eq!(chunk_starts(0, 10, 4, 4, true, 1), vec![0]);
+        assert_eq!(chunk_starts(0, 10, 4, 4, true, 0), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn budgets() {
+        assert_eq!(online_budgets(vec![2, 3], 8), vec![2, 3]);
+        let b = online_budgets(vec![6, 2, 0], 4);
+        assert!(b.iter().sum::<usize>() <= 4, "{b:?}");
+        assert!(b[0] >= b[1], "{b:?}");
+        // More pressing requests than slots: terminates; the caller stops at the batch size.
+        assert_eq!(online_budgets(vec![3, 3, 3, 3], 2), vec![1, 1, 1, 1]);
+    }
+
+    #[test]
+    fn offline_gate() {
+        // (admitted, done_lm)
+        assert!(offline_may_decode([(true, true), (false, false)].into_iter()), "waiting requests do not block");
+        assert!(!offline_may_decode([(true, false), (true, true)].into_iter()), "a generating request blocks");
+        assert!(offline_may_decode(std::iter::empty()));
+    }
+
+    #[test]
+    fn admission() {
+        assert_eq!(kv_pages_needed(10, 100, 2048, 64), 2); // 101 positions
+        assert_eq!(kv_pages_needed(300, 100, 2048, 64), 5); // the prompt is longer
+        assert_eq!(kv_pages_needed(10, 4096, 2048, 64), 32); // capped at the context
+        assert!(can_admit(1, None, 2, 2));
+        assert!(!can_admit(0, None, 2, 2), "no LM slot");
+        assert!(!can_admit(1, Some(0), 2, 2), "no codec state slot");
+        assert!(can_admit(1, Some(1), 2, 2));
+        assert!(!can_admit(1, None, 1, 2), "not enough KV pages");
+    }
 }

@@ -147,12 +147,12 @@ class ChatterboxProgram(LMProgram):
         """``[cond rows][START text STOP][START_SPEECH x2]``; the mask carries the row kind."""
         if audio_path is not None:
             raise ValueError("Audio conditioning not implemented yet.")
-        cfg = self.model.model.config
-        tokens = list(range(self.cond_len))
-        mask = [COND] * self.cond_len
-        tokens += [cfg.start_text_token] + self._encode(punc_norm(text).replace(" ", "[SPACE]")) + [cfg.stop_text_token]
+        m = self.spec_meta
+        tokens = list(range(m["cond_len"]))
+        mask = [COND] * m["cond_len"]
+        tokens += [m["start_text"]] + self._encode(punc_norm(text).replace(" ", "[SPACE]")) + [m["stop_text"]]
         mask += [TEXT] * (len(tokens) - len(mask))
-        tokens += [cfg.start_speech_token] * 2
+        tokens += [m["start_speech"]] * 2
         mask += [SPEECH_START] * 2
         return Prompt(tokens, mask)
 

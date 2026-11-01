@@ -116,7 +116,7 @@ class CSMProgram(LMProgram):
             speaker = str(sp)
         else:
             speaker = "0"
-        c = self.n_codebooks
+        c = self.spec_meta["n_codebooks"]
         tokens, mask = list(self.spec_meta["context_tokens"]), list(self.spec_meta["context_mask"])
         for t in self._encode(f"[{speaker}]{text}"):
             tokens += [0] * (c - 1) + [t]

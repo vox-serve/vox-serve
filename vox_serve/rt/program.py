@@ -187,6 +187,15 @@ class LMProgram(Program):
 
     spec_meta: Dict[str, Any] = {}  # the engine's meta (common + ``meta()``), set by ``build``
 
+    @classmethod
+    def for_prompts(cls, meta: Dict[str, Any]) -> "LMProgram":
+        """A program that only builds prompts, from an engine's ``meta`` (no weights, no device): for
+        checking ``preprocess`` against the Rust prompt builders. Text-only prompts read nothing but
+        ``spec_meta``, as the Rust builders read nothing but ``meta``."""
+        program = cls.__new__(cls)
+        program.spec_meta = meta
+        return program
+
     def preprocess(self, text: str, audio_path: Optional[str], model_kwargs: Dict[str, Any]) -> Prompt:
         """The prompt rows of a request. The Python runtime always builds prompts here, the Rust runtime
         when ``meta["prompt_builder"]`` is ``python``; a model's Rust prompt builder must produce the same

@@ -370,9 +370,10 @@ class Qwen3TTSProgram(LMProgram):
 
     def _build(self, text: List[int], audio_path: Optional[str], kwargs: Dict[str, Any], streaming: bool) -> Prompt:
         m = self.spec_meta
-        if audio_path is not None and self.tts_type != "base":
+        tts_type = m["tts_model_type"]
+        if audio_path is not None and tts_type != "base":
             raise ValueError("this Qwen3-TTS model does not accept audio input (voice cloning needs the Base model)")
-        voice = self._encode_voice(audio_path, kwargs, streaming) if self.tts_type == "base" else None
+        voice = self._encode_voice(audio_path, kwargs, streaming) if tts_type == "base" else None
         log = get_logger(__name__)
         languages, speakers = m["languages"], m["speakers"]
         lang = kwargs.get("language")
@@ -381,7 +382,7 @@ class Qwen3TTSProgram(LMProgram):
             log.warning("language %s not supported, using auto", language)
             language = "auto"
         speaker = None
-        if self.tts_type == "custom_voice":
+        if tts_type == "custom_voice":
             sp = kwargs.get("speaker")
             speaker = (sp if isinstance(sp, str) else m["default_speaker"]).lower()
             if speaker not in speakers:
@@ -393,7 +394,7 @@ class Qwen3TTSProgram(LMProgram):
         if speaker is not None and language in ("chinese", "auto") and speaker in m["speaker_dialect"]:
             language_id = languages.get(m["speaker_dialect"][speaker], language_id)
 
-        c = self.n_codebooks
+        c = m["n_codebooks"]
         tokens: List[int] = []
         mask: List[int] = []
 

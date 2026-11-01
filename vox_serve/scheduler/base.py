@@ -42,6 +42,7 @@ class Scheduler:
         dp_size: int = 1,
         detokenize_interval: int = None,
         program_options: dict = None,
+        model_worker=None,
     ):
         self.device = device
         self.max_batch_size = max_batch_size
@@ -62,32 +63,35 @@ class Scheduler:
 
         self.logger.info(f"Using {'async' if async_scheduling else 'sync'} scheduling mode")
 
-        # The worker runs the model's program (vox_serve.model.<model>.program)
-        self.logger.info(f"Using ProgramWorker{'' if enable_cuda_graph else ' without CUDA graphs'}")
-        self.model_worker = ProgramWorker(
-            model_name=model_name_or_path,
-            max_batch_size=max_batch_size,
-            top_p=top_p,
-            top_k=top_k,
-            min_p=min_p,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            repetition_penalty=repetition_penalty,
-            repetition_window=repetition_window,
-            cfg_scale=cfg_scale,
-            greedy=greedy,
-            max_num_pages=max_num_pages,
-            page_size=page_size,
-            enable_cuda_graph=enable_cuda_graph,
-            enable_nvtx=enable_nvtx,
-            enable_torch_compile=enable_torch_compile,
-            unroll_depth_cuda_graph=unroll_depth_cuda_graph,
-            detokenizer_device="cuda:1" if enable_disaggregation else None,
-            dp_rank=dp_rank,
-            dp_size=dp_size,
-            detokenize_interval=detokenize_interval,
-            program_options=program_options,
-        )
+        # The worker runs the model's program (vox_serve.model.<model>.program); tests pass a stand-in.
+        if model_worker is not None:
+            self.model_worker = model_worker
+        else:
+            self.logger.info(f"Using ProgramWorker{'' if enable_cuda_graph else ' without CUDA graphs'}")
+            self.model_worker = ProgramWorker(
+                model_name=model_name_or_path,
+                max_batch_size=max_batch_size,
+                top_p=top_p,
+                top_k=top_k,
+                min_p=min_p,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                repetition_penalty=repetition_penalty,
+                repetition_window=repetition_window,
+                cfg_scale=cfg_scale,
+                greedy=greedy,
+                max_num_pages=max_num_pages,
+                page_size=page_size,
+                enable_cuda_graph=enable_cuda_graph,
+                enable_nvtx=enable_nvtx,
+                enable_torch_compile=enable_torch_compile,
+                unroll_depth_cuda_graph=unroll_depth_cuda_graph,
+                detokenizer_device="cuda:1" if enable_disaggregation else None,
+                dp_rank=dp_rank,
+                dp_size=dp_size,
+                detokenize_interval=detokenize_interval,
+                program_options=program_options,
+            )
 
         self.active_requests: List[Request] = []
 
@@ -338,7 +342,8 @@ class Scheduler:
                 self.result_socket.send(message)
 
             # send completion notification for finished requests
-            if req.done_all:
+            if req.done_all and not req.completion_sent:
+                req.completion_sent = True
                 self.model_worker.free_kv_cache(req)
                 completion_message = {"status": "completed", "reason": req.finish_reason or "unknown"}
                 # Send completion message: request_id|COMPLETION|json_data
@@ -368,7 +373,8 @@ class Scheduler:
                 await self.result_socket.send(message)
 
             # send completion notification for finished requests
-            if req.done_all:
+            if req.done_all and not req.completion_sent:
+                req.completion_sent = True
                 self.model_worker.free_kv_cache(req)
                 completion_message = {"status": "completed", "reason": req.finish_reason or "unknown"}
                 # Send completion message: request_id|COMPLETION|json_data

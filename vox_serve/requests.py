@@ -49,6 +49,8 @@ class Request:
     next_audio_decode_idx: List[int] = field(default_factory=list)
     done_lm_generation: bool = False
     done_all: bool = False
+    # the completion message has been sent (async scheduling may select a request once more after that)
+    completion_sent: bool = False
     finish_reason: str = None
 
     is_pressing: bool = False

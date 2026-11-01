@@ -113,9 +113,9 @@ Scheduling policies
 
 - ``base`` (default): new requests are prefilled first, every running request decodes, and audio chunks
   are decoded as soon as they are ready.
-- ``online``: a streaming request is *pressing* until its first audio chunk and again when its client is
-  about a second from running out of buffered audio; a non-streaming request is pressing once its tokens
-  are all generated. Pressing requests decode first, and audio is decoded only in steps that have a
+- ``online``: a streaming request is *pressing* until its first audio chunk and again from a second
+  before its client starts playing the last chunk it has received; a non-streaming request is pressing
+  once its tokens are all generated. Pressing requests decode first, and audio is decoded only in steps that have a
   pressing chunk, which other ready chunks join while the batch has room.
 - ``offline``: audio is decoded only while no admitted request is generating tokens; for batch jobs, not
   streaming.
