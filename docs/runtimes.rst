@@ -143,7 +143,7 @@ By default a step runs the codec, then the LM, on one stream. These flags overla
 - ``--urgent-lane``: a third, high-priority codec lane on all SMs for first chunks and chunks close to
   their playback deadline (Qwen3-TTS, Orpheus, Zonos, CSM, CosyVoice3).
 - ``--lm-segments depth`` / ``layers:<k>`` with ``--gate``: Qwen3-TTS steps captured in segments, so codec
-  batches can start at a segment boundary.
+  batches can start at a segment boundary (with ``--async-engines``).
 
 The best partition and flags depend on the model and the GPU; measure with a load benchmark
 (``benchmark/``). ``rust/docs/v2_runtime_design.md`` describes the asynchronous engine and every flag.

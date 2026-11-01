@@ -15,7 +15,8 @@ Parameters (multipart form)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 - ``text`` (string, required): Input prompt.
-- ``audio`` (file, optional): Input audio for STS-capable models.
+- ``audio`` (file, optional): Input audio for STS-capable models. The Rust runtime accepts request
+  bodies up to 100 MiB.
 - ``streaming`` (bool, optional, default ``true``):
   - ``true`` streams WAV chunks as they are produced.
   - ``false`` returns a single WAV file after completion.
