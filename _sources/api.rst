@@ -24,7 +24,9 @@ Parameters (multipart form)
 Response
 ^^^^^^^^
 
-- Streaming mode: ``audio/wav`` with chunked transfer.
+- Streaming mode: ``audio/wav`` with chunked transfer. With the Rust runtime, a request that fails
+  after streaming has started (an error, the timeout, or its engine stopping) aborts the connection
+  instead of ending the body cleanly, so truncated audio is never reported as complete.
 - Non-streaming mode: ``audio/wav`` file download.
 
 Examples
@@ -58,6 +60,10 @@ JSON payload:
 .. code-block:: json
 
    {"status": "healthy"}
+
+With the Rust runtime, once an engine has stopped (e.g. after a CUDA error) the endpoint returns 503
+with ``{"status": "unhealthy", "failed_engines": [<rank>, ...]}`` until the server is restarted;
+requests are routed to the remaining engines, or get 503 when none is left.
 
 Python API
 ==========

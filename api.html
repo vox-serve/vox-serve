@@ -546,7 +546,9 @@ bodies up to 100 MiB.</p></li>
 <section id="response">
 <h3>Response<a class="headerlink" href="#response" title="Link to this heading">#</a></h3>
 <ul class="simple">
-<li><p>Streaming mode: <code class="docutils literal notranslate"><span class="pre">audio/wav</span></code> with chunked transfer.</p></li>
+<li><p>Streaming mode: <code class="docutils literal notranslate"><span class="pre">audio/wav</span></code> with chunked transfer. With the Rust runtime, a request that fails
+after streaming has started (an error, the timeout, or its engine stopping) aborts the connection
+instead of ending the body cleanly, so truncated audio is never reported as complete.</p></li>
 <li><p>Non-streaming mode: <code class="docutils literal notranslate"><span class="pre">audio/wav</span></code> file download.</p></li>
 </ul>
 </section>
@@ -576,6 +578,9 @@ bodies up to 100 MiB.</p></li>
 <div class="highlight-json notranslate"><div class="highlight"><pre><span></span><span class="p">{</span><span class="nt">"status"</span><span class="p">:</span><span class="w"> </span><span class="s2">"healthy"</span><span class="p">}</span>
 </pre></div>
 </div>
+<p>With the Rust runtime, once an engine has stopped (e.g. after a CUDA error) the endpoint returns 503
+with <code class="docutils literal notranslate"><span class="pre">{&quot;status&quot;:</span> <span class="pre">&quot;unhealthy&quot;,</span> <span class="pre">&quot;failed_engines&quot;:</span> <span class="pre">[&lt;rank&gt;,</span> <span class="pre">...]}</span></code> until the server is restarted;
+requests are routed to the remaining engines, or get 503 when none is left.</p>
 </section>
 </section>
 </section>
