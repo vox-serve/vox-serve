@@ -21,6 +21,7 @@ import zmq
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
+from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
 from .utils import get_global_log_level, get_logger, set_global_log_level
@@ -59,6 +60,7 @@ class APIServer:
         async_scheduling: bool = False,
         dp_size: int = 1,
         detokenize_interval: int = None,
+        program_options: Optional[Dict] = None,
     ):
         """Initialize the API server and start scheduler process(es).
 
@@ -88,6 +90,7 @@ class APIServer:
             async_scheduling: Enable async scheduling mode.
             dp_size: Data parallel replica count.
             detokenize_interval: Interval for audio detokenization (model-specific).
+            program_options: Extra configuration of the model's program (kernel fusion flags).
         """
         self.model_name = model_name
         self.request_socket_path = request_socket_path
@@ -118,6 +121,7 @@ class APIServer:
         self.async_scheduling = async_scheduling
         self.dp_size = dp_size
         self.detokenize_interval = detokenize_interval
+        self.program_options = program_options or {}
         self.scheduler_processes = None  # Will be a list for DP mode
         self.logger = get_logger(__name__)
 
@@ -274,6 +278,8 @@ class APIServer:
                         cmd.append("--async-scheduling")
                     if self.detokenize_interval is not None:
                         cmd.extend(["--detokenize-interval", str(self.detokenize_interval)])
+                    if self.program_options:
+                        cmd.extend(["--program-options", json.dumps(self.program_options)])
 
                     self.logger.info(f"Starting DP rank {rank} with CUDA_VISIBLE_DEVICES={gpu_mapping[rank]}")
                     process = subprocess.Popen(cmd, env=env)
@@ -349,6 +355,8 @@ class APIServer:
                     cmd.append("--async-scheduling")
                 if self.detokenize_interval is not None:
                     cmd.extend(["--detokenize-interval", str(self.detokenize_interval)])
+                if self.program_options:
+                    cmd.extend(["--program-options", json.dumps(self.program_options)])
 
                 process = subprocess.Popen(cmd)
                 self.scheduler_process = process
@@ -808,6 +816,7 @@ async def generate(
     ref_text: Optional[str] = Form(None),
     instruct: Optional[str] = Form(None),
     x_vector_only_mode: Optional[bool] = Form(None),
+    voice: Optional[str] = Form(None),
 ):
     """
     Generate speech from text and return audio file or streaming response.
@@ -821,6 +830,7 @@ async def generate(
         ref_text: Reference text for voice cloning (used with audio for ICL mode)
         instruct: Instruction text for voice design/control (model-specific)
         x_vector_only_mode: If True, use only speaker embedding without ICL (model-specific)
+        voice: Voice name (model-specific, e.g. Orpheus' "tara")
 
     Returns:
         Audio file as direct response (if streaming=False) or streaming audio response (if streaming=True)
@@ -850,6 +860,8 @@ async def generate(
         model_kwargs["instruct"] = instruct
     if x_vector_only_mode is not None:
         model_kwargs["x_vector_only_mode"] = x_vector_only_mode
+    if voice is not None:
+        model_kwargs["voice"] = voice
 
     try:
         if streaming:
@@ -907,6 +919,63 @@ async def generate(
 
             cleanup_thread = threading.Thread(target=delayed_cleanup, daemon=True)
             cleanup_thread.start()
+
+
+# ============================================================================
+# OpenAI-compatible /v1/audio/speech endpoint (raw PCM streaming)
+# ============================================================================
+
+
+class AudioSpeechRequest(BaseModel):
+    """Request body for the OpenAI-compatible ``/v1/audio/speech`` endpoint.
+
+    Mirrors the payload sent by ``benchmarking/bench/adapters/voxtral.py``:
+    ``{model, input, voice, language, response_format, stream, extra_params}``.
+    ``extra_params`` may carry ``cfg_alpha`` (classifier-free guidance scale).
+    """
+
+    model: Optional[str] = None
+    input: str
+    voice: Optional[str] = None
+    language: Optional[str] = None
+    response_format: Optional[str] = "pcm"
+    stream: Optional[bool] = True
+    extra_params: Optional[Dict] = None
+
+
+@app.post("/v1/audio/speech")
+async def audio_speech(req: AudioSpeechRequest):
+    """Generate speech and stream raw int16 PCM (no WAV header).
+
+    Reuses the existing streaming machinery (``async_stream_chunks``); the worker
+    already emits int16 PCM bytes, so unlike the ``/generate`` WAV route this
+    endpoint forwards them verbatim with ``media_type="audio/pcm"``.
+    """
+    if api_server is None:
+        raise HTTPException(status_code=503, detail="Server not ready")
+
+    model_kwargs = {
+        "voice": req.voice,
+        "language": req.language,
+        "cfg_alpha": (req.extra_params or {}).get("cfg_alpha"),
+    }
+
+    try:
+        request_id = api_server.start_streaming_request(req.input, None, model_kwargs)
+
+        async def audio_stream():
+            async for chunk in api_server.async_stream_chunks(request_id):
+                yield chunk
+
+        return StreamingResponse(
+            audio_stream(),
+            media_type="audio/pcm",
+            headers={"Cache-Control": "no-cache"},
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 # ============================================================================
@@ -1103,21 +1172,24 @@ def signal_handler(signum, frame):
     os._exit(0)  # Force immediate exit
 
 
-def main():
-    """Run the VoxServe API server from the CLI.
+# Kernel fusion flags: program config keys, set to true by --<key with dashes> (vox_serve/fusion).
+FUSION_FLAGS = {
+    "fuse_lm": "Merge sibling q/k/v and gate/up projections of the LM into single GEMMs "
+    "(Orpheus, CSM, CosyVoice2, Chatterbox, Step-Audio-2, Voxtral)",
+    "fuse_layers": "Run the LM's decoder layers with merged GEMMs and fused add+RMSNorm, q/k-norm+RoPE+KV-write "
+    "and SiLU-and-mul kernels (Higgs Audio v3, CosyVoice3)",
+    "fuse_codec": "Fused codec kernels (Higgs Audio v3 DAC, CosyVoice3 HiFT and flow decoder)",
+    "fuse_depth": "Qwen3-TTS: run the depth transformer with merged QKV / gate-up GEMMs and grouped-query SDPA",
+    "fuse_talker": "Qwen3-TTS: run the talker with merged QKV / gate-up GEMMs and fused residual add + RMSNorm",
+    "compile_detok": "Fuse the detokenizer with torch.compile before capturing its graphs",
+}
 
-    The CLI maps to ``python -m vox_serve.launch`` or the ``vox-serve`` entrypoint.
 
-    Arguments are parsed via ``argparse`` and control model selection, scheduling
-    behavior, sampling parameters, and performance settings.
-    """
+def build_parser(prog: Optional[str] = None):
+    """Command-line arguments of the Python runtime (``vox-serve --runtime python``)."""
     import argparse
-    import multiprocessing as mp
 
-    import uvicorn
-
-    # Parse command line arguments
-    parser = argparse.ArgumentParser(description="Vox-Serve Text-to-Speech API Server")
+    parser = argparse.ArgumentParser(prog=prog, description="Vox-Serve Text-to-Speech API Server")
     parser.add_argument(
         "--model",
         type=str,
@@ -1136,9 +1208,12 @@ def main():
     parser.add_argument("--port", type=int, default=8000, help="Port to bind the server to (default: 8000)")
     parser.add_argument("--max-batch-size", type=int, default=8, help="Maximum batch size for inference (default: 8)")
     parser.add_argument(
-        "--max-num-pages", type=int, default=2048, help="Maximum number of KV cache pages (default: 1024)"
+        "--max-num-pages",
+        type=int,
+        default=None,
+        help="Number of KV cache pages (default: enough for 2 x max-batch-size requests of maximum context)",
     )
-    parser.add_argument("--page-size", type=int, default=128, help="Size of each KV cache page (default: 128)")
+    parser.add_argument("--page-size", type=int, default=64, help="Size of each KV cache page (default: 64)")
     parser.add_argument("--top-p", type=float, default=None, help="Top-p sampling parameter (default: None)")
     parser.add_argument("--top-k", type=int, default=None, help="Top-k sampling parameter (default: None)")
     parser.add_argument("--min-p", type=float, default=None, help="Min-p sampling parameter (default: None)")
@@ -1147,8 +1222,15 @@ def main():
         "--max-tokens", type=int, default=None, help="Maximum number of tokens to generate (default: model-specific)"
     )
     parser.add_argument("--repetition-penalty", type=float, default=None, help="Repetition penalty (default: None)")
-    parser.add_argument("--repetition-window", type=int, default=None, help="Repetition window size (default: None)")
-    parser.add_argument("--cfg-scale", type=float, default=None, help="CFG scale for guidance (default: None)")
+    parser.add_argument(
+        "--repetition-window",
+        type=int,
+        default=None,
+        help="No effect (kept for compatibility): the repetition penalty covers every generated token",
+    )
+    parser.add_argument(
+        "--cfg-scale", type=float, default=None, help="CFG scale for guidance (Voxtral-TTS; default: the model's)"
+    )
     parser.add_argument(
         "--greedy",
         action="store_true",
@@ -1158,10 +1240,10 @@ def main():
         "--enable-cuda-graph",
         action="store_true",
         default=True,
-        help="Enable CUDA graph optimization for decode phase (default: True)",
+        help="Replay the model's steps as CUDA graphs (default: True)",
     )
     parser.add_argument(
-        "--disable-cuda-graph", action="store_true", help="Disable CUDA graph optimization for decode phase"
+        "--disable-cuda-graph", action="store_true", help="Run the model's steps eagerly (for debugging model code)"
     )
     parser.add_argument(
         "--enable-disaggregation",
@@ -1210,9 +1292,27 @@ def main():
     parser.add_argument(
         "--unroll-depth-cuda-graph",
         action="store_true",
-        help="Unroll all depth transformer iterations into a single CUDA graph for reduced overhead (default: False)",
+        help="No effect (kept for compatibility): the depth transformer is part of each step's graph",
     )
-    args = parser.parse_args()
+    fusion = parser.add_argument_group("kernel fusion (vox_serve.fusion; the same flags as the Rust runtime)")
+    for flag, help_text in FUSION_FLAGS.items():
+        fusion.add_argument(f"--{flag.replace('_', '-')}", action="store_true", help=help_text)
+    return parser
+
+
+def main(argv: Optional[list] = None, prog: Optional[str] = None):
+    """Run the VoxServe API server from the CLI.
+
+    The CLI maps to ``python -m vox_serve.launch`` or ``vox-serve --runtime python`` (see ``vox_serve.cli``).
+
+    Arguments are parsed via ``argparse`` and control model selection, scheduling
+    behavior, sampling parameters, and performance settings.
+    """
+    import multiprocessing as mp
+
+    import uvicorn
+
+    args = build_parser(prog).parse_args(argv)
 
     # Set global log level for the entire application
     set_global_log_level(args.log_level)
@@ -1287,6 +1387,7 @@ def main():
         dp_size=args.dp_size,
         detokenize_interval=args.detokenize_interval,
         unroll_depth_cuda_graph=args.unroll_depth_cuda_graph,
+        program_options={flag: True for flag in FUSION_FLAGS if getattr(args, flag)},
     )
 
     # Register signal handlers for graceful shutdown

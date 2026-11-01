@@ -10,10 +10,13 @@
    :toctree:
    :recursive:
 
+   cli
    flashinfer_utils
+   fusion
    launch
    model
    requests
+   rt
    sampling
    scheduler
    scheduler_entry

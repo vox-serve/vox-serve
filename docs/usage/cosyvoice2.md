@@ -7,7 +7,7 @@ CosyVoice2-0.5B is a text-to-speech model developed by Alibaba FunAudioLLM team,
 Start the server:
 
 ```bash
-python -m vox_serve.launch --model FunAudioLLM/CosyVoice2-0.5B --port 8000
+vox-serve --model FunAudioLLM/CosyVoice2-0.5B --port 8000
 ```
 
 Generate speech:
@@ -94,7 +94,7 @@ curl -X POST "http://localhost:8000/generate" \
 ## CLI Options
 
 ```bash
-python -m vox_serve.launch \
+vox-serve \
   --model FunAudioLLM/CosyVoice2-0.5B \
   --port 8000 \
   --temperature 0.7 \

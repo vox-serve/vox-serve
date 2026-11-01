@@ -1,0 +1,66 @@
+name: Distributions
+
+# What a release publishes, built and checked in one place: rust.yml runs this on every push and pull
+# request, publish.yml runs it for a release and uploads exactly these files to PyPI.
+# - the sdist (Python package + Rust sources): pip builds the Rust extension from it where no wheel fits
+#   (a Rust toolchain and nvcc needed, otherwise the Python runtime only);
+# - one manylinux wheel with the Rust extension, built from that sdist in a manylinux_2_28 container and
+#   repaired by auditwheel (.github/scripts/build-dists.sh). It is cp312-abi3 (every Python >= 3.12) and
+#   does not bundle libcudart: the extension uses the copy torch loads (nvidia-cuda-runtime-cu12).
+on:
+  workflow_call:
+
+env:
+  # As in rust.yml.
+  RUST_TOOLCHAIN: "1.90.0"
+  MANYLINUX_IMAGE: quay.io/pypa/manylinux_2_28_x86_64:2026.10.31-1
+
+jobs:
+  dists:
+    name: sdist and manylinux wheel
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the sdist and the wheel in the manylinux container
+        run: |
+          docker run --rm -v "$PWD:/io" -w /io -e RUST_TOOLCHAIN "$MANYLINUX_IMAGE" \
+            .github/scripts/build-dists.sh dist
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check the files
+        run: |
+          ls -l dist
+          test "$(ls dist | wc -l)" -eq 2
+          ls dist/*.tar.gz
+          # PyPI rejects linux_x86_64 wheels; auditwheel gives the manylinux tag.
+          ls dist/*-cp312-abi3-manylinux_2_28_x86_64.whl
+          python -m zipfile -l dist/*.whl | grep -E "vox_serve/_rt\.abi3\.so"
+          if python -m zipfile -l dist/*.whl | grep -i cudart; then
+            echo "the wheel must not bundle libcudart"; exit 1
+          fi
+          tar tzf dist/*.tar.gz | grep -E "/rust/(Cargo\.lock|build\.rs|csrc/sampling\.cu)$"
+          python -m pip install --upgrade pip twine
+          twine check --strict dist/*
+      - name: The installed wheel loads the extension and parses the command line
+        run: |
+          # The CUDA runtime from its wheel, as torch installs it; the extension finds it through its rpath.
+          python -m venv /tmp/venv
+          /tmp/venv/bin/pip install --no-deps dist/*.whl "nvidia-cuda-runtime-cu12==12.8.*"
+          cd /tmp && /tmp/venv/bin/python - <<'PY'
+          from vox_serve import _rt
+
+          print("FlashInfer headers", _rt.FLASHINFER_VERSION)
+          _rt.parse_args(["vox-serve", "--model", "qwen3-tts", "--scheduler-type", "deadline", "--fuse-depth"])
+          try:
+              _rt.parse_args(["vox-serve", "--no-such-flag"])
+          except ValueError:
+              pass
+          else:
+              raise SystemExit("an unknown flag was accepted")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          retention-days: 7
