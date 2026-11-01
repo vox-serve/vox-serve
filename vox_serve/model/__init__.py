@@ -27,6 +27,8 @@ _PROGRAMS = {
     "stepfun-ai/step-audio-2": ("step_audio_2", "StepAudio2Program"),
     "zonos": ("zonos", "ZonosProgram"),
     "zyphra/zonos": ("zonos", "ZonosProgram"),
+    "vibevoice": ("vibevoice", "VibeVoiceProgram"),
+    "microsoft/vibevoice": ("vibevoice", "VibeVoiceProgram"),
     "voxtral-tts": ("voxtral_tts", "VoxtralTTSProgram"),
     "mistralai/voxtral-4b-tts": ("voxtral_tts", "VoxtralTTSProgram"),
     "xtts": ("xtts", "XTTSProgram"),
