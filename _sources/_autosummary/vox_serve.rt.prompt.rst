@@ -21,6 +21,7 @@ vox\_serve.rt.prompt
       ModelSpec
       Prompt
       SamplingParams
+      VoiceSlots
    
    .. rubric:: Exceptions
 

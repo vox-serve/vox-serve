@@ -471,7 +471,7 @@
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#quickstart">Quickstart</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#api-parameters">API Parameters</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#examples">Examples</a><ul class="pst-show_toc_level nav section-nav flex-column">
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#basic-usage">Basic Usage</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#voice-cloning">Voice Cloning</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#streaming-audio">Streaming Audio</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#using-curl">Using curl</a></li>
 </ul>
@@ -491,7 +491,7 @@
                   
   <section class="tex2jax_ignore mathjax_ignore" id="chatterbox">
 <h1>Chatterbox<a class="headerlink" href="#chatterbox" title="Link to this heading">#</a></h1>
-<p>Chatterbox is a text-to-speech model developed by Resemble AI, featuring a 0.5B LLM with flow matching and HiFT vocoder. It includes built-in Perth watermarking for audio authentication.</p>
+<p>Chatterbox is a text-to-speech model developed by Resemble AI, featuring a 0.5B LLM with flow matching and HiFT vocoder. It clones voices from a reference clip and includes built-in Perth watermarking for audio authentication.</p>
 <section id="quickstart">
 <h2>Quickstart<a class="headerlink" href="#quickstart" title="Link to this heading">#</a></h2>
 <p>Start the server:</p>
@@ -501,8 +501,9 @@
 <p>Generate speech:</p>
 <div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">requests</span>
 
-<span class="n">response</span> <span class="o">=</span> <span class="n">requests</span><span class="o">.</span><span class="n">post</span><span class="p">(</span><span class="s2">"http://localhost:8000/generate"</span><span class="p">,</span> <span class="n">json</span><span class="o">=</span><span class="p">{</span>
-    <span class="s2">"text"</span><span class="p">:</span> <span class="s2">"Hello, this is Chatterbox speaking!"</span>
+<span class="n">response</span> <span class="o">=</span> <span class="n">requests</span><span class="o">.</span><span class="n">post</span><span class="p">(</span><span class="s2">"http://localhost:8000/generate"</span><span class="p">,</span> <span class="n">data</span><span class="o">=</span><span class="p">{</span>
+    <span class="s2">"text"</span><span class="p">:</span> <span class="s2">"Hello, this is Chatterbox speaking!"</span><span class="p">,</span>
+    <span class="s2">"streaming"</span><span class="p">:</span> <span class="s2">"false"</span><span class="p">,</span>
 <span class="p">})</span>
 
 <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="s2">"output.wav"</span><span class="p">,</span> <span class="s2">"wb"</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
@@ -526,10 +527,15 @@
 <td><p>required</p></td>
 <td><p>Text to synthesize</p></td>
 </tr>
-<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">streaming</span></code></p></td>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">audio</span></code></p></td>
+<td><p>file</p></td>
+<td><p>none</p></td>
+<td><p>Reference clip of the voice to clone (at least 3 s; the first 10 s are used)</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">streaming</span></code></p></td>
 <td><p>boolean</p></td>
-<td><p><code class="docutils literal notranslate"><span class="pre">false</span></code></p></td>
-<td><p>Enable streaming response</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">true</span></code></p></td>
+<td><p>Stream the audio as it is generated</p></td>
 </tr>
 </tbody>
 </table>
@@ -537,15 +543,23 @@
 </section>
 <section id="examples">
 <h2>Examples<a class="headerlink" href="#examples" title="Link to this heading">#</a></h2>
-<section id="basic-usage">
-<h3>Basic Usage<a class="headerlink" href="#basic-usage" title="Link to this heading">#</a></h3>
+<section id="voice-cloning">
+<h3>Voice Cloning<a class="headerlink" href="#voice-cloning" title="Link to this heading">#</a></h3>
 <div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">requests</span>
 
-<span class="n">response</span> <span class="o">=</span> <span class="n">requests</span><span class="o">.</span><span class="n">post</span><span class="p">(</span><span class="s2">"http://localhost:8000/generate"</span><span class="p">,</span> <span class="n">json</span><span class="o">=</span><span class="p">{</span>
-    <span class="s2">"text"</span><span class="p">:</span> <span class="s2">"The quick brown fox jumps over the lazy dog."</span>
-<span class="p">})</span>
+<span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="s2">"reference.wav"</span><span class="p">,</span> <span class="s2">"rb"</span><span class="p">)</span> <span class="k">as</span> <span class="n">ref</span><span class="p">:</span>
+    <span class="n">response</span> <span class="o">=</span> <span class="n">requests</span><span class="o">.</span><span class="n">post</span><span class="p">(</span>
+        <span class="s2">"http://localhost:8000/generate"</span><span class="p">,</span>
+        <span class="n">data</span><span class="o">=</span><span class="p">{</span><span class="s2">"text"</span><span class="p">:</span> <span class="s2">"Hello, this is a cloned voice."</span><span class="p">,</span> <span class="s2">"streaming"</span><span class="p">:</span> <span class="s2">"false"</span><span class="p">},</span>
+        <span class="n">files</span><span class="o">=</span><span class="p">{</span><span class="s2">"audio"</span><span class="p">:</span> <span class="p">(</span><span class="s2">"reference.wav"</span><span class="p">,</span> <span class="n">ref</span><span class="p">,</span> <span class="s2">"audio/wav"</span><span class="p">)},</span>
+    <span class="p">)</span>
+
+<span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="s2">"cloned.wav"</span><span class="p">,</span> <span class="s2">"wb"</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+    <span class="n">f</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="n">response</span><span class="o">.</span><span class="n">content</span><span class="p">)</span>
 </pre></div>
 </div>
+<p>The server keeps a few encoded voices (<code class="docutils literal notranslate"><span class="pre">n_voices</span></code> slots, the default voice included), so repeated
+requests with the same clip skip the encoding.</p>
 </section>
 <section id="streaming-audio">
 <h3>Streaming Audio<a class="headerlink" href="#streaming-audio" title="Link to this heading">#</a></h3>
@@ -553,8 +567,8 @@
 
 <span class="k">with</span> <span class="n">requests</span><span class="o">.</span><span class="n">post</span><span class="p">(</span>
     <span class="s2">"http://localhost:8000/generate"</span><span class="p">,</span>
-    <span class="n">json</span><span class="o">=</span><span class="p">{</span><span class="s2">"text"</span><span class="p">:</span> <span class="s2">"Hello world!"</span><span class="p">,</span> <span class="s2">"streaming"</span><span class="p">:</span> <span class="kc">True</span><span class="p">},</span>
-    <span class="n">stream</span><span class="o">=</span><span class="kc">True</span>
+    <span class="n">data</span><span class="o">=</span><span class="p">{</span><span class="s2">"text"</span><span class="p">:</span> <span class="s2">"Hello world!"</span><span class="p">,</span> <span class="s2">"streaming"</span><span class="p">:</span> <span class="s2">"true"</span><span class="p">},</span>
+    <span class="n">stream</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
 <span class="p">)</span> <span class="k">as</span> <span class="n">response</span><span class="p">:</span>
     <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="s2">"output.wav"</span><span class="p">,</span> <span class="s2">"wb"</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
         <span class="k">for</span> <span class="n">chunk</span> <span class="ow">in</span> <span class="n">response</span><span class="o">.</span><span class="n">iter_content</span><span class="p">(</span><span class="n">chunk_size</span><span class="o">=</span><span class="mi">8192</span><span class="p">):</span>
@@ -565,9 +579,12 @@
 <section id="using-curl">
 <h3>Using curl<a class="headerlink" href="#using-curl" title="Link to this heading">#</a></h3>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span><span class="s2">"http://localhost:8000/generate"</span><span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-H<span class="w"> </span><span class="s2">"Content-Type: application/json"</span><span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-d<span class="w"> </span><span class="s1">'{"text": "Hello from Chatterbox!"}'</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-F<span class="w"> </span><span class="s2">"text=Hello from Chatterbox!"</span><span class="w"> </span>-F<span class="w"> </span><span class="s2">"streaming=false"</span><span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>-o<span class="w"> </span>output.wav
+
+curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span><span class="s2">"http://localhost:8000/generate"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-F<span class="w"> </span><span class="s2">"text=Hello in a cloned voice!"</span><span class="w"> </span>-F<span class="w"> </span><span class="s2">"audio=@reference.wav"</span><span class="w"> </span>-F<span class="w"> </span><span class="s2">"streaming=false"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-o<span class="w"> </span>cloned.wav
 </pre></div>
 </div>
 </section>
@@ -578,7 +595,7 @@
 <span class="w">  </span>--model<span class="w"> </span>ResembleAI/chatterbox<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--port<span class="w"> </span><span class="m">8000</span><span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--temperature<span class="w"> </span><span class="m">0</span>.7<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--top_p<span class="w"> </span><span class="m">0</span>.9
+<span class="w">  </span>--top-p<span class="w"> </span><span class="m">0</span>.9
 </pre></div>
 </div>
 </section>
@@ -586,11 +603,10 @@
 <h2>Architecture Notes<a class="headerlink" href="#architecture-notes" title="Link to this heading">#</a></h2>
 <p>Chatterbox uses a LLaMA-based architecture with:</p>
 <ul class="simple">
-<li><p>Flow matching for high-quality audio generation</p></li>
+<li><p>Flow matching for high-quality audio generation (S3Gen, the same decoder as CosyVoice2)</p></li>
 <li><p>HiFT vocoder for waveform synthesis</p></li>
 <li><p>Built-in Perth watermarking for audio authentication</p></li>
 </ul>
-<p>Voice cloning via audio conditioning is planned for a future release.</p>
 </section>
 </section>
 
@@ -644,7 +660,7 @@
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#quickstart">Quickstart</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#api-parameters">API Parameters</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#examples">Examples</a><ul class="pst-show_toc_level nav section-nav flex-column">
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#basic-usage">Basic Usage</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#voice-cloning">Voice Cloning</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#streaming-audio">Streaming Audio</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#using-curl">Using curl</a></li>
 </ul>

@@ -528,8 +528,9 @@ Adding one touches no scheduler, worker or engine code:</p>
 <p>The shortest complete example is Orpheus (Llama-3.2-3B with the SNAC codec), whose whole program is shown
 in <a class="reference internal" href="#the-program"><span class="std std-ref">step 2</span></a>. The other programs cover multi-codebook models
 (<code class="docutils literal notranslate"><span class="pre">zonos</span></code>, <code class="docutils literal notranslate"><span class="pre">higgs_tts</span></code>), depth transformers (<code class="docutils literal notranslate"><span class="pre">csm</span></code>, <code class="docutils literal notranslate"><span class="pre">qwen3_tts</span></code>), flow-matching codecs (<code class="docutils literal notranslate"><span class="pre">cosyvoice2</span></code>,
-<code class="docutils literal notranslate"><span class="pre">chatterbox</span></code>), audio input (<code class="docutils literal notranslate"><span class="pre">step_audio_2</span></code>, <code class="docutils literal notranslate"><span class="pre">glm_voice</span></code>), input streaming (<code class="docutils literal notranslate"><span class="pre">qwen3_tts</span></code>) and a codec that
-decodes the LM’s hidden states, carried to it in the token rows (<code class="docutils literal notranslate"><span class="pre">xtts</span></code>).</p>
+<code class="docutils literal notranslate"><span class="pre">chatterbox</span></code>), voice cloning (<code class="docutils literal notranslate"><span class="pre">chatterbox</span></code>, <code class="docutils literal notranslate"><span class="pre">cosyvoice3</span></code>), audio input (<code class="docutils literal notranslate"><span class="pre">step_audio_2</span></code>, <code class="docutils literal notranslate"><span class="pre">glm_voice</span></code>),
+input streaming (<code class="docutils literal notranslate"><span class="pre">qwen3_tts</span></code>) and a codec that decodes the LM’s hidden states, carried to it in the token rows
+(<code class="docutils literal notranslate"><span class="pre">xtts</span></code>).</p>
 <section id="how-a-program-runs">
 <h2>How a program runs<a class="headerlink" href="#how-a-program-runs" title="Link to this heading">#</a></h2>
 <p>At start-up, the program allocates static buffers (KV cache, per-request sampling state) and declares
@@ -815,7 +816,8 @@ servers’ <code class="docutils literal notranslate"><span class="pre">/generat
 with a 400 response carrying that message. Never wait in <code class="docutils literal notranslate"><span class="pre">preprocess</span></code> for a resource that running
 requests release (a voice slot, feature-pool rows): the Python runtime builds prompts on its scheduler
 thread, the thread that releases them. Raise <code class="docutils literal notranslate"><span class="pre">ResourceBusyError</span></code> (<code class="docutils literal notranslate"><span class="pre">vox_serve/rt/prompt.py</span></code>) instead;
-the request then stays queued and its prompt is built again on a later step.</p>
+the request then stays queued and its prompt is built again on a later step. <code class="docutils literal notranslate"><span class="pre">VoiceSlots</span></code> there keeps an
+LRU of reference voices encoded into a program’s slots this way (Chatterbox).</p>
 <p>The Python runtime always calls <code class="docutils literal notranslate"><span class="pre">preprocess</span></code>. The Rust runtime uses the builder named in <code class="docutils literal notranslate"><span class="pre">meta</span></code>:</p>
 <dl class="simple">
 <dt><code class="docutils literal notranslate"><span class="pre">python</span></code></dt><dd><p>Calls <code class="docutils literal notranslate"><span class="pre">preprocess</span></code> for every request, holding the Python interpreter lock while it runs. Start here: it
