@@ -47,58 +47,21 @@ jobs:
       - name: test
         run: cargo test --release --locked
 
-  wheel:
-    name: wheel with the Rust extension
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install the CUDA compiler and runtime
-        run: .github/scripts/install-cuda-toolkit.sh 12-8
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Build the wheel
-        run: |
-          python -m pip install --upgrade pip build
-          python -m build --wheel --outdir dist .
-      - name: The wheel contains the extension
-        run: python -m zipfile -l dist/*.whl | grep -E "vox_serve/_rt\..*so"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: wheel
-          path: dist/*.whl
-          retention-days: 3
-      - name: The extension loads and parses the command line
-        env:
-          LD_LIBRARY_PATH: /usr/local/cuda-12.8/lib64
-        run: |
-          python -m venv /tmp/venv
-          /tmp/venv/bin/pip install --no-deps dist/*.whl
-          cd /tmp && /tmp/venv/bin/python - <<'PY'
-          from vox_serve import _rt
-
-          print("FlashInfer headers", _rt.FLASHINFER_VERSION)
-          _rt.parse_args(["vox-serve", "--model", "qwen3-tts", "--scheduler-type", "deadline", "--fuse-depth"])
-          try:
-              _rt.parse_args(["vox-serve", "--no-such-flag"])
-          except ValueError:
-              pass
-          else:
-              raise SystemExit("an unknown flag was accepted")
-          PY
+  # The wheel with the extension and the sdist, built as a release builds them (manylinux container,
+  # auditwheel); publish.yml uploads the same files.
+  dists:
+    name: release distributions
+    uses: ./.github/workflows/dists.yml
 
   prompt-parity:
     name: prompt builders, Rust vs Python
-    needs: wheel
+    needs: dists
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: wheel
+          name: dist
           path: dist
       - uses: actions/setup-python@v5
         with:

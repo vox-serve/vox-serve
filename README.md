@@ -42,9 +42,10 @@ vox-serve --model <model-name> --port <port-number>
 
 `vox-serve` serves with a Rust runtime (the `vox_serve._rt` extension) and uses the Python runtime, which
 runs the same model implementations, when the extension is unavailable or when only the Python runtime
-takes the arguments (e.g. `--async-scheduling`); `--runtime python` selects it explicitly. Building the
-extension from source needs a Rust toolchain and the CUDA compiler (`nvcc`); without them, `pip install`
-still succeeds and installs the Python runtime only. `vox-serve --help` lists the options; the
+takes the arguments (e.g. `--async-scheduling`); `--runtime python` selects it explicitly. The PyPI wheel
+for Linux x86_64 contains the extension. Elsewhere, and from source, `pip install` builds it, which needs a
+Rust toolchain and the CUDA compiler (`nvcc`); without them, `pip install` still succeeds and installs the
+Python runtime only. `vox-serve --help` lists the options; the
 [runtimes documentation](https://vox-serve.github.io/vox-serve/runtimes.html) compares the two runtimes.
 
 Send requests to the server:

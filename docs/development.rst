@@ -95,12 +95,22 @@ CI runs on CPU-only GitHub runners:
 
   - ``cargo fmt --check``, ``cargo clippy -D warnings`` and ``cargo test``, after installing the CUDA
     compiler and runtime libraries (``.github/scripts/install-cuda-toolkit.sh``; no GPU or driver needed);
-  - a wheel with the extension, installed in a clean environment, whose ``vox_serve._rt`` must load and
-    parse a command line;
+  - the release distributions (``dists.yml``, below), whose wheel is installed in a clean environment with
+    the CUDA runtime library from ``nvidia-cuda-runtime-cu12``; its ``vox_serve._rt`` must load and parse a
+    command line;
   - the prompt parity test against that wheel, with CPU-only PyTorch;
   - a wheel built without CUDA, which must not contain the extension and must fall back to the Python
     runtime.
 
+- ``.github/workflows/dists.yml``: the release distributions, built by
+  ``.github/scripts/build-dists.sh`` in a ``manylinux_2_28`` container: the sdist, and from it the wheel
+  with the extension, repaired by ``auditwheel`` (``--exclude libcudart.so.12``: a wheel must never bundle
+  the CUDA runtime, the extension shares the one PyTorch loads). The wheel is ``cp312-abi3``, one wheel for
+  every Python version from 3.12. Run it locally (Docker or Podman) with
+  ``docker run --rm -v "$PWD:/io" -w /io -e RUST_TOOLCHAIN=1.90.0 quay.io/pypa/manylinux_2_28_x86_64
+  .github/scripts/build-dists.sh dist``.
+- ``.github/workflows/publish.yml``: on a published GitHub release, builds the distributions with
+  ``dists.yml`` and uploads them to PyPI (trusted publishing).
 - ``.github/workflows/docs.yml``: builds and publishes this documentation (pushes to ``main``).
 
 There is no GPU test suite. Validate changes that touch the GPU path by serving with both runtimes:

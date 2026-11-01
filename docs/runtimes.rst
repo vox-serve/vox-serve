@@ -60,8 +60,12 @@ one runtime and never fall back, and an error after start-up never switches runt
 Installing the Rust runtime
 ---------------------------
 
-The extension ``vox_serve._rt`` is compiled by ``pip install`` from the ``rust/`` crate (setuptools-rust)
-when these are available:
+On Linux x86_64, ``pip install vox-serve`` installs a wheel that contains the extension ``vox_serve._rt``
+(manylinux_2_28, Python 3.12 or newer, built with CUDA 12.8 for the default architectures below). It loads
+the CUDA runtime library that PyTorch installs; nothing else is needed.
+
+Elsewhere, and from a source checkout, ``pip install`` compiles the extension from the ``rust/`` crate
+(setuptools-rust) when these are available:
 
 - a Rust toolchain (``cargo``; CI uses Rust 1.90, `rustup <https://rustup.rs>`_ installs it);
 - the CUDA 12 toolkit with ``nvcc``, found through ``CUDA_HOME`` (default ``/usr/local/cuda-12``).
