@@ -513,8 +513,9 @@ pip<span class="w"> </span>install<span class="w"> </span>-e<span class="w"> </s
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>-m<span class="w"> </span>vox_serve<span class="w"> </span>--model<span class="w"> </span>&lt;model-name&gt;<span class="w"> </span>--port<span class="w"> </span><span class="m">8000</span>
 </pre></div>
 </div>
-<p><code class="docutils literal notranslate"><span class="pre">vox-serve</span></code> serves with the Rust runtime when its extension was built at install time (this needs a Rust
-toolchain and the CUDA compiler <code class="docutils literal notranslate"><span class="pre">nvcc</span></code>), and with the Python runtime otherwise; see <a class="reference internal" href="runtimes.html"><span class="doc">Serving Runtimes</span></a>.</p>
+<p><code class="docutils literal notranslate"><span class="pre">vox-serve</span></code> serves with the Rust runtime when its extension is installed (the PyPI wheel for Linux x86_64
+contains it; other installs build it, which needs a Rust toolchain and the CUDA compiler <code class="docutils literal notranslate"><span class="pre">nvcc</span></code>), and with
+the Python runtime otherwise; see <a class="reference internal" href="runtimes.html"><span class="doc">Serving Runtimes</span></a>.</p>
 </section>
 <section id="send-a-request">
 <h2>Send a request<a class="headerlink" href="#send-a-request" title="Link to this heading">#</a></h2>

@@ -559,8 +559,11 @@ vox-serve<span class="w"> </span>--runtime<span class="w"> </span>python<span cl
 </section>
 <section id="installing-the-rust-runtime">
 <h2>Installing the Rust runtime<a class="headerlink" href="#installing-the-rust-runtime" title="Link to this heading">#</a></h2>
-<p>The extension <code class="docutils literal notranslate"><span class="pre">vox_serve._rt</span></code> is compiled by <code class="docutils literal notranslate"><span class="pre">pip</span> <span class="pre">install</span></code> from the <code class="docutils literal notranslate"><span class="pre">rust/</span></code> crate (setuptools-rust)
-when these are available:</p>
+<p>On Linux x86_64, <code class="docutils literal notranslate"><span class="pre">pip</span> <span class="pre">install</span> <span class="pre">vox-serve</span></code> installs a wheel that contains the extension <code class="docutils literal notranslate"><span class="pre">vox_serve._rt</span></code>
+(manylinux_2_28, Python 3.12 or newer, built with CUDA 12.8 for the default architectures below). It loads
+the CUDA runtime library that PyTorch installs; nothing else is needed.</p>
+<p>Elsewhere, and from a source checkout, <code class="docutils literal notranslate"><span class="pre">pip</span> <span class="pre">install</span></code> compiles the extension from the <code class="docutils literal notranslate"><span class="pre">rust/</span></code> crate
+(setuptools-rust) when these are available:</p>
 <ul class="simple">
 <li><p>a Rust toolchain (<code class="docutils literal notranslate"><span class="pre">cargo</span></code>; CI uses Rust 1.90, <a class="reference external" href="https://rustup.rs">rustup</a> installs it);</p></li>
 <li><p>the CUDA 12 toolkit with <code class="docutils literal notranslate"><span class="pre">nvcc</span></code>, found through <code class="docutils literal notranslate"><span class="pre">CUDA_HOME</span></code> (default <code class="docutils literal notranslate"><span class="pre">/usr/local/cuda-12</span></code>).</p></li>

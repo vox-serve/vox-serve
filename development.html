@@ -570,13 +570,23 @@ the fixes new <code class="docutils literal notranslate"><span class="pre">clipp
 <ul>
 <li><p><code class="docutils literal notranslate"><span class="pre">cargo</span> <span class="pre">fmt</span> <span class="pre">--check</span></code>, <code class="docutils literal notranslate"><span class="pre">cargo</span> <span class="pre">clippy</span> <span class="pre">-D</span> <span class="pre">warnings</span></code> and <code class="docutils literal notranslate"><span class="pre">cargo</span> <span class="pre">test</span></code>, after installing the CUDA
 compiler and runtime libraries (<code class="docutils literal notranslate"><span class="pre">.github/scripts/install-cuda-toolkit.sh</span></code>; no GPU or driver needed);</p></li>
-<li><p>a wheel with the extension, installed in a clean environment, whose <code class="docutils literal notranslate"><span class="pre">vox_serve._rt</span></code> must load and
-parse a command line;</p></li>
+<li><p>the release distributions (<code class="docutils literal notranslate"><span class="pre">dists.yml</span></code>, below), whose wheel is installed in a clean environment with
+the CUDA runtime library from <code class="docutils literal notranslate"><span class="pre">nvidia-cuda-runtime-cu12</span></code>; its <code class="docutils literal notranslate"><span class="pre">vox_serve._rt</span></code> must load and parse a
+command line;</p></li>
 <li><p>the prompt parity test against that wheel, with CPU-only PyTorch;</p></li>
 <li><p>a wheel built without CUDA, which must not contain the extension and must fall back to the Python
 runtime.</p></li>
 </ul>
 </li>
+<li><p><code class="docutils literal notranslate"><span class="pre">.github/workflows/dists.yml</span></code>: the release distributions, built by
+<code class="docutils literal notranslate"><span class="pre">.github/scripts/build-dists.sh</span></code> in a <code class="docutils literal notranslate"><span class="pre">manylinux_2_28</span></code> container: the sdist, and from it the wheel
+with the extension, repaired by <code class="docutils literal notranslate"><span class="pre">auditwheel</span></code> (<code class="docutils literal notranslate"><span class="pre">--exclude</span> <span class="pre">libcudart.so.12</span></code>: a wheel must never bundle
+the CUDA runtime, the extension shares the one PyTorch loads). The wheel is <code class="docutils literal notranslate"><span class="pre">cp312-abi3</span></code>, one wheel for
+every Python version from 3.12. Run it locally (Docker or Podman) with
+<code class="docutils literal notranslate"><span class="pre">docker</span> <span class="pre">run</span> <span class="pre">--rm</span> <span class="pre">-v</span> <span class="pre">&quot;$PWD:/io&quot;</span> <span class="pre">-w</span> <span class="pre">/io</span> <span class="pre">-e</span> <span class="pre">RUST_TOOLCHAIN=1.90.0</span> <span class="pre">quay.io/pypa/manylinux_2_28_x86_64</span>
+<span class="pre">.github/scripts/build-dists.sh</span> <span class="pre">dist</span></code>.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">.github/workflows/publish.yml</span></code>: on a published GitHub release, builds the distributions with
+<code class="docutils literal notranslate"><span class="pre">dists.yml</span></code> and uploads them to PyPI (trusted publishing).</p></li>
 <li><p><code class="docutils literal notranslate"><span class="pre">.github/workflows/docs.yml</span></code>: builds and publishes this documentation (pushes to <code class="docutils literal notranslate"><span class="pre">main</span></code>).</p></li>
 </ul>
 <p>There is no GPU test suite. Validate changes that touch the GPU path by serving with both runtimes:</p>
