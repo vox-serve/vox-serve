@@ -15,6 +15,7 @@ Text-to-Speech (TTS) Models
    chatterbox
    cosyvoice2
    qwen3-tts
+   xtts
 
 Speech-to-Speech (STS) Models
 -----------------------------

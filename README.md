@@ -19,6 +19,7 @@ VoxServe delivers low-latency, high-throughput inference for Speech Language Mod
 
 ## News
 
+- **[2026-11]** VoxServe v2 released, with a Rust serving runtime and spatial GPU splitting by urgency. Blog post: [VoxServe v2: Spatial GPU Splitting for Streaming Speech LMs](https://vox-serve.github.io/2026/11/01/voxserve-v2.html)
 - **[2026-02]** Blog post: [Light-Speed Qwen3-TTS Serving at Scale with VoxServe](https://vox-serve.github.io/2026/02/09/qwen3-tts-support.html)
 - **[2026-02]** Paper released: [VoxServe: A Streaming-Centric Serving System for Speech Language Models](https://arxiv.org/abs/2602.00269)
 
@@ -78,6 +79,7 @@ VoxServe supports the following TTS and STS models:
 | `voxtral-tts` | TTS | [Voxtral-4B-TTS](https://huggingface.co/mistralai/Voxtral-4B-TTS-2603) |
 | `cosyvoice3` | TTS | [Fun-CosyVoice3-0.5B](https://huggingface.co/FunAudioLLM/Fun-CosyVoice3-0.5B-2512) |
 | `higgs-tts` | TTS | [Higgs Audio v3 TTS](https://huggingface.co/bosonai/higgs-tts-3-4b) |
+| `xtts` | TTS | [XTTS-v2](https://huggingface.co/coqui/XTTS-v2) |
 | `step` | STS | [Step-Audio-2-Mini](https://huggingface.co/stepfun-ai/Step-Audio-2-mini) |
 
 See the [models documentation](https://vox-serve.github.io/vox-serve/models.html) for detailed information. More models coming soon.
