@@ -7,7 +7,7 @@ GLM-4-Voice-9B is a speech-to-speech (STS) model developed by Z.ai (Zhipu AI), c
 Start the server:
 
 ```bash
-python -m vox_serve.launch --model zai-org/glm-4-voice-9b --port 8000
+vox-serve --model zai-org/glm-4-voice-9b --port 8000
 ```
 
 ### Text-to-Speech
@@ -121,7 +121,7 @@ curl -X POST "http://localhost:8000/generate" \
 ## CLI Options
 
 ```bash
-python -m vox_serve.launch \
+vox-serve \
   --model zai-org/glm-4-voice-9b \
   --port 8000 \
   --temperature 0.7 \

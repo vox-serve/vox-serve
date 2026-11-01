@@ -197,12 +197,16 @@ impl Qwen3Tts {
 
     /// Runs the `encode_voice` hook and commits the speaker embedding to a feature-pool row.
     fn encode_voice(&self, input: &GenerateInput, streaming: bool) -> Result<Voice> {
-        let x_vector_only = input.model_kwargs.get("x_vector_only_mode").and_then(Value::as_bool).unwrap_or(false);
+        let mut x_vector_only = input.model_kwargs.get("x_vector_only_mode").and_then(Value::as_bool).unwrap_or(false);
         if streaming && !x_vector_only {
-            bail!(
-                "Input streaming is not supported with ICL mode (voice cloning with reference audio). \
-                 Please use x_vector_only_mode=True or disable input streaming."
-            );
+            // ICL rows need the whole text before the reference codes, which input streaming does not have.
+            if input.audio_path.is_some() {
+                bail!(
+                    "Input streaming is not supported with ICL mode (voice cloning with reference audio). \
+                     Please use x_vector_only_mode=True or disable input streaming."
+                );
+            }
+            x_vector_only = true; // no reference audio: the default voice's speaker embedding
         }
         let r = self.hooks.call(
             "encode_voice",

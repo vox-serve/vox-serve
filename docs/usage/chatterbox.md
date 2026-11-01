@@ -7,7 +7,7 @@ Chatterbox is a text-to-speech model developed by Resemble AI, featuring a 0.5B 
 Start the server:
 
 ```bash
-python -m vox_serve.launch --model ResembleAI/chatterbox --port 8000
+vox-serve --model ResembleAI/chatterbox --port 8000
 ```
 
 Generate speech:
@@ -69,7 +69,7 @@ curl -X POST "http://localhost:8000/generate" \
 ## CLI Options
 
 ```bash
-python -m vox_serve.launch \
+vox-serve \
   --model ResembleAI/chatterbox \
   --port 8000 \
   --temperature 0.7 \

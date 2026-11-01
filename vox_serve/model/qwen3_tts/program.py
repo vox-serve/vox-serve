@@ -437,10 +437,13 @@ class Qwen3TTSProgram(LMProgram):
         """Runs ``hook_encode_voice`` and commits the speaker embedding to a feature-pool row."""
         x_vector_only = kwargs.get("x_vector_only_mode") is True
         if streaming and not x_vector_only:
-            raise ValueError(
-                "Input streaming is not supported with ICL mode (voice cloning with reference audio). "
-                "Please use x_vector_only_mode=True or disable input streaming."
-            )
+            # ICL rows need the whole text before the reference codes, which input streaming does not have.
+            if audio_path is not None:
+                raise ValueError(
+                    "Input streaming is not supported with ICL mode (voice cloning with reference audio). "
+                    "Please use x_vector_only_mode=True or disable input streaming."
+                )
+            x_vector_only = True  # no reference audio: the default voice's speaker embedding
         ref_text = kwargs.get("ref_text")
         r = self.hook_encode_voice(audio_path, ref_text if isinstance(ref_text, str) else None, x_vector_only)
         try:
