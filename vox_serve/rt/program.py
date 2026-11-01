@@ -42,6 +42,13 @@ def _pow2_up_to(n: int) -> List[int]:
     return sizes
 
 
+def pcm16(audio: torch.Tensor) -> torch.Tensor:
+    """Float audio to int16 PCM. Samples outside [-1, 1] saturate: a bare ``.to(torch.int16)`` wraps
+    them around (1.05 becomes -31131), turning a slight decoder overshoot into a full-scale click.
+    In range, the cast truncates toward zero like numpy's ``(x * 32767).astype(np.int16)``."""
+    return (audio.float().clamp(-1, 1) * 32767).to(torch.int16)
+
+
 class Program:
     def __init__(self, config: Dict[str, Any], device: torch.device):
         self.config = config
@@ -441,8 +448,7 @@ class LMProgram(Program):
 
     def detok_step(self, arena: Arena, out: Arena, bd: int, lane: int = 0) -> None:
         audio = self.detokenize(arena["dt_tok"][:bd].long()).reshape(bd, self.detok_samples)
-        # Truncation toward zero, matching numpy's (x * 32767).astype(np.int16).
-        out["audio"][:bd].copy_((audio.float() * 32767).to(torch.int16))
+        out["audio"][:bd].copy_(pcm16(audio))
 
     def fuse_lm_modules(self) -> List[torch.nn.Module]:
         """LM modules whose sibling q/k/v and gate/up projections ``--fuse-lm`` merges into single

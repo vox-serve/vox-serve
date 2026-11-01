@@ -8,6 +8,7 @@ from scheduler_sim import FakeWorker, SchedulerHarness
 
 from vox_serve.requests import Request
 from vox_serve.scheduler import OfflineScheduler, OnlineScheduler, Scheduler
+from vox_serve.worker.program_worker import final_chunk
 
 POLICIES = {"base": Scheduler, "online": OnlineScheduler, "offline": OfflineScheduler}
 
@@ -23,6 +24,12 @@ WORKLOADS = {
     "overlap": ({"interval": 4, "overlap": 1}, [(True, n) for n in (3, 4, 5, 7, 10)] + [(False, 8)]),
     # A request whose prompt fails completes without audio; the others are unaffected.
     "failed_prompt": ({}, [(False, 8), (True, 8, True), (True, 5), (False, 0)]),
+    # A codec that holds look-ahead frames back for the next chunk (dt_last: Higgs Audio v3, CosyVoice3):
+    # every length up to a few chunks, so the last window sometimes reaches the end a chunk early.
+    "look_ahead": (
+        {"interval": 6, "overlap": 2, "holds_back": True, "detok_slots": 4},
+        [(True, n) for n in range(1, 14)] + [(False, n) for n in range(5, 14, 2)],
+    ),
 }
 
 
@@ -58,11 +65,16 @@ def test_every_request_completes_with_all_its_audio(policy, async_scheduling, wo
         # may arrive twice where chunks overlap.)
         frames = h.frames_received(rid)
         assert frames == sorted(frames) and set(frames) == set(range(c.frames)), (rid, frames)
-        # Chunks start one detokenize step apart from frame 0, and the last one reaches the final frame.
-        step = worker.detokenize_interval - worker.detokenize_overlap
+        # Chunks start one detokenize step apart from frame 0, and only the last one is final (reaches
+        # the last frame; with look-ahead, no chunk follows it).
+        iv = worker.detokenize_interval
+        step = iv - worker.detokenize_overlap
         starts = worker.decoded[rid]
         assert starts == list(range(0, step * len(starts), step)), (rid, starts)
-        assert not c.frames or starts[-1] + worker.detokenize_interval >= c.frames, (rid, starts)
+        final = [final_chunk(True, start, c.frames, iv, step, worker.holds_back) for start in starts]
+        assert not c.frames or final[-1], (rid, starts)
+        if worker.holds_back:
+            assert not any(final[:-1]), (rid, starts)
     assert worker.all_slots_free()
 
 

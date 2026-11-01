@@ -9,12 +9,16 @@
 - the LM slot is held from prefill to the last token, the codec state slot until ``free_kv_cache``;
 - a step's tokens are applied when its coroutine is collected (``--async-scheduling`` launches the next
   step first, and rows of requests that finished meanwhile are ignored);
-- ``done_all`` is set by ``run_detokenize`` once the chunk covering the last frame has been decoded.
+- ``done_all`` is set by ``run_detokenize`` once the request's last chunk (``final_chunk``) has been
+  decoded.
 
 Each request generates ``model_kwargs["frames"]`` audio frames and then stops. Its prompt fails, as a
 program's ``preprocess`` rejects bad input, with ``model_kwargs["fail"]``, with audio input or with a
 voice other than "tara" (``prompt_error``). A decoded chunk emits ``samples_per_frame`` int16 samples per
 frame, each equal to the frame index, so a client can check that it received every frame once and in order.
+With ``holds_back``, the codec works like those that take ``dt_last`` (Higgs Audio v3, CosyVoice3): a chunk
+emits a frame only once the ``overlap`` frames after it exist, the next chunk continues where it stopped,
+and only the last chunk emits the frames at the end.
 """
 
 import asyncio
@@ -29,6 +33,8 @@ from typing import Dict, List, Optional
 import numpy as np
 import zmq
 
+from vox_serve.worker.program_worker import final_chunk
+
 
 class FakeWorker:
     def __init__(
@@ -38,6 +44,7 @@ class FakeWorker:
         interval: int = 4,
         overlap: int = 0,
         samples_per_frame: int = 24,
+        holds_back: bool = False,
     ):
         self.max_batch_size = max_batch_size
         self.free_slots = list(range(max_batch_size))
@@ -46,6 +53,8 @@ class FakeWorker:
         self._interval = interval
         self._overlap = overlap
         self.samples_per_frame = samples_per_frame
+        self.holds_back = holds_back
+        self.emitted: Dict[str, int] = defaultdict(int)  # holds_back: frames emitted so far
         self.decoded: Dict[str, List[int]] = defaultdict(list)  # chunk starts per request, in decode order
         self.errors: List[str] = []
 
@@ -162,18 +171,25 @@ class FakeWorker:
             for start in req.audio_decode_idx:
                 if start >= n:
                     continue
-                last = req.done_lm_generation and start + iv >= n
-                if not last and start + iv > n:
+                if not req.done_lm_generation and start + iv > n:
                     self.errors.append(f"{req.request_id}: chunk {start} decoded before its {iv} frames exist")
                 if start in self.decoded[req.request_id]:
                     self.errors.append(f"{req.request_id}: chunk {start} decoded twice")
                 self.decoded[req.request_id].append(start)
-                end = n if last else start + step
-                samples = np.repeat(np.arange(start, end, dtype=np.int16), self.samples_per_frame)
+                last = final_chunk(req.done_lm_generation, start, n, iv, step, self.holds_back)
+                if self.holds_back:  # (dt_last = last)
+                    begin = self.emitted[req.request_id]
+                    end = n if last else max(min(start + step, n - self._overlap), begin)
+                    self.emitted[req.request_id] = end
+                else:
+                    begin, end = start, (n if last else start + step)
+                samples = np.repeat(np.arange(begin, end, dtype=np.int16), self.samples_per_frame)
                 req.output_audio.put(samples.tobytes())
         for req in requests:
             n = len(req.lm_output_audio_tokens)
-            if req.done_lm_generation and (not req.audio_decode_idx or req.audio_decode_idx[-1] + iv >= n):
+            if req.done_lm_generation and (
+                not req.audio_decode_idx or final_chunk(True, req.audio_decode_idx[-1], n, iv, step, self.holds_back)
+            ):
                 req.done_all = True
 
     # ---- request resources

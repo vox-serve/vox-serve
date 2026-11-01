@@ -35,7 +35,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from ...rt.core import Arena, EngineSpecBuilder, RtAttention
-from ...rt.program import TOKEN_AUDIO, TOKEN_STOP, LMProgram
+from ...rt.program import TOKEN_AUDIO, TOKEN_STOP, LMProgram, pcm16
 from ...rt.prompt import Prompt
 from ...tokenizer.higgs import CODEBOOK_SIZE, HOP, SAMPLE_RATE, HiggsAudioTokenizer
 from ...utils import get_logger
@@ -285,7 +285,9 @@ class HiggsTTSProgram(LMProgram):
             lanes.append((builder.du_inputs, max(self._urgent_sizes())))
         for dinp, nb in lanes:
             dinp.add("dt_len", (nb,), torch.int32)  # valid rows of the window
-            dinp.add("dt_last", (nb,), torch.int32)  # unused (the window length already says it)
+            # Unused here (the window length says it), but declaring it makes the runtimes finish a request
+            # only after its last chunk, which emits the frames earlier chunks kept as look-ahead.
+            dinp.add("dt_last", (nb,), torch.int32)
 
     def allocate_state(self) -> None:
         super().allocate_state()
@@ -329,10 +331,8 @@ class HiggsTTSProgram(LMProgram):
         j = torch.arange(CORE * HOP, device=dd)
         pcm = wav.gather(1, (e0[:, None] * HOP + j).clamp(max=WINDOW * HOP - 1))
         n = (e1 - e0) * HOP
-        pcm = pcm.clamp(-1, 1) * (j < n[:, None])
         audio = out["audio"][:bd]
-        # Truncation toward zero, matching numpy's (x * 32767).astype(np.int16).
-        audio[:, :-1].copy_((pcm * 32767).to(torch.int16))
+        audio[:, :-1].copy_(pcm16(pcm * (j < n[:, None])))
         audio[:, -1].copy_(n.to(torch.int16))
 
     # ---- meta -------------------------------------------------------------------------------------

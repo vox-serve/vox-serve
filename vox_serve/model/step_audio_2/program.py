@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import torch
 
 from ...rt.core import Arena, RtAttention
-from ...rt.program import LMProgram
+from ...rt.program import LMProgram, pcm16
 from ...rt.prompt import Prompt
 from ...tokenizer.step_audio_2 import StepAudio2DecoderCache
 from .model import StepAudio2Model
@@ -91,7 +91,7 @@ class StepAudio2Program(LMProgram):
             s.index_copy_(0, slots, n.to(s.dtype))
         if audio.shape[-1] != self.detok_samples:
             raise RuntimeError(f"Step-Audio-2 chunk has {audio.shape[-1]} samples, expected {self.detok_samples}")
-        out["audio"][:bd].copy_((audio.reshape(bd, -1).float() * 32767).to(torch.int16))
+        out["audio"][:bd].copy_(pcm16(audio.reshape(bd, -1)))
 
     def hook_encode_audio(self, path: str) -> Dict[str, Any]:
         """Full prompt for an audio-input request plus its encoded features (staged on device)."""
