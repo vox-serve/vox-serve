@@ -130,14 +130,14 @@ pub struct Args {
     #[arg(long)]
     fuse_talker: bool,
     /// Merge sibling q/k/v and gate/up projections of the LM into single GEMMs (Orpheus, CSM,
-    /// CosyVoice2, Chatterbox, Step-Audio-2, Voxtral).
+    /// CosyVoice2, Chatterbox, Step-Audio-2, Voxtral, Higgs Audio v2).
     #[arg(long)]
     fuse_lm: bool,
     /// Run the LM's decoder layers with merged GEMMs and fused add+RMSNorm, q/k-norm+RoPE+KV-write and
     /// SiLU-and-mul kernels (Higgs Audio v3, CosyVoice3).
     #[arg(long)]
     fuse_layers: bool,
-    /// Fused codec kernels: Snake + conv bias + residual adds (Higgs Audio v3 DAC, CosyVoice3 HiFT),
+    /// Fused codec kernels: Snake + conv bias + residual adds (Higgs Audio v2 / v3 DAC, CosyVoice3 HiFT),
     /// fused output conv (Higgs), one-launch history-ring writes and GELU GEMM epilogue (CosyVoice3).
     #[arg(long)]
     fuse_codec: bool,

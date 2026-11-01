@@ -1,7 +1,8 @@
-"""Higgs Audio v2 tokenizer, the codec of Higgs Audio v3 TTS: 8 residual codebooks of 1024 codes at
-25 Hz, 24 kHz mono audio. Port of transformers' ``HiggsAudioV2TokenizerModel`` (Apache 2.0, Boson AI
-and the HuggingFace team), assembled from the transformers 4.x DAC and HuBERT modules. The weights are
-bundled in the TTS checkpoint under ``tied.embedding.modality_embeddings.0.model.``.
+"""Higgs Audio v2 tokenizer, the codec of Higgs Audio v2 generation and Higgs Audio v3 TTS: 8 residual
+codebooks of 1024 codes at 25 Hz, 24 kHz mono audio. Port of transformers' ``HiggsAudioV2TokenizerModel``
+(Apache 2.0, Boson AI and the HuggingFace team), assembled from the transformers 4.x DAC and HuBERT
+modules. The weights are bundled in the v3 TTS checkpoint under ``tied.embedding.modality_embeddings.0.model.``
+and stand alone (same names, no prefix) in ``bosonai/higgs-audio-v2-tokenizer``.
 
 * decode: per codebook ``project_out(embed[code])``, summed -> ``fc2`` -> DAC decoder (x960
   upsampling; every transposed conv uses ``output_padding = stride % 2`` and the final tanh is
@@ -161,7 +162,7 @@ def _conv_out_len(module: nn.Module, n: int) -> int:
 
 
 class HiggsAudioTokenizer(nn.Module):
-    """The codec. Call ``from_checkpoint`` with the Higgs TTS checkpoint directory."""
+    """The codec. Call ``from_checkpoint`` with the Higgs TTS checkpoint directory (or the tokenizer repo)."""
 
     def __init__(self, with_encoder: bool = True):
         super().__init__()
@@ -186,7 +187,9 @@ class HiggsAudioTokenizer(nn.Module):
         self.fused_decode: Optional[Callable] = None
 
     @classmethod
-    def from_checkpoint(cls, model_dir: str, with_encoder: bool = True) -> "HiggsAudioTokenizer":
+    def from_checkpoint(cls, model_dir: str, with_encoder: bool = True, prefix: str = PREFIX) -> "HiggsAudioTokenizer":
+        """``prefix``: where the codec sits in ``model.safetensors`` (the Higgs TTS checkpoint bundles it;
+        ``""`` for the standalone ``bosonai/higgs-audio-v2-tokenizer`` repo, which uses the same names)."""
         from safetensors import safe_open
 
         codec = cls(with_encoder=with_encoder)
@@ -194,8 +197,8 @@ class HiggsAudioTokenizer(nn.Module):
         state = {}
         with safe_open(os.path.join(model_dir, "model.safetensors"), framework="pt") as f:
             for name in f.keys():
-                if name.startswith(PREFIX):
-                    key = name[len(PREFIX) :]
+                if name.startswith(prefix):
+                    key = name[len(prefix) :]
                     if key in own:
                         state[key] = f.get_tensor(name).float()
         missing = set(own) - set(state) - {"code_table"}
