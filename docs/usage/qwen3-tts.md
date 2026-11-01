@@ -68,3 +68,5 @@ vox-serve --model Qwen/Qwen3-TTS-12Hz-1.7B-Base --port 8000 --scheduler-type inp
 ```
 
 And see the example client script [here](https://github.com/vox-serve/vox-serve/tree/main/examples/input_streaming).
+
+With input streaming, the Base model clones a voice from its speaker embedding only, because in-context learning needs the whole text up front: without reference audio it uses the default voice, and a request with reference audio must set `x_vector_only_mode` to true.
