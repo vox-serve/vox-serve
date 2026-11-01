@@ -207,7 +207,10 @@ same length. ``model_kwargs`` holds the request's model-specific options (``voic
 ``language``, ``ref_text``, ``instruct``, ``x_vector_only_mode``); a new option has to be added to both
 servers' ``/generate`` form handling (``vox_serve/launch.py`` and ``rust/src/server.rs``). Raise
 ``ValueError`` for unsupported input, such as audio for a model without audio input: the request then fails
-with that message.
+with that message. Never wait in ``preprocess`` for a resource that running requests release (a voice
+slot, feature-pool rows): the Python runtime builds prompts on its scheduler thread, the thread that
+releases them. Raise ``ResourceBusyError`` (``vox_serve/rt/prompt.py``) instead; the request then stays
+queued and its prompt is built again on a later step.
 
 The Python runtime always calls ``preprocess``. The Rust runtime uses the builder named in ``meta``:
 
