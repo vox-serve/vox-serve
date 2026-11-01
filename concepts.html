@@ -470,6 +470,7 @@
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#overview">Overview</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#motivation">Motivation</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#innovation">Innovation</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#spatial-gpu-splitting-v2">Spatial GPU Splitting (v2)</a></li>
 </ul>
             </nav>
         </div>
@@ -487,7 +488,7 @@
 <h2>Overview<a class="headerlink" href="#overview" title="Link to this heading">#</a></h2>
 <p>VoxServe is a <strong>streaming-centric serving system</strong> designed to efficiently deploy modern <strong>Speech Language Models (SpeechLMs)</strong>. Unlike traditional LLM serving systems, VoxServe explicitly targets the requirements of <strong>real-time speech generation</strong>, where latency, sustained streaming, and heterogeneous multi-stage pipelines are first-class concerns.</p>
 <p>The key contribution of VoxServe is a <strong>unified execution abstraction</strong> that decouples <em>model architecture</em> from <em>system-level optimizations</em>. This allows a single serving framework to support a wide variety of SpeechLM designs while applying consistent batching, scheduling, and GPU optimizations.</p>
-<p>In this page, we will briefly explain the core concepts of VoxServe. For more details, see our <a class="reference external" href="https://arxiv.org/abs/9999.9999">paper</a>.</p>
+<p>In this page, we will briefly explain the core concepts of VoxServe. For more details, see our <a class="reference external" href="https://arxiv.org/abs/2602.00269">paper</a>.</p>
 </section>
 <section id="motivation">
 <h2>Motivation<a class="headerlink" href="#motivation" title="Link to this heading">#</a></h2>
@@ -501,6 +502,17 @@
 <p>Because the serving system interacts with all models through the same interface, VoxServe can apply optimizations uniformly. These include batching requests across models, running detokenization in fixed-size chunks suitable for streaming, managing per-request caches, and using GPU execution techniques like CUDA graphs to reduce overhead.</p>
 <p>On top of this abstraction, VoxServe introduces a scheduling strategy designed specifically for streaming speech. Requests are treated differently before the first audio chunk is produced than after streaming has started. New requests are prioritized to minimize time to first audio, while ongoing streams are scheduled based on how close they are to missing their playback deadlines. This takes advantage of the fact that once streaming is stable, some short delays are harmless as long as audio arrives in time.</p>
 <p>The system also uses an asynchronous pipeline that overlaps GPU computation with CPU-side work such as sampling and bookkeeping. This reduces idle time and improves overall hardware utilization without complicating the model implementations.</p>
+</section>
+<section id="spatial-gpu-splitting-v2">
+<h2>Spatial GPU Splitting (v2)<a class="headerlink" href="#spatial-gpu-splitting-v2" title="Link to this heading">#</a></h2>
+<p>VoxServe v2 assigns GPU resources by the urgency of audio work. Speech models are small next to the GPUs they run on, so the LLM backbone keeps nearly its full speed on most of the GPU’s streaming multiprocessors (SMs), and the codec can run beside it on the rest. A small partition slows the codec down, though, and not every audio chunk can afford that: a request’s first chunk decides its time to first audio, while a later chunk has slack until the audio before it has finished playing.</p>
+<p>The Rust runtime therefore drives three asynchronous lanes on each GPU:</p>
+<ul class="simple">
+<li><p>the <strong>LM lane</strong> runs backbone steps on a large SM partition;</p></li>
+<li><p>the <strong>background codec lane</strong> batches continuation chunks on a small partition beside it, and launches a batch once enough chunks are ready or the earliest playback deadline approaches;</p></li>
+<li><p>the <strong>urgent lane</strong> runs first chunks, and chunks close to their playback deadline, on the whole GPU at high priority.</p></li>
+</ul>
+<p>New requests are admitted by deadline as well: a prefill is briefly deferred when it would make a running stream miss its playback deadline. The <a class="reference external" href="https://vox-serve.github.io/2026/11/01/voxserve-v2.html">v2 blog post</a> explains the design and its main results, and <a class="reference internal" href="runtimes.html"><span class="doc">Serving Runtimes</span></a> lists the flags that enable it (<code class="docutils literal notranslate"><span class="pre">--sm-modes</span></code>, <code class="docutils literal notranslate"><span class="pre">--urgent-lane</span></code>, <code class="docutils literal notranslate"><span class="pre">--scheduler-type</span> <span class="pre">deadline</span></code>, …).</p>
 </section>
 </section>
 
@@ -554,6 +566,7 @@
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#overview">Overview</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#motivation">Motivation</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#innovation">Innovation</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#spatial-gpu-splitting-v2">Spatial GPU Splitting (v2)</a></li>
 </ul>
   </nav></div>
 
