@@ -143,6 +143,8 @@ class Scheduler:
 
         # Prepare LM inputs outside the worker and run either prefill or decode
         lm_inputs = self.model_worker.prepare_lm_inputs(lm_requests, detokenize_requests)
+        for message in self._accepted_messages(lm_requests):
+            self.result_socket.send(message)
 
         # run detokenization if needed
         self.model_worker.run_detokenize(detokenize_requests)
@@ -170,6 +172,8 @@ class Scheduler:
 
         # Prepare LM inputs outside the worker and run either prefill or decode
         lm_inputs = self.model_worker.prepare_lm_inputs(lm_requests, detokenize_requests)
+        for message in self._accepted_messages(lm_requests):
+            await self.result_socket.send(message)
 
         async def run_model():
             # run detokenization if needed
@@ -321,6 +325,16 @@ class Scheduler:
                 detokenize_requests.append(req)
 
         return detokenize_requests
+
+    def _accepted_messages(self, lm_requests) -> List[bytes]:
+        """``request_id|ACCEPTED|`` for each request whose prompt the worker has just built: the API server
+        starts a streaming response only then, so that a request whose prompt fails gets an error status."""
+        messages = []
+        for req in lm_requests:
+            if not req.accepted_sent and req.input_length is not None and not req.done_lm_generation:
+                req.accepted_sent = True
+                messages.append(req.request_id.encode("utf-8") + b"|ACCEPTED|")
+        return messages
 
     def _send_responses(self, detokenize_requests):
         """
