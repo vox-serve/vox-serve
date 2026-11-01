@@ -492,7 +492,7 @@ also have a Rust prompt builder (<code class="docutils literal notranslate"><spa
 <td><p></p></td>
 </tr>
 <tr class="row-even"><td><p><code class="xref py py-obj docutils literal notranslate"><span class="pre">FeaturePool</span></code>(rows)</p></td>
-<td><p>Allocator of the program's device feature-pool rows (<code class="docutils literal notranslate"><span class="pre">LMProgram.feature_pool</span></code>): a request's prompt features occupy a contiguous range from preprocessing until its prefill has run.</p></td>
+<td><p>Allocator of the program's device feature-pool rows (<code class="docutils literal notranslate"><span class="pre">LMProgram.feature_pool</span></code>) for prompts built in Python: a request's prompt features occupy a contiguous range from preprocessing until its prefill has run.</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="xref py py-obj docutils literal notranslate"><span class="pre">ModelSpec</span></code>(n_codebooks, max_tokens, sampling)</p></td>
 <td><p>The constants of a program's <code class="docutils literal notranslate"><span class="pre">meta</span></code> that scheduling needs (the Rust runtime's <code class="docutils literal notranslate"><span class="pre">Model</span></code>).</p></td>
@@ -502,6 +502,15 @@ also have a Rust prompt builder (<code class="docutils literal notranslate"><spa
 </tr>
 <tr class="row-odd"><td><p><code class="xref py py-obj docutils literal notranslate"><span class="pre">SamplingParams</span></code>([temperature, top_k, top_p, ...])</p></td>
 <td><p></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p class="rubric">Exceptions</p>
+<div class="pst-scrollable-table-container"><table class="autosummary longtable table">
+<tbody>
+<tr class="row-odd"><td><p><code class="xref py py-obj docutils literal notranslate"><span class="pre">ResourceBusyError</span></code></p></td>
+<td><p>A resource a prompt needs (a voice slot, feature-pool rows) is held by other requests right now.</p></td>
 </tr>
 </tbody>
 </table>

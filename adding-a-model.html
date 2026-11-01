@@ -809,7 +809,10 @@ same length. <code class="docutils literal notranslate"><span class="pre">model_
 <code class="docutils literal notranslate"><span class="pre">language</span></code>, <code class="docutils literal notranslate"><span class="pre">ref_text</span></code>, <code class="docutils literal notranslate"><span class="pre">instruct</span></code>, <code class="docutils literal notranslate"><span class="pre">x_vector_only_mode</span></code>); a new option has to be added to both
 servers’ <code class="docutils literal notranslate"><span class="pre">/generate</span></code> form handling (<code class="docutils literal notranslate"><span class="pre">vox_serve/launch.py</span></code> and <code class="docutils literal notranslate"><span class="pre">rust/src/server.rs</span></code>). Raise
 <code class="docutils literal notranslate"><span class="pre">ValueError</span></code> for unsupported input, such as audio for a model without audio input: the request then fails
-with a 400 response carrying that message.</p>
+with a 400 response carrying that message. Never wait in <code class="docutils literal notranslate"><span class="pre">preprocess</span></code> for a resource that running
+requests release (a voice slot, feature-pool rows): the Python runtime builds prompts on its scheduler
+thread, the thread that releases them. Raise <code class="docutils literal notranslate"><span class="pre">ResourceBusyError</span></code> (<code class="docutils literal notranslate"><span class="pre">vox_serve/rt/prompt.py</span></code>) instead;
+the request then stays queued and its prompt is built again on a later step.</p>
 <p>The Python runtime always calls <code class="docutils literal notranslate"><span class="pre">preprocess</span></code>. The Rust runtime uses the builder named in <code class="docutils literal notranslate"><span class="pre">meta</span></code>:</p>
 <dl class="simple">
 <dt><code class="docutils literal notranslate"><span class="pre">python</span></code></dt><dd><p>Calls <code class="docutils literal notranslate"><span class="pre">preprocess</span></code> for every request, holding the Python interpreter lock while it runs. Start here: it

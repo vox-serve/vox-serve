@@ -22,3 +22,9 @@ vox\_serve.rt.prompt
       Prompt
       SamplingParams
    
+   .. rubric:: Exceptions
+
+   .. autosummary::
+   
+      ResourceBusyError
+   
