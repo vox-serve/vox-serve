@@ -19,6 +19,7 @@ VoxServe delivers low-latency, high-throughput inference for Speech Language Mod
 
 ## News
 
+- **[2026-11]** VoxServe v2 released, with a Rust serving runtime and spatial GPU splitting by urgency. Blog post: [VoxServe v2: Spatial GPU Splitting for Streaming Speech LMs](https://vox-serve.github.io/2026/11/01/voxserve-v2.html)
 - **[2026-02]** Blog post: [Light-Speed Qwen3-TTS Serving at Scale with VoxServe](https://vox-serve.github.io/2026/02/09/qwen3-tts-support.html)
 - **[2026-02]** Paper released: [VoxServe: A Streaming-Centric Serving System for Speech Language Models](https://arxiv.org/abs/2602.00269)
 

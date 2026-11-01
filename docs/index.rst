@@ -16,6 +16,9 @@ VoxServe Documentation
 VoxServe is a streaming-centric serving system for Speech Language Models (SpeechLMs), supporting both
 text-to-speech (TTS) and speech-to-speech (STS) workloads.
 
+VoxServe v2 serves models with a Rust runtime and splits the GPU spatially by the urgency of audio work
+(:doc:`concepts`); read the `release blog post <https://vox-serve.github.io/2026/11/01/voxserve-v2.html>`_.
+
 .. toctree::
    :maxdepth: 2
    :caption: Getting Started
