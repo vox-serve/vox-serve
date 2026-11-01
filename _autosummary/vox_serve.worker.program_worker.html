@@ -475,6 +475,15 @@ and turns their outputs back into request state, as the Rust runtime does for it
 <p>LM steps feed sampled tokens back on the device (rows with <code class="docutils literal notranslate"><span class="pre">fb</span> <span class="pre">=</span> <span class="pre">1</span></code> read the request slot’s last
 token), so a step can be launched before the previous step’s results have reached the CPU; with
 <code class="docutils literal notranslate"><span class="pre">--async-scheduling</span></code> they are collected one step later by the coroutine <code class="docutils literal notranslate"><span class="pre">run_lm_*</span></code> returns.</p>
+<p class="rubric">Functions</p>
+<div class="pst-scrollable-table-container"><table class="autosummary longtable table">
+<tbody>
+<tr class="row-odd"><td><p><code class="xref py py-obj docutils literal notranslate"><span class="pre">final_chunk</span></code>(done_lm, start, n_frames, ...)</p></td>
+<td><p>Whether the codec chunk at frame <code class="docutils literal notranslate"><span class="pre">start</span></code> is the last one of a request with <code class="docutils literal notranslate"><span class="pre">n_frames</span></code> audio frames: its tokens are all generated (<code class="docutils literal notranslate"><span class="pre">done_lm</span></code>) and the chunk emits the rest of its audio.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
 <p class="rubric">Classes</p>
 <div class="pst-scrollable-table-container"><table class="autosummary longtable table">
 <tbody>

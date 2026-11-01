@@ -717,20 +717,26 @@ others come from <code class="docutils literal notranslate"><span class="pre">de
 <td><p>The codec keeps per-request state across chunks; <code class="docutils literal notranslate"><span class="pre">arena[&quot;dt_slot&quot;]</span></code> / <code class="docutils literal notranslate"><span class="pre">arena[&quot;dt_reset&quot;]</span></code> index
 and reset it.</p></td>
 </tr>
-<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">feature_pool_rows</span></code>, <code class="docutils literal notranslate"><span class="pre">feature_dim</span></code></p></td>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">detok_step</span></code> + <code class="docutils literal notranslate"><span class="pre">dt_len</span></code> / <code class="docutils literal notranslate"><span class="pre">dt_last</span></code> detok inputs (<code class="docutils literal notranslate"><span class="pre">declare</span></code>)</p></td>
+<td><p>Chunks with look-ahead (<code class="docutils literal notranslate"><span class="pre">cosyvoice3</span></code>, <code class="docutils literal notranslate"><span class="pre">higgs_tts</span></code>): <code class="docutils literal notranslate"><span class="pre">arena[&quot;dt_len&quot;]</span></code> is the number of valid
+frames in the window and <code class="docutils literal notranslate"><span class="pre">arena[&quot;dt_last&quot;]</span></code> is 1 on a request’s last chunk, the one no other chunk
+follows. A chunk may then hold audio back for the next one: the runtimes finish a request only after
+its last chunk has been decoded.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">feature_pool_rows</span></code>, <code class="docutils literal notranslate"><span class="pre">feature_dim</span></code></p></td>
 <td><p>Audio input: encoded audio rows that prompts reference through the input mask (<code class="docutils literal notranslate"><span class="pre">step_audio_2</span></code>).</p></td>
 </tr>
-<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">tokenize_stream_text</span></code>, <code class="docutils literal notranslate"><span class="pre">preprocess_streaming</span></code> + <code class="docutils literal notranslate"><span class="pre">meta[&quot;text_stream&quot;]</span></code></p></td>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">tokenize_stream_text</span></code>, <code class="docutils literal notranslate"><span class="pre">preprocess_streaming</span></code> + <code class="docutils literal notranslate"><span class="pre">meta[&quot;text_stream&quot;]</span></code></p></td>
 <td><p>Input streaming: text arriving while audio is generated (<code class="docutils literal notranslate"><span class="pre">qwen3_tts</span></code>).</p></td>
 </tr>
-<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">supports_urgent_lane</span> <span class="pre">=</span> <span class="pre">True</span></code></p></td>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">supports_urgent_lane</span> <span class="pre">=</span> <span class="pre">True</span></code></p></td>
 <td><p>The codec can run on a second lane at the same time (no shared scratch state between calls).</p></td>
 </tr>
-<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">decode_head</span></code> / <code class="docutils literal notranslate"><span class="pre">decode_depth</span></code> (<code class="docutils literal notranslate"><span class="pre">supports_depth_split</span></code>), <code class="docutils literal notranslate"><span class="pre">backbone_range</span></code>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">decode_head</span></code> / <code class="docutils literal notranslate"><span class="pre">decode_depth</span></code> (<code class="docutils literal notranslate"><span class="pre">supports_depth_split</span></code>), <code class="docutils literal notranslate"><span class="pre">backbone_range</span></code>
 (<code class="docutils literal notranslate"><span class="pre">supports_layer_split</span></code>)</p></td>
 <td><p>The LM step can be captured in segments (<code class="docutils literal notranslate"><span class="pre">--lm-segments</span></code>).</p></td>
 </tr>
-<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">fuse_lm_modules()</span></code>, <code class="docutils literal notranslate"><span class="pre">fused_stack_spec()</span></code>, <code class="docutils literal notranslate"><span class="pre">compile_detok_targets()</span></code></p></td>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">fuse_lm_modules()</span></code>, <code class="docutils literal notranslate"><span class="pre">fused_stack_spec()</span></code>, <code class="docutils literal notranslate"><span class="pre">compile_detok_targets()</span></code></p></td>
 <td><p>Kernel fusion with <code class="docutils literal notranslate"><span class="pre">--fuse-lm</span></code>, <code class="docutils literal notranslate"><span class="pre">--fuse-layers</span></code> and <code class="docutils literal notranslate"><span class="pre">--compile-detok</span></code> (<code class="docutils literal notranslate"><span class="pre">vox_serve/fusion/</span></code>).</p></td>
 </tr>
 </tbody>

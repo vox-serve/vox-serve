@@ -143,6 +143,11 @@ Optional pieces (look at the programs named for examples):
    * - ``detok_stateful = True``
      - The codec keeps per-request state across chunks; ``arena["dt_slot"]`` / ``arena["dt_reset"]`` index
        and reset it.
+   * - ``detok_step`` + ``dt_len`` / ``dt_last`` detok inputs (``declare``)
+     - Chunks with look-ahead (``cosyvoice3``, ``higgs_tts``): ``arena["dt_len"]`` is the number of valid
+       frames in the window and ``arena["dt_last"]`` is 1 on a request's last chunk, the one no other chunk
+       follows. A chunk may then hold audio back for the next one: the runtimes finish a request only after
+       its last chunk has been decoded.
    * - ``feature_pool_rows``, ``feature_dim``
      - Audio input: encoded audio rows that prompts reference through the input mask (``step_audio_2``).
    * - ``tokenize_stream_text``, ``preprocess_streaming`` + ``meta["text_stream"]``
