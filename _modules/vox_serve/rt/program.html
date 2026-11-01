@@ -955,6 +955,18 @@ window.runMermaid = runMermaid;</script>
 
     <span class="n">spec_meta</span><span class="p">:</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]</span> <span class="o">=</span> <span class="p">{}</span>  <span class="c1"># the engine's meta (common + ``meta()``), set by ``build``</span>
 
+<div class="viewcode-block" id="LMProgram.for_prompts">
+<a class="viewcode-back" href="../../../api.html#vox_serve.rt.program.LMProgram.for_prompts">[docs]</a>
+    <span class="nd">@classmethod</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">for_prompts</span><span class="p">(</span><span class="bp">cls</span><span class="p">,</span> <span class="n">meta</span><span class="p">:</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="s2">"LMProgram"</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""A program that only builds prompts, from an engine's ``meta`` (no weights, no device): for</span>
+<span class="sd">        checking ``preprocess`` against the Rust prompt builders. Text-only prompts read nothing but</span>
+<span class="sd">        ``spec_meta``, as the Rust builders read nothing but ``meta``."""</span>
+        <span class="n">program</span> <span class="o">=</span> <span class="bp">cls</span><span class="o">.</span><span class="fm">__new__</span><span class="p">(</span><span class="bp">cls</span><span class="p">)</span>
+        <span class="n">program</span><span class="o">.</span><span class="n">spec_meta</span> <span class="o">=</span> <span class="n">meta</span>
+        <span class="k">return</span> <span class="n">program</span></div>
+
+
 <div class="viewcode-block" id="LMProgram.preprocess">
 <a class="viewcode-back" href="../../../api.html#vox_serve.rt.program.LMProgram.preprocess">[docs]</a>
     <span class="k">def</span><span class="w"> </span><span class="nf">preprocess</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">text</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">audio_path</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">],</span> <span class="n">model_kwargs</span><span class="p">:</span> <span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="n">Prompt</span><span class="p">:</span>

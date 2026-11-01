@@ -490,6 +490,7 @@
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram.decode_tokens"><code class="docutils literal notranslate"><span class="pre">LMProgram.decode_tokens()</span></code></a></li>
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram.detokenize"><code class="docutils literal notranslate"><span class="pre">LMProgram.detokenize()</span></code></a></li>
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram.embed"><code class="docutils literal notranslate"><span class="pre">LMProgram.embed()</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram.for_prompts"><code class="docutils literal notranslate"><span class="pre">LMProgram.for_prompts()</span></code></a></li>
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram.fuse_lm_modules"><code class="docutils literal notranslate"><span class="pre">LMProgram.fuse_lm_modules()</span></code></a></li>
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram.fused_stack_spec"><code class="docutils literal notranslate"><span class="pre">LMProgram.fused_stack_spec()</span></code></a></li>
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram.head"><code class="docutils literal notranslate"><span class="pre">LMProgram.head()</span></code></a></li>
@@ -717,6 +718,22 @@ keeps NumPy-backed state that Dynamo cannot guard), otherwise the whole <code cl
 </dd>
 <dt class="field-even">Return type<span class="colon">:</span></dt>
 <dd class="field-even"><p><a class="reference external" href="https://docs.pytorch.org/docs/stable/tensors.html#torch.Tensor" title="(in PyTorch v2.15)">torch.Tensor</a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="vox_serve.rt.program.LMProgram.for_prompts">
+<span class="property"><span class="k"><span class="pre">classmethod</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">for_prompts</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">meta</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/vox_serve/rt/program.html#LMProgram.for_prompts"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#vox_serve.rt.program.LMProgram.for_prompts" title="Link to this definition">#</a></dt>
+<dd><p>A program that only builds prompts, from an engine’s <code class="docutils literal notranslate"><span class="pre">meta</span></code> (no weights, no device): for
+checking <code class="docutils literal notranslate"><span class="pre">preprocess</span></code> against the Rust prompt builders. Text-only prompts read nothing but
+<code class="docutils literal notranslate"><span class="pre">spec_meta</span></code>, as the Rust builders read nothing but <code class="docutils literal notranslate"><span class="pre">meta</span></code>.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>meta</strong> (<a class="reference external" href="https://docs.python.org/3.12/library/typing.html#typing.Dict" title="(in Python v3.12)"><em>Dict</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3.12/library/stdtypes.html#str" title="(in Python v3.12)"><em>str</em></a><em>, </em><a class="reference external" href="https://docs.python.org/3.12/library/typing.html#typing.Any" title="(in Python v3.12)"><em>Any</em></a><em>]</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="#vox_serve.rt.program.LMProgram" title="vox_serve.rt.program.LMProgram"><em>LMProgram</em></a></p>
 </dd>
 </dl>
 </dd></dl>
@@ -1027,6 +1044,7 @@ LM graph; the default classifies codebook 0 by <code class="docutils literal not
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram.decode_tokens"><code class="docutils literal notranslate"><span class="pre">LMProgram.decode_tokens()</span></code></a></li>
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram.detokenize"><code class="docutils literal notranslate"><span class="pre">LMProgram.detokenize()</span></code></a></li>
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram.embed"><code class="docutils literal notranslate"><span class="pre">LMProgram.embed()</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram.for_prompts"><code class="docutils literal notranslate"><span class="pre">LMProgram.for_prompts()</span></code></a></li>
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram.fuse_lm_modules"><code class="docutils literal notranslate"><span class="pre">LMProgram.fuse_lm_modules()</span></code></a></li>
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram.fused_stack_spec"><code class="docutils literal notranslate"><span class="pre">LMProgram.fused_stack_spec()</span></code></a></li>
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#vox_serve.rt.program.LMProgram.head"><code class="docutils literal notranslate"><span class="pre">LMProgram.head()</span></code></a></li>

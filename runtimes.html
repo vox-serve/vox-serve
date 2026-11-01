@@ -610,9 +610,9 @@ Prompts of most models are built in Rust (<code class="docutils literal notransl
 <ul class="simple">
 <li><p><code class="docutils literal notranslate"><span class="pre">base</span></code> (default): new requests are prefilled first, every running request decodes, and audio chunks
 are decoded as soon as they are ready.</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">online</span></code>: a streaming request is <em>pressing</em> until its first audio chunk and again when its client is
-about a second from running out of buffered audio; a non-streaming request is pressing once its tokens
-are all generated. Pressing requests decode first, and audio is decoded only in steps that have a
+<li><p><code class="docutils literal notranslate"><span class="pre">online</span></code>: a streaming request is <em>pressing</em> until its first audio chunk and again from a second
+before its client starts playing the last chunk it has received; a non-streaming request is pressing
+once its tokens are all generated. Pressing requests decode first, and audio is decoded only in steps that have a
 pressing chunk, which other ready chunks join while the batch has room.</p></li>
 <li><p><code class="docutils literal notranslate"><span class="pre">offline</span></code>: audio is decoded only while no admitted request is generating tokens; for batch jobs, not
 streaming.</p></li>

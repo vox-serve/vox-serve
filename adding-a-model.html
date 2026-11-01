@@ -817,7 +817,11 @@ that use the feature pool (audio input) or input streaming.</p>
 <code class="docutils literal notranslate"><span class="pre">meta</span></code> in its constructor, and is registered under the model’s <code class="docutils literal notranslate"><span class="pre">kind</span></code> in <code class="docutils literal notranslate"><span class="pre">load</span></code> in
 <code class="docutils literal notranslate"><span class="pre">rust/src/models/mod.rs</span></code>. Steps that need PyTorch (encoding reference audio, phonemization) can stay
 in Python as hooks: <code class="docutils literal notranslate"><span class="pre">Hooks::call(&quot;name&quot;,</span> <span class="pre">args)</span></code> runs the program’s <code class="docutils literal notranslate"><span class="pre">hook_&lt;name&gt;</span></code> (see <code class="docutils literal notranslate"><span class="pre">zonos.rs</span></code>).
-The builder must produce exactly the rows <code class="docutils literal notranslate"><span class="pre">preprocess</span></code> does. Compare them with
+The builder must produce exactly the rows <code class="docutils literal notranslate"><span class="pre">preprocess</span></code> does. <code class="docutils literal notranslate"><span class="pre">tests/test_prompt_parity.py</span></code> checks
+that for text-only requests on CPU, from the model’s recorded <code class="docutils literal notranslate"><span class="pre">meta</span></code>: record it once with
+<code class="docutils literal notranslate"><span class="pre">python</span> <span class="pre">tests/prompt_meta/record.py</span> <span class="pre">&lt;name&gt;</span></code> (on a GPU) and commit <code class="docutils literal notranslate"><span class="pre">tests/prompt_meta/&lt;name&gt;.json</span></code>.
+Text-only prompts should therefore read only <code class="docutils literal notranslate"><span class="pre">self.spec_meta</span></code> (<code class="docutils literal notranslate"><span class="pre">LMProgram.for_prompts</span></code> builds a
+program without weights for the test). For other requests, compare with
 <code class="docutils literal notranslate"><span class="pre">vox_serve._rt.build_prompt(meta_json,</span> <span class="pre">text,</span> <span class="pre">audio_path,</span> <span class="pre">model_kwargs_json)</span></code>, or serve with
 <code class="docutils literal notranslate"><span class="pre">--prompt-builder</span> <span class="pre">python</span></code> and compare greedy outputs.</p>
 </dd>
@@ -825,7 +829,8 @@ The builder must produce exactly the rows <code class="docutils literal notransl
 </section>
 <section id="validating">
 <h2>5. Validating<a class="headerlink" href="#validating" title="Link to this heading">#</a></h2>
-<p>There is no GPU test suite; validate by serving.</p>
+<p>The tests in <code class="docutils literal notranslate"><span class="pre">tests/</span></code> run on CPU (<a class="reference internal" href="development.html#tests"><span class="std std-ref">Tests</span></a>) and check the schedulers and prompt parity,
+not models: there is no GPU test suite, so validate a model by serving it.</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># Debug model code eagerly (Python exceptions, prints), then with CUDA graphs, in the Python runtime.</span>
 vox-serve<span class="w"> </span>--runtime<span class="w"> </span>python<span class="w"> </span>--model<span class="w"> </span>my-tts<span class="w"> </span>--disable-cuda-graph<span class="w"> </span>--port<span class="w"> </span><span class="m">8000</span>
 vox-serve<span class="w"> </span>--runtime<span class="w"> </span>python<span class="w"> </span>--model<span class="w"> </span>my-tts<span class="w"> </span>--port<span class="w"> </span><span class="m">8000</span>
@@ -842,7 +847,8 @@ python<span class="w"> </span>rust/scripts/asr_check.py<span class="w"> </span>/
 <li><p>streaming and non-streaming requests both work, in both runtimes;</p></li>
 <li><p>several concurrent requests give the same quality as one (bugs in per-slot state or padding entries only
 show with batching) and greedy outputs do not depend on the batch;</p></li>
-<li><p>with a Rust prompt builder, its prompts equal <code class="docutils literal notranslate"><span class="pre">preprocess</span></code>’s.</p></li>
+<li><p>with a Rust prompt builder, its prompts equal <code class="docutils literal notranslate"><span class="pre">preprocess</span></code>’s (<code class="docutils literal notranslate"><span class="pre">python</span> <span class="pre">-m</span> <span class="pre">pytest</span> <span class="pre">tests/test_prompt_parity.py</span></code>
+with the extension built, after recording the model’s <code class="docutils literal notranslate"><span class="pre">meta</span></code>).</p></li>
 </ul>
 <p>Then measure throughput and latency under load with <code class="docutils literal notranslate"><span class="pre">benchmark/</span></code>.</p>
 </section>
