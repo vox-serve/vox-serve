@@ -1,0 +1,113 @@
+name: Rust
+
+# CPU-only checks of the Rust runtime (rust/, the optional vox_serve._rt extension). The build script
+# compiles CUDA sources with nvcc, which needs the CUDA toolkit but no GPU or driver.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CUDA_HOME: /usr/local/cuda-12.8
+  # Pinned so new clippy lints do not break CI; bump together with the fixes they need.
+  RUST_TOOLCHAIN: "1.90.0"
+
+jobs:
+  rust:
+    name: fmt, clippy, test
+    runs-on: ubuntu-24.04
+    env:
+      # Nothing runs on a GPU here: compile the sampling kernels for one architecture only.
+      VOX_CUDA_ARCHS: "90"
+      # The test binary links libpython (pyo3) and libcudart.
+      PYO3_PYTHON: /usr/bin/python3
+      LD_LIBRARY_PATH: /usr/local/cuda-12.8/lib64
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the CUDA compiler and runtime
+        working-directory: .
+        run: |
+          .github/scripts/install-cuda-toolkit.sh 12-8
+          sudo apt-get install -y -q --no-install-recommends python3-dev
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: rustfmt
+        run: cargo fmt --check
+      - name: clippy
+        run: cargo clippy --release --locked --all-targets -- -D warnings
+      - name: test
+        run: cargo test --release --locked
+
+  wheel:
+    name: wheel with the Rust extension
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the CUDA compiler and runtime
+        run: .github/scripts/install-cuda-toolkit.sh 12-8
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build the wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --wheel --outdir dist .
+      - name: The wheel contains the extension
+        run: python -m zipfile -l dist/*.whl | grep -E "vox_serve/_rt\..*so"
+      - name: The extension loads and parses the command line
+        env:
+          LD_LIBRARY_PATH: /usr/local/cuda-12.8/lib64
+        run: |
+          python -m venv /tmp/venv
+          /tmp/venv/bin/pip install --no-deps dist/*.whl
+          cd /tmp && /tmp/venv/bin/python - <<'PY'
+          from vox_serve import _rt
+
+          print("FlashInfer headers", _rt.FLASHINFER_VERSION)
+          _rt.parse_args(["vox-serve", "--model", "qwen3-tts", "--scheduler-type", "deadline", "--fuse-depth"])
+          try:
+              _rt.parse_args(["vox-serve", "--no-such-flag"])
+          except ValueError:
+              pass
+          else:
+              raise SystemExit("an unknown flag was accepted")
+          PY
+
+  wheel-without-rust:
+    name: wheel without CUDA (Python runtime only)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build the wheel (the optional extension fails to build without nvcc)
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --wheel --outdir dist .
+      - name: The wheel has no extension and the CLI falls back to the Python runtime
+        run: |
+          if python -m zipfile -l dist/*.whl | grep -E "vox_serve/_rt\."; then
+            echo "the wheel unexpectedly contains the extension"; exit 1
+          fi
+          python -m venv /tmp/venv
+          /tmp/venv/bin/pip install --no-deps dist/*.whl
+          cd /tmp && /tmp/venv/bin/python - <<'PY'
+          from vox_serve.cli import _load_rust
+
+          rt, reason = _load_rust()
+          assert rt is None, "the Rust runtime should be unavailable"
+          print("fallback:", reason)
+          PY
