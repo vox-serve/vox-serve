@@ -31,7 +31,7 @@ Text-to-speech (TTS)
      - Higgs Audio v3 TTS developed by Boson AI. Using a Qwen3-4B LLM over 8 delayed codebooks with the Higgs Audio tokenizer. Supports audio input for voice cloning.
    * - ``higgs-audio-v2``
      - ``bosonai/higgs-audio-v2-generation-3B-base`` (`link <https://huggingface.co/bosonai/higgs-audio-v2-generation-3B-base>`_)
-     - Higgs Audio v2 developed by Boson AI. Using a Llama-3.2-3B LLM with dual (text / audio) FFN layers over 8 delayed codebooks of the Higgs Audio tokenizer. Supports audio input (with its transcript) for voice cloning and a scene description.
+     - Higgs Audio v2 developed by Boson AI. Using a Llama-3.2-3B LLM with dual (text / audio) FFN layers over 8 delayed codebooks of the Higgs Audio tokenizer. Supports audio input (with its transcript) for voice cloning and a scene description. Weights under the Boson Higgs Audio 2 Community License (based on the Llama 3 license).
    * - ``orpheus``
      - ``canopylabs/orpheus-3b-0.1-ft`` (`link <https://huggingface.co/canopylabs/orpheus-3b-0.1-ft>`_)
      - TTS model developed by Canopy Labs. Using 3B LLM with SNAC detokenizer.

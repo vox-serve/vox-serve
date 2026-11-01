@@ -82,3 +82,5 @@ from the untempered distribution). `--temperature`, `--top-k` and `--top-p` over
 - `--fuse-lm` merges the q/k/v and gate/up projections and `--fuse-codec` fuses the DAC codec kernels;
   `--fuse-layers` does not apply (the fused decoder stack has no dual FFN path).
 - `--urgent-lane` is supported (the codec keeps no state between chunks).
+- The weights are under the Boson Higgs Audio 2 Community License, based on the Meta Llama 3 Community
+  License (see the model's `LICENSE` on Hugging Face).
