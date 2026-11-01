@@ -466,7 +466,7 @@
                   
   <section id="module-vox_serve.rt.core">
 <span id="vox-serve-rt-core"></span><h1>vox_serve.rt.core<a class="headerlink" href="#module-vox_serve.rt.core" title="Link to this heading">#</a></h1>
-<p>Static buffers, FlashInfer attention and CUDA-graph capture for the Rust runtime.</p>
+<p>Static buffers, FlashInfer attention and CUDA-graph capture for both serving runtimes.</p>
 <p>The Rust runtime drives every captured graph through three kinds of memory exported from here:</p>
 <ul class="simple">
 <li><p>the <em>input arena</em>: one contiguous device buffer holding every per-step input (token ids, positions,
@@ -478,8 +478,11 @@ downloaded with a single <code class="docutils literal notranslate"><span class=
 (<code class="docutils literal notranslate"><span class="pre">PrefillPlan</span></code>, linked into the Rust binary) and writes the result straight into the workspace
 that the captured kernels read from.</p></li>
 </ul>
-<p>Graphs are captured with <code class="docutils literal notranslate"><span class="pre">keep_graph=True</span></code>; Rust instantiates and launches them from the raw
-<code class="docutils literal notranslate"><span class="pre">cudaGraph_t</span></code> handle, so <code class="docutils literal notranslate"><span class="pre">CUDAGraph.replay</span></code> is never used at serving time.</p>
+<p>For the Rust runtime (<code class="docutils literal notranslate"><span class="pre">build_engine</span></code>) graphs are captured with <code class="docutils literal notranslate"><span class="pre">keep_graph=True</span></code>: Rust
+instantiates and launches them from the raw <code class="docutils literal notranslate"><span class="pre">cudaGraph_t</span></code> handle and never calls
+<code class="docutils literal notranslate"><span class="pre">CUDAGraph.replay</span></code>, so torch never instantiates them. The Python runtime (<code class="docutils literal notranslate"><span class="pre">ProgramWorker</span></code>) uses
+the builder in-process and launches graphs with <code class="docutils literal notranslate"><span class="pre">CUDAGraph.replay</span></code>; torch instantiates each of its
+graphs at the end of the capture, so no request pays for it.</p>
 <p class="rubric">Functions</p>
 <div class="pst-scrollable-table-container"><table class="autosummary longtable table">
 <tbody>
@@ -508,7 +511,7 @@ that the captured kernels read from.</p></li>
 <td><p>Keeps every stage as a function run eagerly instead of a CUDA graph (the Python runtime's <code class="docutils literal notranslate"><span class="pre">--disable-cuda-graph</span></code>, e.g. to debug model code).</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="xref py py-obj docutils literal notranslate"><span class="pre">EngineSpecBuilder</span></code>(device[, detok_device, ...])</p></td>
-<td><p>Collects everything the Rust runtime needs and keeps the backing tensors alive.</p></td>
+<td><p>Captures a program's graphs, collects its arenas and <code class="docutils literal notranslate"><span class="pre">meta</span></code> and keeps the backing tensors alive.</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="xref py py-obj docutils literal notranslate"><span class="pre">GraphEntry</span></code>(stage, key, graph, attention[, fn])</p></td>
 <td><p></p></td>
