@@ -1,14 +1,24 @@
 name: Docs
 
+# Pull requests build the documentation (so a broken build shows up before merging); pushes to main also
+# publish it.
 on:
   push:
     branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  # Pull requests: a new push cancels the previous build. main: only the latest pending deploy runs.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || 'main' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: write
 
 jobs:
   build-deploy:
+    name: build (and deploy from main)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -28,6 +38,7 @@ jobs:
           make -C docs html
 
       - name: Deploy to gh-pages
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}

@@ -44,6 +44,9 @@ Text-to-speech (TTS)
    * - ``voxtral-tts``
      - ``mistralai/Voxtral-4B-TTS-2603`` (`link <https://huggingface.co/mistralai/Voxtral-4B-TTS-2603>`_)
      - TTS model developed by Mistral AI. Using a 4B LLM with a flow-matching acoustic head and a 37-codebook codec.
+   * - ``xtts``
+     - ``coqui/XTTS-v2`` (`link <https://huggingface.co/coqui/XTTS-v2>`_)
+     - Multilingual TTS model developed by Coqui. Using a GPT-2 (30 layers) whose hidden states a HiFi-GAN vocoder decodes; 17 languages, 58 built-in voices. Supports audio input for voice cloning. Weights under the Coqui Public Model License (non-commercial).
    * - ``zonos``
      - ``Zyphra/Zonos-v0.1-transformer`` (`link <https://huggingface.co/Zyphra/Zonos-v0.1-transformer>`_)
      - TTS model developed by Zyphra. Using 1B LLM with DAC detokenizer.

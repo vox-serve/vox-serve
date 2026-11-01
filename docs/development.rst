@@ -39,12 +39,13 @@ Repository layout
 Checks
 ------
 
-Python:
+Python, with the ruff version CI uses (pinned in the ``lint`` dependency group of ``pyproject.toml``):
 
 .. code-block:: bash
 
-   ruff format .
+   pip install --group lint        # or: uv pip install --group lint
    ruff check .
+   ruff format .                   # not enforced by CI yet; format the files you change
 
 Rust (formatting settings in ``rust/rustfmt.toml``):
 
@@ -86,7 +87,9 @@ tests in ``rust/src/scheduler.rs``, next to those of ``deadline.rs`` and ``v2.rs
 Continuous integration
 ----------------------
 
-CI runs on CPU-only GitHub runners:
+CI runs on CPU-only GitHub runners, for pull requests (including those from forks; GitHub asks a
+maintainer to approve runs for first-time contributors) and pushes to ``main``. Pushing again to a pull
+request cancels its previous run.
 
 - ``.github/workflows/ci.yml``: ``ruff check``, and ``pytest tests`` with CPU-only PyTorch (the prompt
   parity test is skipped there).
@@ -111,7 +114,8 @@ CI runs on CPU-only GitHub runners:
   .github/scripts/build-dists.sh dist``.
 - ``.github/workflows/publish.yml``: on a published GitHub release, builds the distributions with
   ``dists.yml`` and uploads them to PyPI (trusted publishing).
-- ``.github/workflows/docs.yml``: builds and publishes this documentation (pushes to ``main``).
+- ``.github/workflows/docs.yml``: builds this documentation for pull requests, and builds and publishes it
+  for pushes to ``main``.
 
 There is no GPU test suite. Validate changes that touch the GPU path by serving with both runtimes:
 

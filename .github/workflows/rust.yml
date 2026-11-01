@@ -4,8 +4,14 @@ name: Rust
 # compiles CUDA sources with nvcc, which needs the CUDA toolkit but no GPU or driver.
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
+
+concurrency:
+  # One run per pull request (a new push cancels the previous one); every commit on main gets its own run.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
