@@ -25,7 +25,7 @@ import torch
 from ..model import get_program
 from ..requests import Request
 from ..rt.core import Arena, EagerSpecBuilder, EngineSpecBuilder, GraphEntry
-from ..rt.prompt import TOKEN_AUDIO, TOKEN_STOP, ModelSpec
+from ..rt.prompt import TOKEN_AUDIO, TOKEN_STOP, ModelSpec, ResourceBusyError
 from ..utils import get_logger
 
 
@@ -302,6 +302,8 @@ class ProgramWorker:
                     else:
                         req.is_input_streaming = False  # no text token to start from: the whole text is known
                         req.lm_prompt = self.program.preprocess(req.prompt, req.audio_path, req.model_kwargs)
+            except ResourceBusyError:
+                return False  # its voice slot / feature rows free up when running requests finish: retry later
             except Exception as e:  # noqa: BLE001  a bad request fails alone
                 self._fail(req, str(e))
                 return False

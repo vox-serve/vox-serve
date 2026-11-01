@@ -30,6 +30,18 @@ from .utils import get_global_log_level, get_logger, set_global_log_level
 logger = get_logger(__name__)
 
 
+class RequestFailedError(Exception):
+    """A request failed after its streaming response started: the server closes the connection."""
+
+
+def _error_reason(completion_info: Dict) -> Optional[str]:
+    """The message of an ``error: <message>`` finish reason (a request the worker failed), else None."""
+    reason = completion_info.get("reason")
+    if isinstance(reason, str) and reason.startswith("error:"):
+        return reason[len("error:") :].strip() or "request failed"
+    return None
+
+
 class APIServer:
     """Manage scheduler processes and route API requests to the model backends."""
     def __init__(
@@ -130,6 +142,9 @@ class APIServer:
         # Track recently completed request_ids to absorb late messages without warnings
         self.recently_completed = collections.OrderedDict()  # request_id -> timestamp
         self.recently_completed_ttl_sec = 5.0
+        # Input-streaming requests that finished: request_id -> (timestamp, error or None), so that /text,
+        # /end and /audio calls after the end (kept for the request timeout) report how the request ended
+        self.finished_input_streams = collections.OrderedDict()
         self.request_lock = threading.Lock()
         self.running = True
 
@@ -398,16 +413,28 @@ class APIServer:
                                     break
                             for rid in to_pop:
                                 self.recently_completed.pop(rid, None)
+                        while self.finished_input_streams:
+                            rid, (ts, _) = next(iter(self.finished_input_streams.items()))
+                            if time.time() - ts < self.timeout_seconds:
+                                break
+                            del self.finished_input_streams[rid]
 
                         if request_id in self.pending_requests:
+                            request_data = self.pending_requests[request_id]
                             if message_type == "AUDIO":
                                 # Handle audio chunk
-                                self.pending_requests[request_id]["chunks"].append(data)
+                                request_data["chunks"].append(data)
+                            elif message_type == "ACCEPTED":
+                                # The scheduler has built the request's prompt: its streaming response can start
+                                request_data["accepted"] = True
                             elif message_type == "COMPLETION":
                                 # Handle completion notification
                                 completion_info = json.loads(data.decode("utf-8"))
                                 self.logger.info(f"Request {request_id} completed: {completion_info}")
-                                self.pending_requests[request_id]["event"].set()
+                                request_data["error"] = _error_reason(completion_info)
+                                if request_data.get("input_streaming"):
+                                    self.finished_input_streams[request_id] = (time.time(), request_data["error"])
+                                request_data["event"].set()
                                 # remember completion to suppress late messages
                                 self.recently_completed[request_id] = time.time()
                         # If we've very recently completed this request, drop silently (debug only)
@@ -600,10 +627,11 @@ class APIServer:
             HTTPException: If the request is not found or already completed.
         """
         with self.request_lock:
+            self._raise_if_failed(request_id)
             request_data = self.pending_requests.get(request_id)
-            if not request_data:
+            if not request_data and request_id not in self.finished_input_streams:
                 raise HTTPException(status_code=404, detail=f"Request {request_id} not found")
-            if request_data["event"].is_set():
+            if not request_data or request_data["event"].is_set():
                 raise HTTPException(status_code=400, detail=f"Request {request_id} already completed")
 
         # Send TEXT_UPDATE message to scheduler
@@ -620,9 +648,12 @@ class APIServer:
             request_id: Request identifier returned by ``start_input_streaming_request``.
 
         Raises:
-            HTTPException: If the request is not found.
+            HTTPException: If the request is not found or has failed.
         """
         with self.request_lock:
+            self._raise_if_failed(request_id)
+            if request_id in self.finished_input_streams:
+                return  # it has already finished: nothing left to end
             request_data = self.pending_requests.get(request_id)
             if not request_data:
                 raise HTTPException(status_code=404, detail=f"Request {request_id} not found")
@@ -632,6 +663,37 @@ class APIServer:
         message = f"{request_id}|TEXT_COMPLETE|".encode("utf-8")
         self._enqueue_request(message)
         self.logger.info(f"Text input complete for request {request_id}")
+
+    def _raise_if_failed(self, request_id: str) -> None:
+        """400 with the reason if an input-streaming request has failed (call with ``request_lock`` held)."""
+        finished = self.finished_input_streams.get(request_id)
+        if finished is not None and finished[1] is not None:
+            raise HTTPException(status_code=400, detail=f"Request {request_id} failed: {finished[1]}")
+
+    async def wait_accepted(self, request_id: str) -> None:
+        """Waits until the scheduler has built the prompt of a streaming request (or the request has produced
+        audio or completed), so that its response starts only once the request is known to run, as in the
+        Rust runtime, which builds prompts before it responds.
+
+        Raises:
+            HTTPException: 400 with the reason if the request failed first (bad input, such as an unknown
+                voice, audio for a model without audio input or a prompt that is too long); 500 on timeout.
+        """
+        deadline = time.time() + self.timeout_seconds
+        while True:
+            with self.request_lock:
+                request_data = self.pending_requests.get(request_id)
+                if request_data is None or request_data.get("accepted") or request_data["chunks"]:
+                    return
+                if request_data["event"].is_set():
+                    if request_data.get("error") is None:
+                        return  # completed without audio: the stream ends after the WAV header
+                    del self.pending_requests[request_id]
+                    raise HTTPException(status_code=400, detail=request_data["error"])
+                if time.time() > deadline:
+                    del self.pending_requests[request_id]
+                    raise HTTPException(status_code=500, detail="Generation timed out")
+            await asyncio.sleep(0.001)
 
     async def async_stream_chunks(self, request_id: str):
         """Yield audio chunks for an already enqueued streaming request.
@@ -643,7 +705,8 @@ class APIServer:
             Raw audio chunks (bytes) as they arrive.
 
         Raises:
-            HTTPException: If the request times out or fails.
+            HTTPException: If the request times out.
+            RequestFailedError: If the request fails (the response has started, so the connection is cut).
         """
         start_time = time.time()
         # Stream chunks until completion
@@ -675,14 +738,21 @@ class APIServer:
             if done:
                 # Yield any remaining chunks and cleanup
                 remaining: list[bytes] = []
+                error = None
                 with self.request_lock:
-                    request_data = self.pending_requests.get(request_id)
+                    request_data = self.pending_requests.pop(request_id, None)
                     if request_data:
                         consumed = request_data.get("consumed_chunks", 0)
                         remaining = request_data["chunks"][consumed:]
-                        self.pending_requests.pop(request_id, None)
+                        error = request_data.get("error")
+                    elif request_id in self.finished_input_streams:
+                        error = self.finished_input_streams[request_id][1]
                 for chunk in remaining:
                     yield chunk
+                if error is not None:
+                    # A clean end of the stream would look like a success.
+                    self.logger.warning(f"Request {request_id} failed during its stream: {error}")
+                    raise RequestFailedError(error)
                 break
 
             # Small async sleep to avoid busy-waiting
@@ -738,9 +808,12 @@ class APIServer:
 
             # Retrieve collected audio chunks
             with self.request_lock:
-                audio_chunks = self.pending_requests[request_id]["chunks"][:]
-                del self.pending_requests[request_id]
+                request_data = self.pending_requests.pop(request_id)
+            audio_chunks = request_data["chunks"]
 
+            # A failed request (bad input: an unsupported option, a prompt that is too long, ...)
+            if request_data.get("error") is not None:
+                raise HTTPException(status_code=400, detail=request_data["error"])
             if not audio_chunks:
                 raise HTTPException(status_code=500, detail="No audio generated")
 
@@ -865,8 +938,10 @@ async def generate(
 
     try:
         if streaming:
-            # Streaming response: enqueue request immediately, then stream asynchronously
+            # Streaming response: enqueue the request, and respond once its prompt is built (a request that
+            # fails before gets an error status), then stream asynchronously
             request_id = api_server.start_streaming_request(text, audio_path, model_kwargs)
+            await api_server.wait_accepted(request_id)
 
             async def audio_stream():
                 # WAV header for 24kHz mono 16-bit audio
@@ -962,6 +1037,7 @@ async def audio_speech(req: AudioSpeechRequest):
 
     try:
         request_id = api_server.start_streaming_request(req.input, None, model_kwargs)
+        await api_server.wait_accepted(request_id)
 
         async def audio_stream():
             async for chunk in api_server.async_stream_chunks(request_id):
@@ -1009,6 +1085,10 @@ async def start_input_streaming(
     """
     if api_server is None:
         raise HTTPException(status_code=503, detail="Server not ready")
+    if api_server.scheduler_type != "input_streaming":
+        raise HTTPException(
+            status_code=400, detail="input streaming needs a server started with --scheduler-type input_streaming"
+        )
 
     audio_path = None
     if audio:
@@ -1086,6 +1166,7 @@ async def stream_audio(request_id: str):
 
     # Validate request exists
     with api_server.request_lock:
+        api_server._raise_if_failed(request_id)
         request_data = api_server.pending_requests.get(request_id)
         if not request_data:
             raise HTTPException(status_code=404, detail=f"Request {request_id} not found")
