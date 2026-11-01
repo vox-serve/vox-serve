@@ -80,6 +80,7 @@ VoxServe supports the following TTS and STS models:
 | `cosyvoice3` | TTS | [Fun-CosyVoice3-0.5B](https://huggingface.co/FunAudioLLM/Fun-CosyVoice3-0.5B-2512) |
 | `higgs-tts` | TTS | [Higgs Audio v3 TTS](https://huggingface.co/bosonai/higgs-tts-3-4b) |
 | `higgs-audio-v2` | TTS | [Higgs Audio v2](https://huggingface.co/bosonai/higgs-audio-v2-generation-3B-base) |
+| `vibevoice` | TTS | [VibeVoice-Realtime-0.5B](https://huggingface.co/microsoft/VibeVoice-Realtime-0.5B) |
 | `xtts` | TTS | [XTTS-v2](https://huggingface.co/coqui/XTTS-v2) |
 | `step` | STS | [Step-Audio-2-Mini](https://huggingface.co/stepfun-ai/Step-Audio-2-mini) |
 

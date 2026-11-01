@@ -16,6 +16,7 @@ Text-to-Speech (TTS) Models
    cosyvoice2
    qwen3-tts
    higgs-audio-v2
+   vibevoice
    xtts
 
 Speech-to-Speech (STS) Models
