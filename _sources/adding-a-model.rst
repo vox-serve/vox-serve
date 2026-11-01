@@ -213,7 +213,7 @@ same length. ``model_kwargs`` holds the request's model-specific options (``voic
 ``language``, ``ref_text``, ``instruct``, ``x_vector_only_mode``); a new option has to be added to both
 servers' ``/generate`` form handling (``vox_serve/launch.py`` and ``rust/src/server.rs``). Raise
 ``ValueError`` for unsupported input, such as audio for a model without audio input: the request then fails
-with that message.
+with a 400 response carrying that message.
 
 The Python runtime always calls ``preprocess``. The Rust runtime uses the builder named in ``meta``:
 

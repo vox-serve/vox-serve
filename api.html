@@ -551,6 +551,10 @@ after streaming has started (an error, the timeout, or its engine stopping) abor
 instead of ending the body cleanly, so truncated audio is never reported as complete.</p></li>
 <li><p>Non-streaming mode: <code class="docutils literal notranslate"><span class="pre">audio/wav</span></code> file download.</p></li>
 </ul>
+<p>Errors are JSON objects <code class="docutils literal notranslate"><span class="pre">{&quot;detail&quot;:</span> <span class="pre">&quot;&lt;reason&gt;&quot;}</span></code>. A request with input the model does not accept, such as
+an unknown <code class="docutils literal notranslate"><span class="pre">voice</span></code> or <code class="docutils literal notranslate"><span class="pre">speaker</span></code>, or audio for a model without audio input, gets <code class="docutils literal notranslate"><span class="pre">400</span></code> with the reason,
+also in streaming mode: the streaming response starts only once the request’s prompt is built. A busy
+server answers <code class="docutils literal notranslate"><span class="pre">429</span></code>; server errors and timeouts are <code class="docutils literal notranslate"><span class="pre">500</span></code>.</p>
 </section>
 <section id="examples">
 <h3>Examples<a class="headerlink" href="#examples" title="Link to this heading">#</a></h3>
