@@ -10,6 +10,7 @@
    :toctree:
    :recursive:
 
+   cli
    flashinfer_utils
    fusion
    launch
