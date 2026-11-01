@@ -4,6 +4,7 @@ Benchmarking goodput in online serving scenario.
 
 Measures performance metrics:
 - TTFA (Time to First Audio): Latency from request start to first audio chunk
+- iRTF (Inverse Real-Time Factor): Sum of all generated audio durations / total benchmark time
 
 Usage:
     python goodput.py --host localhost --port 8000 --rate 10 --duration 60
@@ -67,6 +68,9 @@ class BenchmarkResults:
     ttfa_p99: float = 0.0
     ttfa_min: float = 0.0
     ttfa_max: float = 0.0
+
+    # iRTF (Inverse Real-Time Factor): sum of all audio durations / total benchmark time
+    irtf: float = 0.0
 
     # Streaming viability metrics (percentage)
     streaming_viability_mean: float = 0.0
@@ -271,7 +275,8 @@ class BenchmarkClient:
 
                 # Combine audio chunks and calculate duration
                 full_audio = b"".join(audio_chunks)
-                metrics.audio_duration = self.get_audio_duration(full_audio)
+                # Use sum of chunk durations (more reliable for streaming)
+                metrics.audio_duration = sum(metrics.chunk_durations)
 
                 # Save audio if enabled
                 if self.save_audio and full_audio:
@@ -313,6 +318,9 @@ class BenchmarkClient:
         print(f"Starting benchmark: {rate} req/s for {duration}s (burstiness={burstiness})")
         print(f"Target server: {self.base_url}")
         print("=" * 60)
+
+        # Track benchmark timing for RTF calculation
+        benchmark_start_time = time.time()
 
         # Setup arrival process with Gamma distribution
         # For Gamma distribution with shape k and scale θ:
@@ -386,9 +394,15 @@ class BenchmarkClient:
                         f"Streaming_viability={streaming_viability_str}"
                     )
 
-        return self.calculate_results(rate)
+        benchmark_end_time = time.time()
+        return self.calculate_results(rate, benchmark_start_time, benchmark_end_time)
 
-    def calculate_results(self, rate: float) -> BenchmarkResults:
+    def calculate_results(
+        self,
+        rate: float,
+        benchmark_start_time: float = None,
+        benchmark_end_time: float = None,
+    ) -> BenchmarkResults:
         """Calculate aggregated benchmark results."""
         results = BenchmarkResults(rate=rate)
 
@@ -437,6 +451,14 @@ class BenchmarkClient:
         if streaming_viability_all_chunks_values:
             results.streaming_viability_all_chunks_mean = statistics.mean(streaming_viability_all_chunks_values)
 
+        # Calculate iRTF (Inverse Real-Time Factor): sum of audio durations / total benchmark time
+        if benchmark_start_time is not None and benchmark_end_time is not None:
+            total_audio_duration = sum(
+                m.audio_duration for m in successful_metrics if m.audio_duration is not None
+            )
+            total_benchmark_time = benchmark_end_time - benchmark_start_time
+            if total_benchmark_time > 0:
+                results.irtf = total_audio_duration / total_benchmark_time
 
         return results
 
@@ -550,6 +572,14 @@ class BenchmarkClient:
             [f"{result.streaming_viability_all_chunks_mean:.1f}" for result in all_results]
         ) + " |"
         print(streaming_all_chunks_row)
+
+        # iRTF (Inverse Real-Time Factor) Table
+        print("\n## iRTF (Inverse Real-Time Factor: total audio duration / benchmark time)\n")
+        print("| Metric | " + " | ".join([f"{rate:.1f} req/s" for rate in rates]) + " |")
+        print("|--------|" + "|".join(["-"*12 for _ in rates]) + "|")
+
+        irtf_row = "| iRTF | " + " | ".join([f"{result.irtf:.2f}" for result in all_results]) + " |"
+        print(irtf_row)
         print()
 
 

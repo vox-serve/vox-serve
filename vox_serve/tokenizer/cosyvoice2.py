@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from functools import lru_cache
 from typing import List, Optional, OrderedDict, Tuple, Union
 
@@ -41,6 +41,39 @@ class CosyVoice2DecoderCache(DecoderCache):
 
     # HiFT (vocoder) cache - now stores the complete HiFTGeneratorCache object
     hift_cache: Optional[HiFTGeneratorCache] = None
+
+
+class PromptCacheTable:
+    """The flow's prompt caches (``CosyVoice2Decoder.init_cache``) of several voices, stacked along a leading
+    voice dimension so that one batch can mix voices: ``decode_window`` gathers each row's voice."""
+
+    def __init__(self, template: CosyVoice2DecoderCache, embedding: torch.Tensor, n: int):
+        def table(t):
+            return None if t is None else t.new_zeros(n, *t.shape[1:])
+
+        enc, dec = template.flow_encoder_cache, template.flow_decoder_cache
+        self.encoder = FlowEncoderCache(**{f.name: table(getattr(enc, f.name)) for f in fields(enc)})
+        cnn = None if dec.cnn_cache is None else [[table(c) for c in step] for step in dec.cnn_cache]
+        self.decoder = FlowDecoderCache(cnn_cache=cnn, att_cache=table(dec.att_cache))
+        self.embedding = table(embedding)
+
+    @torch.no_grad()
+    def write(self, slot: int, cache: CosyVoice2DecoderCache, embedding: torch.Tensor) -> None:
+        """Stores a voice's caches (batch 1) in row ``slot``. Prompts shorter than the decoder's attention
+        window (about 2.5 s of speech) give smaller caches, which cannot share a table: ValueError."""
+        enc = cache.flow_encoder_cache
+        pairs = [(getattr(self.encoder, f.name), getattr(enc, f.name)) for f in fields(self.encoder)]
+        pairs.append((self.decoder.att_cache, cache.flow_decoder_cache.att_cache))
+        if self.decoder.cnn_cache is not None:
+            for dst, src in zip(self.decoder.cnn_cache, cache.flow_decoder_cache.cnn_cache, strict=True):
+                pairs += list(zip(dst, src, strict=True))
+        pairs.append((self.embedding, embedding.reshape(1, -1)))
+        for dst, src in pairs:
+            if (dst is None) != (src is None) or (dst is not None and dst.shape[1:] != src.shape[1:]):
+                raise ValueError("reference audio too short for the decoder's prompt cache (use at least 3 s)")
+        for dst, src in pairs:
+            if dst is not None:
+                dst[slot].copy_(src[0])
 
 
 def fade_in_out(fade_in_mel: torch.Tensor, fade_out_mel: torch.Tensor, window: torch.Tensor):
@@ -781,30 +814,11 @@ class CosyVoice2Decoder(nn.Module):
     PREFIX_LEN = 16  # Number of prefix tokens to keep for attention sink approach
 
     def __init__(self, model_path, device, shared_prompt_cache_mode=False):
+        """``model_path``: the CosyVoice2 repository to load ``flow.pt`` / ``hift.pt`` from, or None to load
+        the same modules' weights afterwards (Chatterbox's S3Gen decoder is this decoder: ``load_s3gen``)."""
         super().__init__()
         self.device = device
         self.shared_prompt_cache_mode = shared_prompt_cache_mode
-        audio_tokenizer_path = hf_hub_download(
-            repo_id=model_path,
-            filename="speech_tokenizer_v2.onnx",
-            revision=None,
-        )
-        spk_encoder_path = hf_hub_download(
-            repo_id=model_path,
-            filename="campplus.onnx",
-            revision=None,
-        )
-        flow_path = hf_hub_download(
-            repo_id=model_path,
-            filename="flow.pt",
-            revision=None,
-        )
-        hift_path = hf_hub_download(
-            repo_id=model_path,
-            filename="hift.pt",
-            revision=None,
-        )
-        self.tokenizer = S3Tokenizer(audio_tokenizer_path)
         self.mel_extractor = mel_spectrogram
 
         encoder = UpsampleConformerEncoder(
@@ -833,8 +847,6 @@ class CosyVoice2Decoder(nn.Module):
         )
 
         self.flow = CausalMaskedDiffWithXvec(encoder=encoder, decoder=decoder)
-        self.flow.load_state_dict(torch.load(flow_path, map_location="cpu", weights_only=True), strict=True)
-        self.flow.to(self.device).to(torch.bfloat16).eval()
 
         self.resamplers = {}
 
@@ -848,16 +860,32 @@ class CosyVoice2Decoder(nn.Module):
             f0_predictor=f0_predictor,
             device=self.device,
         )
-        hift_state_dict = {
-            k.replace("generator.", ""): v
-            for k, v in torch.load(hift_path, map_location="cpu", weights_only=True).items()
-        }
-        self.hift.load_state_dict(hift_state_dict, strict=True)
-        self.hift.to(self.device).eval()
+        if model_path is not None:
+            self.tokenizer = S3Tokenizer(hf_hub_download(repo_id=model_path, filename="speech_tokenizer_v2.onnx"))
+
+            def load(name):
+                path = hf_hub_download(repo_id=model_path, filename=name)
+                return torch.load(path, map_location="cpu", weights_only=True)
+
+            hift = {k.replace("generator.", ""): v for k, v in load("hift.pt").items()}
+            self.load_weights(load("flow.pt"), hift)
 
         self.mel_cache_len = 6
         self.source_cache_len = int(self.mel_cache_len * 480)
         self.speech_window = torch.from_numpy(np.hamming(2 * self.source_cache_len)).to(self.device)
+
+    def load_weights(self, flow_state_dict: dict, hift_state_dict: dict) -> None:
+        self.flow.load_state_dict(flow_state_dict, strict=True)
+        self.flow.to(self.device).to(torch.bfloat16).eval()
+        self.hift.load_state_dict(hift_state_dict, strict=True)
+        self.hift.to(self.device).eval()
+
+    def load_s3gen(self, state_dict: dict) -> None:
+        """Weights from Chatterbox's ``s3gen.safetensors`` (``flow.*`` and ``mel2wav.*``; its speech tokenizer
+        and speaker encoder are loaded by ``ChatterboxModel``)."""
+        flow = {k[len("flow.") :]: v for k, v in state_dict.items() if k.startswith("flow.")}
+        hift = {k[len("mel2wav.") :]: v for k, v in state_dict.items() if k.startswith("mel2wav.")}
+        self.load_weights(flow, hift)
 
     def init_cache(self, ref_dict: dict) -> CosyVoice2DecoderCache:
         """Initialize cache for streaming inference by processing speech tokens."""
@@ -893,22 +921,18 @@ class CosyVoice2Decoder(nn.Module):
                 suffix = flow_encoder_cache.conformer_att_cache[:, :, :, -(max_len - self.PREFIX_LEN // 2):, :]
                 flow_encoder_cache.conformer_att_cache = torch.cat([prefix, suffix], dim=3)
 
-            print(f"flow_encoder_cache.conformer_att_cache.shape: {flow_encoder_cache.conformer_att_cache.shape}")
-
         if flow_encoder_cache.up_conformer_att_cache is not None:
             cache_len = flow_encoder_cache.up_conformer_att_cache.shape[3]
             if cache_len > self.MAX_CACHE_LEN:
                 prefix = flow_encoder_cache.up_conformer_att_cache[:, :, :, :self.PREFIX_LEN, :]
                 suffix = flow_encoder_cache.up_conformer_att_cache[:, :, :, -(self.MAX_CACHE_LEN - self.PREFIX_LEN):, :]
                 flow_encoder_cache.up_conformer_att_cache = torch.cat([prefix, suffix], dim=3)
-            print(f"flow_encoder_cache.up_conformer_att_cache.shape: {flow_encoder_cache.up_conformer_att_cache.shape}")
         if flow_decoder_cache.att_cache is not None:
             cache_len = flow_decoder_cache.att_cache.shape[5]
             if cache_len > self.MAX_CACHE_LEN:
                 prefix = flow_decoder_cache.att_cache[:, :, :, :, :, :self.PREFIX_LEN, :]
                 suffix = flow_decoder_cache.att_cache[:, :, :, :, :, -(self.MAX_CACHE_LEN - self.PREFIX_LEN):, :]
                 flow_decoder_cache.att_cache = torch.cat([prefix, suffix], dim=5)
-            print(f"flow_decoder_cache.att_cache.shape: {flow_decoder_cache.att_cache.shape}")
         initial_mel_cache = prompt_mels[:, :, -self.mel_cache_len:]
 
         hift_cache = HiFTGeneratorCache(
@@ -922,6 +946,70 @@ class CosyVoice2Decoder(nn.Module):
             flow_decoder_cache=flow_decoder_cache,
             hift_cache=hift_cache,
         )
+
+    def hift_chunk(
+        self,
+        mels: torch.Tensor,
+        tails: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+        reset: torch.Tensor,
+        tail_start: int,
+    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+        """HiFT on one window of a request's mel frames, continuing the previous window's audio.
+
+        Consecutive windows overlap: this window's first ``mel_cache_len`` frames cover the tokens that were
+        the previous window's look-ahead, from its frame ``tail_start // 480`` on. As in CosyVoice2's
+        streaming token2wav, the vocoder takes the previous window's frames for them (``tails[0]``), starts
+        from its source signal (``tails[1]``) and cross-fades its first ``source_cache_len`` samples with its
+        audio (``tails[2]``). Rows with ``reset`` (a request's first window) have no previous window: their
+        own frames are used and their audio fades in from silence.
+
+        mels [B, 80, T] float32; tails (mel [B, 80, mel_cache_len], source [B, 1, L], speech [B, L]); reset
+        [B] bool. Returns the window's audio [B, T * 480] and its tails from ``tail_start`` on.
+        """
+        mel_tail, source_tail, speech_tail = tails
+        M, L = self.mel_cache_len, self.source_cache_len
+        head = torch.where(reset[:, None, None], mels[:, :, :M], mel_tail.to(mels.dtype))
+        mels = torch.cat([head, mels[:, :, M:]], 2)
+        f0 = self.hift.f0_predictor(mels)
+        s = self.hift.f0_upsamp(f0[:, None]).transpose(1, 2)
+        s, _, _ = self.hift.m_source(s)
+        s = s.transpose(1, 2)
+        s = torch.cat([torch.where(reset[:, None, None], s[:, :, :L], source_tail.to(s.dtype)), s[:, :, L:]], 2)
+        speech = self.hift.decode(x=mels, s=s)
+        tail = torch.where(reset[:, None], torch.zeros_like(speech[:, :L]), speech_tail.to(speech.dtype))
+        w = self.speech_window.to(speech.dtype)
+        speech = torch.cat([speech[:, :L] * w[:L] + tail * w[L:], speech[:, L:]], dim=1)
+        f, t = tail_start // 480, tail_start
+        return speech, (mels[:, :, f : f + M], s[:, :, t : t + L], speech[:, t : t + L])
+
+    @torch.inference_mode()
+    def decode_window(
+        self,
+        speech_tokens: torch.Tensor,
+        prompts: "PromptCacheTable",
+        voice: torch.Tensor,
+        tails: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+        reset: torch.Tensor,
+        tail_start: int,
+    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+        """Decodes one token window per row, each against its voice's prompt caches (``prompts[voice]``),
+        with the flow in shared-prompt mode (stateless) and the vocoder continuing the request's previous
+        window (``hift_chunk``). speech_tokens [B, T]; voice [B] int64."""
+        B, T = speech_tokens.shape
+        token_len = torch.full((B,), T, device=self.device, dtype=torch.long)
+        mels, _, _ = self.flow.forward_chunk(
+            token=speech_tokens,
+            token_len=token_len,
+            prompt_feat=torch.zeros(1, 0, 80, device=self.device, dtype=torch.bfloat16),
+            prompt_feat_len=0,
+            embedding=prompts.embedding.index_select(0, voice),
+            encoder_cache=prompts.encoder,
+            decoder_cache=prompts.decoder,
+            last_chunk=False,
+            return_cache=False,
+            cache_index=voice,
+        )
+        return self.hift_chunk(mels.float(), tails, reset, tail_start)
 
     @torch.inference_mode()
     def decode_chunk(

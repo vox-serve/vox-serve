@@ -9,10 +9,11 @@ from torch import nn
 from transformers import LlamaConfig
 from transformers.activations import ACT2FN
 
-from ...encoder.chatterbox import ChatterboxCondEnc, T3Cond
+from ...encoder.chatterbox import ChatterboxCondEnc, T3Cond, VoiceEncoder
 from ...flashinfer_utils import FlashInferWrapper, apply_rope_pos_ids, rms_norm
 from ...sampling import SamplingConfig
-from ...tokenizer.chatterbox import ChatterboxDecoder
+from ...tokenizer.chatterbox import ChatterboxRefEncoder
+from ...tokenizer.cosyvoice2 import CosyVoice2Decoder
 from ..base import BaseLM
 
 
@@ -113,11 +114,6 @@ class Conditionals:
         if isinstance(map_location, str):
             map_location = torch.device(map_location)
         kwargs = torch.load(fpath, map_location=map_location, weights_only=True)
-        # TODO: workaround to make tensor shapes at detokenizer constant
-        kwargs['gen']['prompt_token'] = kwargs['gen']['prompt_token'][:, :128]
-        kwargs['gen']['prompt_token_len'] = 128
-        kwargs['gen']['prompt_feat'] = kwargs['gen']['prompt_feat'][:, :256, :]
-        kwargs['gen']['prompt_feat_len'] = 256
         return cls(T3Cond(**kwargs['t3']), kwargs['gen'])
 
 
@@ -412,7 +408,10 @@ class ChatterboxModel(BaseLM):
         self.model_name = model_name
         self.config = ChatterboxConfig.english_only() if "chatterbox" in model_name else ChatterboxConfig.multilingual()
         self.model = ChatterboxForCausalLM(self.config)
-        self.audio_decoder = ChatterboxDecoder()
+        # S3Gen: CosyVoice2's flow + HiFT decoder, plus the encoders of reference clips.
+        self.audio_decoder = CosyVoice2Decoder(None, self.audio_decoder_device, shared_prompt_cache_mode=True)
+        self.ref_encoder = ChatterboxRefEncoder()
+        self.voice_encoder = VoiceEncoder()
 
         state_dict = {}
         with safe_open(
@@ -424,16 +423,15 @@ class ChatterboxModel(BaseLM):
         self.model.load_state_dict(state_dict, strict=True)
         self.model.to(dtype).to(device)
 
-        # Initialize audio decoder on specified device (may differ from main device)
-        detokenizer_state_dict = {}
-        with safe_open(
-            hf_hub_download(repo_id=model_name, filename="s3gen.safetensors", revision=None),
-            framework="pt"
-        ) as f:
-            for key in f.keys():
-                detokenizer_state_dict[key] = f.get_tensor(key)
-        self.audio_decoder.load_state_dict(detokenizer_state_dict, strict=False)
-        self.audio_decoder.to(self.audio_decoder_device).eval()
+        # Audio decoder on its own device (may differ from the main one)
+        with safe_open(hf_hub_download(repo_id=model_name, filename="s3gen.safetensors"), framework="pt") as f:
+            s3gen = {key: f.get_tensor(key) for key in f.keys()}
+        self.audio_decoder.load_s3gen(s3gen)
+        self.ref_encoder.load_s3gen(s3gen)
+        self.ref_encoder.to(self.audio_decoder_device).eval()
+        with safe_open(hf_hub_download(repo_id=model_name, filename="ve.safetensors"), framework="pt") as f:
+            self.voice_encoder.load_state_dict({key: f.get_tensor(key) for key in f.keys()}, strict=True)
+        self.voice_encoder.to(device).eval()
 
         # Use provided tokenizer path or default to model_name
         self.text_tokenizer = self._load_tokenizer(model_name)
@@ -495,7 +493,7 @@ class ChatterboxModel(BaseLM):
     @property
     def detokenize_interval(self) -> int:
         """Interval at which to detokenize outputs."""
-        return 25
+        return 28
 
     @property
     def detokenize_overlap(self) -> int:
@@ -504,12 +502,11 @@ class ChatterboxModel(BaseLM):
 
     @property
     def max_tokens(self) -> int:
-        """
-        Maximum number of tokens the model generates in a single request.
-        """
+        """Token limit of a request, prompt included (``--max-tokens`` overrides it): about 1000 generated
+        tokens (40 s) after a typical prompt, the reference's ``max_new_tokens``."""
         if self.default_sampling_config.max_tokens is not None:
             return self.default_sampling_config.max_tokens
-        return 200
+        return 1200
 
     @property
     def n_channels(self) -> int:
@@ -518,8 +515,8 @@ class ChatterboxModel(BaseLM):
 
     @property
     def output_audio_length(self) -> int:
-        """Output audio length (in samples) at each postprocess call."""
-        return 21120
+        """Output audio length (in samples) of a detokenized chunk: its first ``interval - overlap`` tokens."""
+        return 24000
 
     @property
     def vocab_size(self) -> int:
@@ -572,12 +569,26 @@ class ChatterboxModel(BaseLM):
 
         return text
 
-    def postprocess(self, token_ids: torch.Tensor):
-        """Convert token IDs to audio bytes."""
-        # TODO: currently lacking the way to have request-specific ref_dict
-        audio_tensor = self.audio_decoder.decode(
-            token_ids[:, :, 0],
-            speech_token_lens=self.detokenize_interval,
-            ref_dict=self.default_conds.gen,
+    # Reference clip limits of the original implementation (ChatterboxTTS.prepare_conditionals).
+    ENC_COND_LEN = 6 * 16000  # T3's conditioning prompt: the first 6 s at 16 kHz
+    DEC_COND_LEN = 10 * 24000  # S3Gen's reference: the first 10 s at 24 kHz
+
+    @torch.inference_mode()
+    def prepare_conditionals(self, wav_fpath: str, exaggeration: float = 0.5) -> Conditionals:
+        """T3 and S3Gen conditioning of a reference clip, as ``ChatterboxTTS.prepare_conditionals``."""
+        import librosa
+
+        s3gen_ref_wav, _ = librosa.load(wav_fpath, sr=self.S3GEN_SR)
+        ref_16k_wav = librosa.resample(s3gen_ref_wav, orig_sr=self.S3GEN_SR, target_sr=self.S3_SR)
+        gen = self.ref_encoder.embed_ref(s3gen_ref_wav[: self.DEC_COND_LEN], self.S3GEN_SR)
+
+        plen = self.config.speech_cond_prompt_len
+        tok = self.ref_encoder.tokenizer
+        prompt_tokens, _ = tok.forward([torch.from_numpy(ref_16k_wav[: self.ENC_COND_LEN])], max_len=plen)
+        ve_embed = torch.from_numpy(self.voice_encoder.embeds_from_wavs([ref_16k_wav], sample_rate=self.S3_SR))
+        t3 = T3Cond(
+            speaker_emb=ve_embed.mean(axis=0, keepdim=True).to(self.device),
+            cond_prompt_speech_tokens=torch.atleast_2d(prompt_tokens).to(self.device),
+            emotion_adv=exaggeration * torch.ones(1, 1, 1, device=self.device),
         )
-        return audio_tensor[:, None, :]
+        return Conditionals(t3, gen)

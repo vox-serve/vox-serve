@@ -1,18 +1,26 @@
-use anyhow::{anyhow, bail, Result};
-use serde_json::Value;
+use std::any::Any;
+use std::sync::Arc;
+
+use anyhow::{anyhow, Result};
+use serde_json::{json, Value};
 use tokenizers::Tokenizer;
 
+use super::voices::VoiceSlots;
 use super::{tokenizer, GenerateInput, Prompt, PromptBuilder};
+use crate::pyinit::Hooks;
 
-/// Chatterbox (English): `[cond rows][START text STOP][START_SPEECH x2]`, the row kind is passed
-/// in the input mask (see `vox_serve/model/chatterbox/program.py`).
+/// Chatterbox (English): `[cond rows][START text STOP][START_SPEECH x2]`. Rows are `[id, 0]` with
+/// mask `[kind, voice slot]` (see `vox_serve/model/chatterbox/program.py`); reference audio is encoded
+/// into a voice slot by the program's `encode_voice` hook.
 pub struct Chatterbox {
+    hooks: Hooks,
     tokenizer: Tokenizer,
     cond_len: usize,
     start_text: i32,
     stop_text: i32,
     start_speech: i32,
     kinds: [i32; 3],
+    voices: VoiceSlots,
 }
 
 impl Chatterbox {
@@ -22,12 +30,14 @@ impl Chatterbox {
             meta["row_kinds"][k].as_i64().map(|x| x as i32).ok_or_else(|| anyhow!("meta.row_kinds.{k} missing"))
         };
         Ok(Self {
+            hooks: Hooks::from_meta(meta),
             tokenizer: tokenizer(meta, "tokenizer_json")?,
             cond_len: int("cond_len")? as usize,
             start_text: int("start_text")?,
             stop_text: int("stop_text")?,
             start_speech: int("start_speech")?,
             kinds: [kind("cond")?, kind("text")?, kind("speech_start")?],
+            voices: VoiceSlots::new(meta["n_voices"].as_u64().unwrap_or(1) as usize),
         })
     }
 }
@@ -67,21 +77,27 @@ pub fn punc_norm(text: &str) -> String {
 
 impl PromptBuilder for Chatterbox {
     fn preprocess(&self, input: &GenerateInput) -> Result<Prompt> {
-        if input.audio_path.is_some() {
-            bail!("Audio conditioning not implemented yet.");
-        }
+        let voice = match &input.audio_path {
+            Some(path) => self.voices.get(path, |slot| {
+                self.hooks.call("encode_voice", &json!({ "path": path, "slot": slot })).map(|_| ())
+            })?,
+            None => self.voices.default_voice(),
+        };
         let text = punc_norm(&input.text).replace(' ', "[SPACE]");
         let enc = self.tokenizer.encode(text, true).map_err(|e| anyhow!("tokenizer: {e}"))?;
         let [cond, txt, start] = self.kinds;
-        let mut tokens: Vec<i32> = (0..self.cond_len as i32).collect();
-        let mut mask = vec![cond; self.cond_len];
-        tokens.push(self.start_text);
-        tokens.extend(enc.get_ids().iter().map(|&x| x as i32));
-        tokens.push(self.stop_text);
-        mask.resize(tokens.len(), txt);
-        tokens.extend([self.start_speech, self.start_speech]);
-        mask.extend([start, start]);
-        Ok(Prompt { tokens, mask: Some(mask), ..Default::default() })
+        let mut ids: Vec<i32> = (0..self.cond_len as i32).collect();
+        let mut kinds = vec![cond; self.cond_len];
+        ids.push(self.start_text);
+        ids.extend(enc.get_ids().iter().map(|&x| x as i32));
+        ids.push(self.stop_text);
+        kinds.resize(ids.len(), txt);
+        ids.extend([self.start_speech, self.start_speech]);
+        kinds.extend([start, start]);
+        let tokens = ids.iter().flat_map(|&i| [i, 0]).collect();
+        let mask = kinds.iter().flat_map(|&k| [k, voice.slot]).collect();
+        let hold: Arc<dyn Any + Send + Sync> = voice;
+        Ok(Prompt { tokens, mask: Some(mask), features: None, hold: Some(hold) })
     }
 }
 

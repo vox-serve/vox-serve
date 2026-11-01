@@ -1,7 +1,7 @@
 # adopted from https://github.com/xingchensong/FlashCosyVoice
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
@@ -2650,6 +2650,7 @@ class CausalConditionalCFM(torch.nn.Module):
         cond: Optional[torch.Tensor] = None,
         last_chunk: bool = False,
         return_cache: bool = True,
+        cache_index: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, FlowDecoderCache]:
         """Forward with caching for streaming inference.
 
@@ -2662,6 +2663,8 @@ class CausalConditionalCFM(torch.nn.Module):
             cond: Conditional features (placeholder)
             last_chunk: Whether this is the last chunk
             return_cache: Whether to return updated caches (False saves memory in shared prompt mode)
+            cache_index: (batch_size,) row of ``cache`` each batch entry reads (a table of several prompts'
+                caches); None: the cache has the batch's rows
 
         Returns:
             Tuple of (generated_chunk, updated_cache)
@@ -2678,7 +2681,7 @@ class CausalConditionalCFM(torch.nn.Module):
         output, new_cnn_cache, new_att_cache = self.solve_euler_with_cache(
             z, t_span=t_span, mu=mu, spks=spks, cond=cond,
             cnn_cache=cache.cnn_cache, att_cache=cache.att_cache, streaming=True,
-            return_cache=return_cache,
+            return_cache=return_cache, cache_index=cache_index,
         )
 
         if return_cache:
@@ -2693,7 +2696,17 @@ class CausalConditionalCFM(torch.nn.Module):
         return output, updated_cache
 
     def solve_euler_with_cache(
-        self, x, t_span, mu, spks, cond, cnn_cache=None, att_cache=None, streaming=True, return_cache=True
+        self,
+        x,
+        t_span,
+        mu,
+        spks,
+        cond,
+        cnn_cache=None,
+        att_cache=None,
+        streaming=True,
+        return_cache=True,
+        cache_index=None,
     ):
         """
         Euler solver with layer-wise caching support for streaming inference.
@@ -2708,6 +2721,7 @@ class CausalConditionalCFM(torch.nn.Module):
             att_cache: Attention layer cache (n_timesteps, n_layers, batch, num_heads, seq_len, 2*head_dim)
             streaming: whether to use streaming mode
             return_cache: Whether to return updated caches (False saves memory in shared prompt mode)
+            cache_index: (batch_size,) cache row of each batch entry, gathered one timestep at a time
 
         Returns:
             Generated features and updated caches
@@ -2741,7 +2755,11 @@ class CausalConditionalCFM(torch.nn.Module):
             this_att_cache = None
             if att_cache is not None:
                 this_att_cache = att_cache[:, :, step - 1]
+                if cache_index is not None:
+                    this_att_cache = this_att_cache.index_select(0, cache_index)
                 this_att_cache = this_att_cache.transpose(0, 1).reshape(batch_size * 2, *this_att_cache.shape[2:])
+            if this_cnn_cache is not None and cache_index is not None:
+                this_cnn_cache = [c.index_select(0, cache_index) if c is not None else None for c in this_cnn_cache]
 
             if this_cnn_cache is not None:
                 this_cnn_cache = [
@@ -2917,6 +2935,7 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
         decoder_cache: FlowDecoderCache,
         last_chunk: bool = False,
         return_cache: bool = True,
+        cache_index: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, FlowEncoderCache, FlowDecoderCache]:
         """Forward with caching for streaming inference.
 
@@ -2930,6 +2949,8 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
             decoder_cache: Decoder cache state
             last_chunk: Whether this is the last chunk
             return_cache: Whether to return updated caches (False saves memory in shared prompt mode)
+            cache_index: (batch,) row of the caches each batch entry reads (tables of several prompts'
+                caches, e.g. one per voice); None: the caches have the batch's rows
 
         Returns:
             Tuple of (features, h_lengths, updated_encoder_cache, updated_decoder_cache)
@@ -2955,6 +2976,15 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
         #         context=context, last_chunk=False
         #     )
 
+        if cache_index is not None:
+            encoder_cache = FlowEncoderCache(
+                **{
+                    f.name: None if getattr(encoder_cache, f.name) is None
+                    else getattr(encoder_cache, f.name).index_select(0, cache_index)
+                    for f in fields(encoder_cache)
+                }
+            )
+
         # for now, approximate the prelookahead layer with a dummy context
         h, new_encoder_cache = self.encoder.forward_chunk(
             token, token_len, encoder_cache,
@@ -2975,6 +3005,7 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
             n_timesteps=10,
             last_chunk=last_chunk,
             return_cache=return_cache,
+            cache_index=cache_index,
         )
 
         return feat.float(), new_encoder_cache, new_decoder_cache

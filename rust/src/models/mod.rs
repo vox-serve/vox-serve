@@ -22,6 +22,7 @@ mod python;
 mod qwen3_tts;
 mod step_audio_2;
 mod template;
+mod voices;
 mod voxtral_tts;
 mod zonos;
 
