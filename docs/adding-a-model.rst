@@ -107,7 +107,8 @@ Required pieces:
 ``detokenize(tokens)``
   ``[Bd, detok_interval, n_codebooks]`` token ids to float audio in ``[-1, 1]`` with ``Bd * detok_samples``
   values. Consecutive chunks start ``detok_interval - detok_overlap`` frames apart, and each returns only the
-  samples it adds.
+  samples it adds. ``detok_step`` converts the audio to int16 PCM with ``pcm16`` (``rt/program.py``), which
+  clamps samples outside ``[-1, 1]``; programs that override ``detok_step`` convert with it too.
 
 ``stop_tokens()``, ``audio_tokens()``
   Which codebook-0 tokens end generation, and the ``[lo, hi)`` range that is audio (other tokens, such as
