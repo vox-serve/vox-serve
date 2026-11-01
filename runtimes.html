@@ -618,9 +618,10 @@ pressing chunk, which other ready chunks join while the batch has room.</p></li>
 streaming.</p></li>
 <li><p><code class="docutils literal notranslate"><span class="pre">deadline</span></code>: audio chunks are decoded in order of their playback deadlines, and new requests by their
 first-audio deadline (<code class="docutils literal notranslate"><span class="pre">--deadline-startup-ms</span></code>); prefills are deferred, for at most
-<code class="docutils literal notranslate"><span class="pre">--deadline-max-prefill-deferral-ms</span></code>, while running streams are about to underrun. Calibrate the
-<code class="docutils literal notranslate"><span class="pre">--deadline-lm-step-ms</span></code> / <code class="docutils literal notranslate"><span class="pre">--deadline-codec-ms</span></code> / <code class="docutils literal notranslate"><span class="pre">--deadline-prefill-ms</span></code> cost estimates per model
-and GPU.</p></li>
+<code class="docutils literal notranslate"><span class="pre">--deadline-max-prefill-deferral-ms</span></code>, while running streams are about to underrun. Non-streaming
+requests have no playback deadline: they never defer prefills and use the capacity streams leave.
+Calibrate the <code class="docutils literal notranslate"><span class="pre">--deadline-lm-step-ms</span></code> / <code class="docutils literal notranslate"><span class="pre">--deadline-codec-ms</span></code> / <code class="docutils literal notranslate"><span class="pre">--deadline-prefill-ms</span></code> cost
+estimates per model and GPU.</p></li>
 </ul>
 <p>Input-streaming requests (<code class="docutils literal notranslate"><span class="pre">/generate/stream/...</span></code>) work with every policy; <code class="docutils literal notranslate"><span class="pre">input_streaming</span></code> is accepted
 as a name of <code class="docutils literal notranslate"><span class="pre">base</span></code>.</p>
@@ -637,7 +638,7 @@ counts. Every decode and codec graph is captured once per partition, so switchin
 selects other graphs. For example, <code class="docutils literal notranslate"><span class="pre">--sm-modes</span> <span class="pre">32</span> <span class="pre">--sm-mode</span> <span class="pre">1</span></code> gives the codec 32 SMs and the LM the
 rest; <code class="docutils literal notranslate"><span class="pre">--sm-mode</span> <span class="pre">adaptive</span></code> picks the partition from latencies measured while serving.</p></li>
 <li><p><code class="docutils literal notranslate"><span class="pre">--urgent-lane</span></code>: a third, high-priority codec lane on all SMs for first chunks and chunks close to
-their playback deadline (Qwen3-TTS, Orpheus, Zonos, CSM, CosyVoice3).</p></li>
+their playback deadline (of streaming requests; Qwen3-TTS, Orpheus, Zonos, CSM, CosyVoice3).</p></li>
 <li><p><code class="docutils literal notranslate"><span class="pre">--lm-segments</span> <span class="pre">depth</span></code> / <code class="docutils literal notranslate"><span class="pre">layers:&lt;k&gt;</span></code> with <code class="docutils literal notranslate"><span class="pre">--gate</span></code>: Qwen3-TTS steps captured in segments, so codec
 batches can start at a segment boundary (with <code class="docutils literal notranslate"><span class="pre">--async-engines</span></code>).</p></li>
 </ul>

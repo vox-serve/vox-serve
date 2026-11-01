@@ -121,9 +121,10 @@ Scheduling policies
   streaming.
 - ``deadline``: audio chunks are decoded in order of their playback deadlines, and new requests by their
   first-audio deadline (``--deadline-startup-ms``); prefills are deferred, for at most
-  ``--deadline-max-prefill-deferral-ms``, while running streams are about to underrun. Calibrate the
-  ``--deadline-lm-step-ms`` / ``--deadline-codec-ms`` / ``--deadline-prefill-ms`` cost estimates per model
-  and GPU.
+  ``--deadline-max-prefill-deferral-ms``, while running streams are about to underrun. Non-streaming
+  requests have no playback deadline: they never defer prefills and use the capacity streams leave.
+  Calibrate the ``--deadline-lm-step-ms`` / ``--deadline-codec-ms`` / ``--deadline-prefill-ms`` cost
+  estimates per model and GPU.
 
 Input-streaming requests (``/generate/stream/...``) work with every policy; ``input_streaming`` is accepted
 as a name of ``base``.
@@ -141,7 +142,7 @@ By default a step runs the codec, then the LM, on one stream. These flags overla
   selects other graphs. For example, ``--sm-modes 32 --sm-mode 1`` gives the codec 32 SMs and the LM the
   rest; ``--sm-mode adaptive`` picks the partition from latencies measured while serving.
 - ``--urgent-lane``: a third, high-priority codec lane on all SMs for first chunks and chunks close to
-  their playback deadline (Qwen3-TTS, Orpheus, Zonos, CSM, CosyVoice3).
+  their playback deadline (of streaming requests; Qwen3-TTS, Orpheus, Zonos, CSM, CosyVoice3).
 - ``--lm-segments depth`` / ``layers:<k>`` with ``--gate``: Qwen3-TTS steps captured in segments, so codec
   batches can start at a segment boundary (with ``--async-engines``).
 
