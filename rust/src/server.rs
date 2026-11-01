@@ -2,8 +2,7 @@
 //! `/v1/audio/speech`, `/health`).
 
 use std::collections::HashMap;
-use std::convert::Infallible;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -26,6 +25,8 @@ use crate::wav;
 const TIMEOUT: Duration = Duration::from_secs(600);
 /// Input streaming: text buffered before the prompt is built (as in `scheduler/input_streaming.py`).
 const MIN_INITIAL_TEXT_CHARS: usize = 20;
+/// A request whose event channel closed without `Done`: its engine's scheduler loop has stopped.
+const ENGINE_STOPPED: &str = "Engine stopped before the request finished";
 
 /// One engine (data-parallel replica): its scheduler queue and model logic (whose hooks and
 /// feature pool belong to that engine).
@@ -34,6 +35,19 @@ pub struct Rank {
     pub model: Arc<Model>,
     /// Requests the engine holds, published by its scheduler.
     pub load: Arc<AtomicUsize>,
+    /// Set when the engine's scheduler thread ends (a failed step, e.g. a CUDA error, or a panic):
+    /// the rank takes no more requests and `/health` reports the server unhealthy.
+    pub dead: Arc<AtomicBool>,
+}
+
+/// Marks a rank dead when dropped. Held by its scheduler thread, so the flag is set however the
+/// thread ends.
+pub struct MarkDeadOnDrop(pub Arc<AtomicBool>);
+
+impl Drop for MarkDeadOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
 }
 
 #[derive(Clone)]
@@ -54,17 +68,22 @@ impl AppState {
         &self.ranks[0].model
     }
 
-    /// Least-loaded replica (requests held by its engine plus those still queued for it); ties go
-    /// round-robin. With one replica, or replicas of equal speed, this is round-robin dispatch; with
-    /// replicas of unequal capacity (e.g. one LM on a whole GPU, one sharing its GPU with the codec)
-    /// the faster one takes more requests.
-    fn pick(&self) -> &Rank {
+    /// Least-loaded live replica (requests held by its engine plus those still queued for it); ties
+    /// go round-robin. With one replica, or replicas of equal speed, this is round-robin dispatch;
+    /// with replicas of unequal capacity (e.g. one LM on a whole GPU, one sharing its GPU with the
+    /// codec) the faster one takes more requests. `None` once every engine has stopped.
+    fn pick(&self) -> Option<&Rank> {
         let n = self.ranks.len();
         let start = self.next.fetch_add(1, Ordering::Relaxed);
         (0..n)
             .map(|k| &self.ranks[(start + k) % n])
+            .filter(|r| !r.dead.load(Ordering::Relaxed))
             .min_by_key(|r| r.load.load(Ordering::Relaxed) + r.tx.len())
-            .expect("at least one rank")
+    }
+
+    /// Ranks whose engine has stopped.
+    fn dead_ranks(&self) -> Vec<usize> {
+        (0..self.ranks.len()).filter(|&i| self.ranks[i].dead.load(Ordering::Relaxed)).collect()
     }
 }
 
@@ -94,7 +113,7 @@ struct PendingStream {
 
 pub fn router(state: AppState) -> Router {
     Router::new()
-        .route("/health", get(|| async { Json(json!({"status": "healthy"})) }))
+        .route("/health", get(health))
         .route("/generate", post(generate))
         .route("/generate/stream/start", post(stream_start))
         .route("/generate/stream/{rid}/text", post(stream_text))
@@ -109,6 +128,20 @@ fn error(status: StatusCode, msg: impl Into<String>) -> Response {
     (status, Json(json!({"detail": msg.into()}))).into_response()
 }
 
+fn no_engine() -> Response {
+    error(StatusCode::SERVICE_UNAVAILABLE, "No engine available (see the server log)")
+}
+
+/// 503 once any engine has stopped: a failed engine (e.g. after a CUDA error) does not come back
+/// until the server is restarted. The other ranks keep serving meanwhile.
+async fn health(State(state): State<AppState>) -> Response {
+    let dead = state.dead_ranks();
+    if dead.is_empty() {
+        return Json(json!({"status": "healthy"})).into_response();
+    }
+    (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"status": "unhealthy", "failed_engines": dead}))).into_response()
+}
+
 async fn submit(
     state: &AppState,
     input: GenerateInput,
@@ -116,7 +149,7 @@ async fn submit(
 ) -> Result<(String, UnboundedReceiver<Event>), Response> {
     // Tokenization is cheap, but some models call back into Python (audio encoders): keep it off
     // the async workers.
-    let rank = state.pick();
+    let Some(rank) = state.pick() else { return Err(no_engine()) };
     let model = rank.model.clone();
     let prompt = tokio::task::spawn_blocking(move || model.preprocess(&input))
         .await
@@ -140,15 +173,22 @@ async fn submit(
     }
 }
 
-/// Audio chunks until completion, an error or the request timeout.
-fn pcm_stream(rx: UnboundedReceiver<Event>) -> impl futures::Stream<Item = Result<Bytes, Infallible>> {
+/// Audio chunks until completion. An error, the request timeout or the channel closing without
+/// `Done` (the engine stopped) ends the stream with an `Err`, which aborts the response (the chunked
+/// body is never terminated) so that the client cannot mistake truncated audio for a complete one.
+fn pcm_stream(rx: UnboundedReceiver<Event>) -> impl futures::Stream<Item = Result<Bytes, String>> {
     let deadline = Instant::now() + TIMEOUT;
-    futures::stream::unfold(rx, move |mut rx| async move {
+    futures::stream::unfold(Some(rx), move |rx| async move {
+        let mut rx = rx?;
         let left = deadline.saturating_duration_since(Instant::now());
-        match tokio::time::timeout(left, rx.recv()).await {
-            Ok(Some(Event::Audio(b))) => Some((Ok(b), rx)),
-            _ => None,
-        }
+        let err = match tokio::time::timeout(left, rx.recv()).await {
+            Ok(Some(Event::Audio(b))) => return Some((Ok(b), Some(rx))),
+            Ok(Some(Event::Done(_))) => return None,
+            Ok(Some(Event::Error(e))) => e,
+            Ok(None) => ENGINE_STOPPED.into(),
+            Err(_) => "Generation timed out".into(),
+        };
+        Some((Err(err), None))
     })
 }
 
@@ -170,8 +210,9 @@ async fn collect(mut rx: UnboundedReceiver<Event>) -> Result<Vec<u8>, Response> 
         let left = deadline.saturating_duration_since(Instant::now());
         match tokio::time::timeout(left, rx.recv()).await {
             Ok(Some(Event::Audio(b))) => pcm.extend_from_slice(&b),
-            Ok(Some(Event::Done(_))) | Ok(None) => return Ok(pcm),
+            Ok(Some(Event::Done(_))) => return Ok(pcm),
             Ok(Some(Event::Error(e))) => return Err(error(StatusCode::INTERNAL_SERVER_ERROR, e)),
+            Ok(None) => return Err(error(StatusCode::INTERNAL_SERVER_ERROR, ENGINE_STOPPED)),
             Err(_) => return Err(error(StatusCode::INTERNAL_SERVER_ERROR, "Generation timed out")),
         }
     }
@@ -395,7 +436,7 @@ fn begin_submission(state: &AppState, s: &mut Session) -> Result<Option<PendingS
 }
 
 async fn launch_stream(state: &AppState, p: PendingStream) -> Result<(), Response> {
-    let rank = state.pick();
+    let Some(rank) = state.pick() else { return Err(no_engine()) };
     let model = rank.model.clone();
     let (input, first) = (p.input, p.first);
     let prompt = tokio::task::spawn_blocking(move || model.preprocess_streaming(&input, first))
@@ -514,4 +555,83 @@ async fn stream_audio(State(state): State<AppState>, Path(rid): Path<String>) ->
         rx
     };
     streaming_wav(&rid, state.model().sample_rate(), rx)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt;
+
+    fn rank() -> (Rank, crossbeam_channel::Receiver<Submit>) {
+        let meta = json!({"prompt_builder": "python", "n_codebooks": 1, "max_tokens": 16});
+        let model = Arc::new(crate::models::load(&meta, None).unwrap());
+        let (tx, rx) = crossbeam_channel::bounded(4);
+        (Rank { tx, model, load: Default::default(), dead: Default::default() }, rx)
+    }
+
+    fn audio() -> Bytes {
+        Bytes::from_static(b"pcm")
+    }
+
+    #[tokio::test]
+    async fn collect_fails_without_done() {
+        let (tx, rx) = unbounded_channel();
+        tx.send(Event::Audio(audio())).unwrap();
+        tx.send(Event::Done("stop".into())).unwrap();
+        assert_eq!(collect(rx).await.unwrap(), b"pcm");
+
+        // The engine stopped mid-request: the scheduler dropped the sender without `Done`.
+        let (tx, rx) = unbounded_channel();
+        tx.send(Event::Audio(audio())).unwrap();
+        drop(tx);
+        assert_eq!(collect(rx).await.unwrap_err().status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn stream_aborts_without_done() {
+        let (tx, rx) = unbounded_channel();
+        tx.send(Event::Audio(audio())).unwrap();
+        tx.send(Event::Done("stop".into())).unwrap();
+        assert_eq!(pcm_stream(rx).collect::<Vec<_>>().await, [Ok(audio())]);
+
+        let (tx, rx) = unbounded_channel();
+        tx.send(Event::Audio(audio())).unwrap();
+        drop(tx);
+        assert_eq!(pcm_stream(rx).collect::<Vec<_>>().await, [Ok(audio()), Err(ENGINE_STOPPED.to_string())]);
+
+        let (tx, rx) = unbounded_channel();
+        tx.send(Event::Error("bad prompt".into())).unwrap();
+        assert_eq!(pcm_stream(rx).collect::<Vec<_>>().await, [Err("bad prompt".to_string())]);
+    }
+
+    #[test]
+    fn engine_panic_marks_rank_dead() {
+        let dead = Arc::new(AtomicBool::new(false));
+        let guard = MarkDeadOnDrop(dead.clone());
+        let t = std::thread::spawn(move || {
+            let _guard = guard;
+            panic!("engine step failed");
+        });
+        assert!(t.join().is_err());
+        assert!(dead.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn dead_ranks_are_unhealthy_and_skipped() {
+        let (a, _rx_a) = rank();
+        let (b, _rx_b) = rank();
+        let state = AppState::new(vec![a, b], std::env::temp_dir());
+        assert_eq!(health(State(state.clone())).await.status(), StatusCode::OK);
+
+        state.ranks[0].dead.store(true, Ordering::Relaxed);
+        assert_eq!(health(State(state.clone())).await.status(), StatusCode::SERVICE_UNAVAILABLE);
+        for _ in 0..4 {
+            assert!(std::ptr::eq(state.pick().unwrap(), &state.ranks[1]));
+        }
+
+        state.ranks[1].dead.store(true, Ordering::Relaxed);
+        assert!(state.pick().is_none());
+        let r = submit(&state, GenerateInput::default(), false).await.unwrap_err();
+        assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
 }

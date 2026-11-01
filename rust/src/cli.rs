@@ -368,6 +368,7 @@ pub fn run(args: Args) -> Result<()> {
 
         let (tx, rx) = crossbeam_channel::bounded::<Submit>((args.max_batch_size * 2).max(1));
         let load = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let dead = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let cfg = SchedulerConfig {
             policy: args.scheduler_type,
             max_prefills_per_step: args.max_prefills_per_step,
@@ -378,7 +379,11 @@ pub fn run(args: Args) -> Result<()> {
         let opts = engine_opts.clone();
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<()>>();
         let sched_model = model.clone();
+        let mark_dead = server::MarkDeadOnDrop(dead.clone());
         let sched = std::thread::Builder::new().name(format!("vox-engine-{rank}")).spawn(move || -> Result<()> {
+            // Whatever ends this thread while the server runs (a failed step or a panic) takes the
+            // rank out of service.
+            let _mark_dead = mark_dead;
             let engine = match engine::Engine::new(spec, rank as i32, &opts) {
                 Ok(e) => e,
                 Err(e) => {
@@ -396,7 +401,7 @@ pub fn run(args: Args) -> Result<()> {
         })?;
         ready_rx.recv().context("engine thread died")??;
         info!("engine {rank} ready");
-        ranks.push(server::Rank { tx, model, load });
+        ranks.push(server::Rank { tx, model, load, dead });
         threads.push(sched);
     }
 
