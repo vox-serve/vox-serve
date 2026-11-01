@@ -582,7 +582,8 @@ high-priority lane for first audio chunks (<a class="reference internal" href="r
 <dt><code class="docutils literal notranslate"><span class="pre">--urgent-max-batch</span></code></dt><dd><p>Largest urgent-lane batch (default <code class="docutils literal notranslate"><span class="pre">8</span></code>).</p>
 </dd>
 <dt><code class="docutils literal notranslate"><span class="pre">--lm-segments</span> <span class="pre">whole|depth|layers:&lt;k&gt;</span></code>, <code class="docutils literal notranslate"><span class="pre">--gate</span> <span class="pre">none|depth|layer:&lt;i&gt;</span></code></dt><dd><p>Capture Qwen3-TTS steps in segments (before the depth transformer, or in groups of <code class="docutils literal notranslate"><span class="pre">k</span></code> layers), and
-start codec batches only once the LM step reaches the named segment.</p>
+start codec batches only once the LM step reaches the named segment. Segments need the asynchronous
+engine (<code class="docutils literal notranslate"><span class="pre">--async-engines</span></code> or a flag that implies it).</p>
 </dd>
 <dt><code class="docutils literal notranslate"><span class="pre">--dec-batch</span></code>, <code class="docutils literal notranslate"><span class="pre">--dec-max-batch</span></code>, <code class="docutils literal notranslate"><span class="pre">--dec-flush-ms</span></code>, <code class="docutils literal notranslate"><span class="pre">--dec-urgent-ms</span></code></dt><dd><p>Codec batching of the asynchronous engine: the ready chunks a batch waits for (default <code class="docutils literal notranslate"><span class="pre">0</span></code>: none), the
 largest batch without urgent chunks (default <code class="docutils literal notranslate"><span class="pre">0</span></code>: the largest captured), how close a playback deadline

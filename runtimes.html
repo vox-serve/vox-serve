@@ -639,7 +639,7 @@ rest; <code class="docutils literal notranslate"><span class="pre">--sm-mode</sp
 <li><p><code class="docutils literal notranslate"><span class="pre">--urgent-lane</span></code>: a third, high-priority codec lane on all SMs for first chunks and chunks close to
 their playback deadline (Qwen3-TTS, Orpheus, Zonos, CSM, CosyVoice3).</p></li>
 <li><p><code class="docutils literal notranslate"><span class="pre">--lm-segments</span> <span class="pre">depth</span></code> / <code class="docutils literal notranslate"><span class="pre">layers:&lt;k&gt;</span></code> with <code class="docutils literal notranslate"><span class="pre">--gate</span></code>: Qwen3-TTS steps captured in segments, so codec
-batches can start at a segment boundary.</p></li>
+batches can start at a segment boundary (with <code class="docutils literal notranslate"><span class="pre">--async-engines</span></code>).</p></li>
 </ul>
 <p>The best partition and flags depend on the model and the GPU; measure with a load benchmark
 (<code class="docutils literal notranslate"><span class="pre">benchmark/</span></code>). <code class="docutils literal notranslate"><span class="pre">rust/docs/v2_runtime_design.md</span></code> describes the asynchronous engine and every flag.</p>
