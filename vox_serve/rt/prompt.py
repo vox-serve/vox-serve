@@ -7,7 +7,6 @@ also have a Rust prompt builder (``rust/src/models``) that must produce the same
 
 import struct
 import threading
-import time
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
@@ -27,36 +26,40 @@ class Prompt:
     hold: Any = None
 
 
+class ResourceBusyError(RuntimeError):
+    """A resource a prompt needs (a voice slot, feature-pool rows) is held by other requests right now.
+
+    Prompts built in Python must not wait for one: the Python runtime builds them on its scheduler
+    thread, the same thread that releases these resources when requests finish. Its worker retries
+    the request on a later step instead."""
+
+
 class FeaturePool:
-    """Allocator of the program's device feature-pool rows (``LMProgram.feature_pool``): a request's
-    prompt features occupy a contiguous range from preprocessing until its prefill has run."""
+    """Allocator of the program's device feature-pool rows (``LMProgram.feature_pool``) for prompts
+    built in Python: a request's prompt features occupy a contiguous range from preprocessing until its
+    prefill has run. (The Rust runtime allocates rows itself, ``rust/src/models/features.rs``.)"""
 
     def __init__(self, rows: int):
         self.rows = rows
         self._free: List[Tuple[int, int]] = [(0, rows)] if rows > 0 else []  # sorted, coalesced
-        self._cv = threading.Condition()
+        self._lock = threading.RLock()  # reentrant: a lease's ``__del__`` may run inside ``alloc``
 
-    def alloc(self, n: int, timeout: float = 60.0) -> "FeatureLease":
-        """First fit, waiting up to ``timeout`` seconds for other requests to release rows."""
+    def alloc(self, n: int) -> "FeatureLease":
+        """First fit; ``ResourceBusyError`` while no free range is large enough (other requests hold the rows)."""
         if n <= 0 or n > self.rows:
             raise ValueError(f"feature rows {n} out of range (pool has {self.rows})")
-        deadline = time.monotonic() + timeout
-        with self._cv:
-            while True:
-                for i, (start, size) in enumerate(self._free):
-                    if size >= n:
-                        if size == n:
-                            del self._free[i]
-                        else:
-                            self._free[i] = (start + n, size - n)
-                        return FeatureLease(self, start, n)
-                left = deadline - time.monotonic()
-                if left <= 0:
-                    raise RuntimeError(f"feature pool exhausted ({n} rows requested)")
-                self._cv.wait(left)
+        with self._lock:
+            for i, (start, size) in enumerate(self._free):
+                if size >= n:
+                    if size == n:
+                        del self._free[i]
+                    else:
+                        self._free[i] = (start + n, size - n)
+                    return FeatureLease(self, start, n)
+        raise ResourceBusyError(f"feature pool exhausted ({n} rows requested)")
 
     def _release(self, start: int, n: int) -> None:
-        with self._cv:
+        with self._lock:
             self._free.append((start, n))
             self._free.sort()
             merged: List[Tuple[int, int]] = []
@@ -66,7 +69,6 @@ class FeaturePool:
                 else:
                     merged.append((s, k))
             self._free = merged
-            self._cv.notify_all()
 
 
 @dataclass

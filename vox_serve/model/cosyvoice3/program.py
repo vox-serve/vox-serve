@@ -28,7 +28,6 @@ import functools
 import hashlib
 import os
 import threading
-import time
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
@@ -42,7 +41,7 @@ from ...fusion.seg_attention import seg_attention
 from ...rt.core import Arena, EngineSpecBuilder, RtAttention
 from ...rt.kernels import ops
 from ...rt.program import TOKEN_AUDIO, TOKEN_OTHER, TOKEN_STOP, LMProgram
-from ...rt.prompt import Prompt
+from ...rt.prompt import Prompt, ResourceBusyError
 from ...tokenizer.cosyvoice3 import (
     BLOCK_FRAMES,
     CFG_RATE,
@@ -616,26 +615,25 @@ class CosyVoice3Program(LMProgram):
 
     def _voice(self, path: str) -> _Voice:
         """The voice slot of reference clip ``path``, encoding it on a cache miss (an LRU of slots that no
-        running request uses)."""
+        running request uses). Raises ``ResourceBusyError`` instead of waiting while running requests use
+        every slot: the Python runtime releases slots on the thread that builds prompts (the Rust runtime's
+        builder, ``rust/src/models/cosyvoice3.rs``, keeps its own slots and waits on a request thread)."""
         with open(path, "rb") as fh:
             key = hashlib.sha1(fh.read()).hexdigest()
         with self._voice_lock:
             v = self._lookup(key)
         if v is not None:
             return v
+        if len(self._voices()) < 2:
+            raise ValueError("reference audio needs a voice slot (n_voices >= 2)")
         with self._encode_lock:
-            deadline = time.monotonic() + 120
-            while True:
-                with self._voice_lock:
-                    v = self._lookup(key)
-                    if v is not None:
-                        return v
-                    slot = self._reserve()
-                if slot is not None:
-                    break
-                if time.monotonic() >= deadline:
-                    raise RuntimeError(f"all {len(self._voices()) - 1} voice slots are in use by running requests")
-                time.sleep(0.02)  # running requests release their voices when they finish
+            with self._voice_lock:
+                v = self._lookup(key)
+                if v is not None:
+                    return v
+                slot = self._reserve()
+            if slot is None:
+                raise ResourceBusyError(f"all {len(self._voices()) - 1} voice slots are in use by running requests")
             speech = [int(t) for t in self.hook_encode_voice(path, slot)["speech_tokens"]]
             if not speech:
                 raise RuntimeError("encode_voice returned no speech tokens")
