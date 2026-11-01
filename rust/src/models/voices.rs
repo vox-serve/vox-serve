@@ -94,3 +94,43 @@ impl VoiceSlots {
         Ok(v)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use super::VoiceSlots;
+
+    #[test]
+    fn reuses_and_evicts_unheld_voices() {
+        let dir = std::env::temp_dir().join(format!("vox_voices_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let clip = |name: &str| {
+            let p = dir.join(name);
+            std::fs::write(&p, name.as_bytes()).unwrap();
+            p.to_string_lossy().to_string()
+        };
+        let (a, b, c) = (clip("a"), clip("b"), clip("c"));
+        let slots = VoiceSlots::new(3);
+        let encodes = Cell::new(0);
+        let get = |p: &str| {
+            slots
+                .get(p, |_| {
+                    encodes.set(encodes.get() + 1);
+                    Ok(())
+                })
+                .unwrap()
+        };
+        assert_eq!(slots.default_voice().slot, 0);
+        let va = get(&a);
+        let vb = get(&b);
+        assert_eq!((va.slot, vb.slot), (1, 2));
+        assert_eq!(get(&a).slot, 1); // same content: no new encode
+        assert_eq!(encodes.get(), 2);
+        drop(vb); // b is no longer held: c takes its slot, a (held) keeps its own
+        assert_eq!(get(&c).slot, 2);
+        assert_eq!(get(&a).slot, 1);
+        assert_eq!(encodes.get(), 3);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
