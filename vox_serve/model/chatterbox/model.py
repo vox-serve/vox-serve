@@ -502,12 +502,11 @@ class ChatterboxModel(BaseLM):
 
     @property
     def max_tokens(self) -> int:
-        """
-        Maximum number of tokens the model generates in a single request.
-        """
+        """Token limit of a request, prompt included (``--max-tokens`` overrides it): about 1000 generated
+        tokens (40 s) after a typical prompt, the reference's ``max_new_tokens``."""
         if self.default_sampling_config.max_tokens is not None:
             return self.default_sampling_config.max_tokens
-        return 200
+        return 1200
 
     @property
     def n_channels(self) -> int:
