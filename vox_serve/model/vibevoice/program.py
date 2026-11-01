@@ -23,8 +23,8 @@ the detokenizer reads back (no lookup into LM-side state that the slot's next re
 rows carry the voice prompt row in column 0 and the request's text tokens, 63 per row, in columns 1..63; the
 mask holds ``[kind, n_text, voice]``.
 
-The detokenizer is the causal acoustic decoder with each conv's history kept per detok slot (exactly the
-reference's frame-by-frame streaming decode), ``detok_interval`` frames per chunk (3200 samples each).
+The detokenizer is the causal acoustic decoder with each conv's history kept per detok slot (the reference's
+frame-by-frame streaming decode, in chunks of ``detok_interval`` frames of 3200 samples).
 """
 
 from types import SimpleNamespace

@@ -60,5 +60,5 @@ Portuguese (`pt-`) and Spanish (`sp-`), e.g. `fr-Spk1_woman`. An unknown voice g
 - Each LM step advances a request by one position: a window's text tokens go in one per step rather than
   five at once (the same sequence of rows), and speech steps run the diffusion head inside the step's
   CUDA graph, with the classifier-free-guidance condition from a second, speech-only context.
-- The acoustic decoder keeps each convolution's history per request, so chunked decoding gives exactly
-  the reference's frame-by-frame streaming output.
+- The acoustic decoder keeps each convolution's history per request, so decoding in chunks computes the
+  reference's frame-by-frame streaming output (up to bf16 rounding).

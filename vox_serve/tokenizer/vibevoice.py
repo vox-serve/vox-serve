@@ -6,8 +6,9 @@ blocks (RMSNorm, depthwise conv of width 7, GELU FFN, layer scales) separated by
 (x8, x5, x5, x4, x2, x2), and a conv head; checkpoint names are kept so the weights load as they are.
 
 Every convolution is causal, so a chunk of frames decoded with each layer's last inputs (``states``, one
-tensor per conv, zero for a request's first chunk) is exactly the reference's frame-by-frame streaming
-decode (``VibeVoiceTokenizerStreamingCache``): a zero history adds nothing, as an empty one does there.
+tensor per conv, zero for a request's first chunk) is the same computation as the reference's frame-by-frame
+streaming decode (``VibeVoiceTokenizerStreamingCache``): a zero history adds nothing, as an empty one does
+there. The outputs agree to rounding error in fp32; in bf16, kernels for different chunk sizes round differently.
 """
 
 from typing import Any, Dict, List, Tuple
