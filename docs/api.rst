@@ -26,6 +26,11 @@ Response
 - Streaming mode: ``audio/wav`` with chunked transfer.
 - Non-streaming mode: ``audio/wav`` file download.
 
+Errors are JSON objects ``{"detail": "<reason>"}``. A request with input the model does not accept, such as
+an unknown ``voice`` or ``speaker``, or audio for a model without audio input, gets ``400`` with the reason,
+also in streaming mode: the streaming response starts only once the request's prompt is built. A busy
+server answers ``429``; server errors and timeouts are ``500``.
+
 Examples
 ^^^^^^^^
 

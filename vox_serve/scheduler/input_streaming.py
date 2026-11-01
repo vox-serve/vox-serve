@@ -219,9 +219,9 @@ class InputStreamingScheduler(Scheduler):
                         )
                     else:
                         self.logger.warning(f"TEXT_COMPLETE for {request_id} but no text buffered")
+                        # Fails the request; selecting it for detokenization sends its completion.
                         req.done_lm_generation = True
-                        req.done_all = True
-                        req.finish_reason = "no_text_provided"
+                        req.finish_reason = "error: no text provided"
                 else:
                     # Prefill already started/done, just mark complete
                     # Wake up if waiting - will use pad tokens from now on

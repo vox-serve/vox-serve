@@ -49,9 +49,10 @@ def test_every_request_completes_with_all_its_audio(policy, async_scheduling, wo
     for rid, c in h.clients.items():
         assert not c.audio_after_completion, f"{rid}: audio after its completion message"
         if c.fail:
-            assert c.completion["reason"].startswith("error"), c.completion
-            assert not c.audio
+            assert c.completion["reason"] == "error: prompt failed", c.completion
+            assert not c.audio and not c.accepted
             continue
+        assert c.accepted, f"{rid}: no ACCEPTED"
         assert c.completion == {"status": "completed", "reason": "stop_id_encountered"}
         # Every frame, in order. (How much audio overlapping chunks emit is codec-specific, so a frame
         # may arrive twice where chunks overlap.)

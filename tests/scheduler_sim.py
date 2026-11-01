@@ -11,9 +11,10 @@
   step first, and rows of requests that finished meanwhile are ignored);
 - ``done_all`` is set by ``run_detokenize`` once the chunk covering the last frame has been decoded.
 
-Each request generates ``model_kwargs["frames"]`` audio frames and then stops; ``model_kwargs["fail"]``
-makes its prompt fail. A decoded chunk emits ``samples_per_frame`` int16 samples per frame, each equal
-to the frame index, so a client can check that it received every frame once and in order.
+Each request generates ``model_kwargs["frames"]`` audio frames and then stops. Its prompt fails, as a
+program's ``preprocess`` rejects bad input, with ``model_kwargs["fail"]``, with audio input or with a
+voice other than "tara" (``prompt_error``). A decoded chunk emits ``samples_per_frame`` int16 samples per
+frame, each equal to the frame index, so a client can check that it received every frame once and in order.
 """
 
 import asyncio
@@ -74,6 +75,9 @@ class FakeWorker:
     def cuda_graph_seq_len_buckets(self) -> List[int]:
         return [256, 512, 1024, 2048]
 
+    def tokenize_stream_text(self, text: str) -> List[int]:
+        return [len(word) for word in text.split()]
+
     # ---- LM steps
 
     def prepare_lm_inputs(self, lm_requests, detokenize_requests) -> Optional[dict]:
@@ -99,10 +103,20 @@ class FakeWorker:
             req.done_lm_prefill = True
         return {"is_prefill": n_prefill > 0, "requests": reqs, "n_prefill": n_prefill}
 
-    def _admit(self, req) -> bool:
+    def prompt_error(self, req) -> Optional[str]:
         if req.model_kwargs.get("fail"):
+            return "prompt failed"
+        if req.audio_path is not None:
+            return "this model does not accept audio input"
+        if req.model_kwargs.get("voice") not in (None, "tara"):
+            return f"voice {req.model_kwargs['voice']} is not available for this model"
+        return None
+
+    def _admit(self, req) -> bool:
+        error = self.prompt_error(req)
+        if error is not None:
             req.done_lm_prefill = req.done_lm_generation = True
-            req.finish_reason = "error: prompt failed"
+            req.finish_reason = f"error: {error}"
             self.free_kv_cache(req)
             return False
         if not self.free_slots or self.free_detok_slots == []:
@@ -187,6 +201,7 @@ class ClientRequest:
     frames: int
     fail: bool = False
     audio: bytearray = field(default_factory=bytearray)
+    accepted: bool = False  # ACCEPTED (the prompt is built) arrived
     completion: Optional[dict] = None
     audio_after_completion: bool = False
 
@@ -235,7 +250,11 @@ class SchedulerHarness:
                 return
             rid, kind, data = msg.split(b"|", 2)
             c = self.clients[rid.decode()]
-            if kind == b"AUDIO":
+            if kind == b"ACCEPTED":
+                assert not c.accepted and not c.audio and c.completion is None, f"{c.request_id}: late ACCEPTED"
+                c.accepted = True
+            elif kind == b"AUDIO":
+                assert c.accepted, f"{c.request_id}: audio before ACCEPTED"
                 c.audio_after_completion |= c.completion is not None
                 c.audio += data
             else:
