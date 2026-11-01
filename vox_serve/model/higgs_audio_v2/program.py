@@ -22,9 +22,10 @@ pattern, reference encoding and the windowed detokenizer are shared. What differ
   and once any codebook has sampled EOC at step ``t``, codebooks ``c < step - t`` are forced to EOC. The
   request ends 7 rows after codebook 0's EOC (``e`` frames for an EOC at step ``e``, as in v3).
 
-Deviations from the reference: the repetition window starts empty, where the reference's also covers the
-last rows of the reference clip; and the output ends at codebook 0's EOC, where transformers' ``decode``
-keeps one more frame (codebook 0's EOC clipped to code 1023; Boson AI's original decode drops it too).
+Codes >= 1024 inside a frame decode as 1023, as the reference clips them. Deviations from the reference:
+the repetition window starts empty, where the reference's also covers the last rows of the reference clip;
+and the output always ends 7 rows after codebook 0's EOC, where the reference generates until an all-EOC row,
+so it keeps one more frame (mostly 1023 codes) when codebook 7 has not sampled EOC by then.
 """
 
 import json
@@ -41,7 +42,7 @@ from torch import nn
 from ...rt.core import Arena, RtAttention
 from ...rt.kernels import ops
 from ...rt.prompt import Prompt
-from ...tokenizer.higgs import HiggsAudioTokenizer
+from ...tokenizer.higgs import CODEBOOK_SIZE, HiggsAudioTokenizer
 from ...utils import get_logger
 from ..higgs_tts.program import (
     AUDIO,
@@ -220,6 +221,8 @@ class HiggsV2LM(nn.Module):
 
 
 class HiggsAudioV2Program(HiggsTTSProgram):
+    special_code = CODEBOOK_SIZE - 1
+
     def load(self) -> None:
         from huggingface_hub import snapshot_download
 

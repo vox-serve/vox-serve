@@ -175,6 +175,8 @@ class HiggsTTSProgram(LMProgram):
     # dt_reset marks a request's first chunk (its pre-seeded frames); the codec itself keeps no state.
     detok_stateful = True
     supports_urgent_lane = True
+    # What codes >= 1024 (BOC / EOC inside a frame) decode as.
+    special_code = 0
 
     def load(self) -> None:
         from huggingface_hub import snapshot_download
@@ -328,7 +330,7 @@ class HiggsTTSProgram(LMProgram):
         reset = arena["dt_reset"][:bd] != 0
         dlen = arena["dt_len"][:bd].long()
         codes = rows.gather(1, self.undelay[None].expand(bd, -1, -1))  # frame i, codebook c = row i + c
-        codes = torch.where(codes >= CODEBOOK_SIZE, 0, codes)
+        codes = torch.where(codes >= CODEBOOK_SIZE, self.special_code, codes)
         frame = torch.arange(WINDOW, device=dd)[None]
         # A frame exists once all its rows do; the first chunk starts with pre-seeded frames.
         real = (frame + N_CB - 1 < dlen[:, None]) & (~reset[:, None] | (frame >= self.preseed))
