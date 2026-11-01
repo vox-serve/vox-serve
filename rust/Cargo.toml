@@ -1,0 +1,42 @@
+[package]
+name = "vox-rt"
+version = "0.1.0"
+edition = "2021"
+description = "Rust serving runtime for vox-serve: HTTP, scheduling and CUDA-graph execution with no Python on the hot path"
+license = "Apache-2.0"
+
+# The `vox_serve._rt` extension module, built by setuptools-rust from the repository's pyproject.toml.
+[lib]
+name = "vox_rt"
+crate-type = ["cdylib"]
+
+[features]
+# Set by pyproject.toml for the extension module: no libpython link, stable ABI from Python 3.12.
+extension-module = ["pyo3/extension-module", "pyo3/abi3-py312"]
+
+[dependencies]
+anyhow = "1"
+axum = { version = "0.8", features = ["multipart"] }
+base64 = "0.13"
+bytes = "1"
+clap = { version = "4", features = ["derive", "env"] }
+crossbeam-channel = "0.5"
+form_urlencoded = "1"
+futures = "0.3"
+pyo3 = "0.25"
+rand = "0.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "fs", "net"] }
+tokio-stream = "0.1"
+tower-http = { version = "0.6", features = ["cors"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4"] }
+
+[build-dependencies]
+cc = "1"
+
+[profile.release]
+debug = 1
