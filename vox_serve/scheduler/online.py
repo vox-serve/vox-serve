@@ -234,6 +234,9 @@ class OnlineScheduler(Scheduler):
                 selected_requests.append(req)
                 # print(f"{req.request_id} {req.next_audio_decode_idx=} {len(req.lm_output_audio_tokens)=}")
 
+        # Requests with nothing left to decode (no audio at all, e.g. a failed prompt) still need their
+        # completion message, even when the chunk budget above skipped them.
+        selected_requests += [req for req in done_all_requests if req not in selected_requests]
         return selected_requests
 
     def _prepare_requests(self):
