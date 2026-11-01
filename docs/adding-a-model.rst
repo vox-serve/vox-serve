@@ -226,14 +226,19 @@ A Rust builder
   ``meta`` in its constructor, and is registered under the model's ``kind`` in ``load`` in
   ``rust/src/models/mod.rs``. Steps that need PyTorch (encoding reference audio, phonemization) can stay
   in Python as hooks: ``Hooks::call("name", args)`` runs the program's ``hook_<name>`` (see ``zonos.rs``).
-  The builder must produce exactly the rows ``preprocess`` does. Compare them with
+  The builder must produce exactly the rows ``preprocess`` does. ``tests/test_prompt_parity.py`` checks
+  that for text-only requests on CPU, from the model's recorded ``meta``: record it once with
+  ``python tests/prompt_meta/record.py <name>`` (on a GPU) and commit ``tests/prompt_meta/<name>.json``.
+  Text-only prompts should therefore read only ``self.spec_meta`` (``LMProgram.for_prompts`` builds a
+  program without weights for the test). For other requests, compare with
   ``vox_serve._rt.build_prompt(meta_json, text, audio_path, model_kwargs_json)``, or serve with
   ``--prompt-builder python`` and compare greedy outputs.
 
 5. Validating
 -------------
 
-There is no GPU test suite; validate by serving.
+The tests in ``tests/`` run on CPU (:ref:`development:tests`) and check the schedulers and prompt parity,
+not models: there is no GPU test suite, so validate a model by serving it.
 
 .. code-block:: bash
 
@@ -252,7 +257,8 @@ Check that:
 - streaming and non-streaming requests both work, in both runtimes;
 - several concurrent requests give the same quality as one (bugs in per-slot state or padding entries only
   show with batching) and greedy outputs do not depend on the batch;
-- with a Rust prompt builder, its prompts equal ``preprocess``'s.
+- with a Rust prompt builder, its prompts equal ``preprocess``'s (``python -m pytest tests/test_prompt_parity.py``
+  with the extension built, after recording the model's ``meta``).
 
 Then measure throughput and latency under load with ``benchmark/``.
 

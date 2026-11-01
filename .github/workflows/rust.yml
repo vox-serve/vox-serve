@@ -66,6 +66,11 @@ jobs:
           python -m build --wheel --outdir dist .
       - name: The wheel contains the extension
         run: python -m zipfile -l dist/*.whl | grep -E "vox_serve/_rt\..*so"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel
+          path: dist/*.whl
+          retention-days: 3
       - name: The extension loads and parses the command line
         env:
           LD_LIBRARY_PATH: /usr/local/cuda-12.8/lib64
@@ -84,6 +89,34 @@ jobs:
           else:
               raise SystemExit("an unknown flag was accepted")
           PY
+
+  prompt-parity:
+    name: prompt builders, Rust vs Python
+    needs: wheel
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheel
+          path: dist
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install the wheel with CPU-only PyTorch
+        run: |
+          python -m venv /tmp/venv
+          /tmp/venv/bin/pip install --upgrade pip
+          /tmp/venv/bin/pip install torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cpu
+          # The extension links the CUDA runtime library (no GPU needed to load it).
+          /tmp/venv/bin/pip install dist/*.whl pytest "nvidia-cuda-runtime-cu12==12.8.*"
+      - name: Run the prompt parity test against the installed wheel
+        env:
+          VOX_REQUIRE_RT: "1"
+        run: |
+          export LD_LIBRARY_PATH=$(/tmp/venv/bin/python -c 'import nvidia.cuda_runtime as m; print(list(m.__path__)[0] + "/lib")')
+          # pytest (not python -m pytest): the installed package is imported, not the source tree.
+          /tmp/venv/bin/pytest tests/test_prompt_parity.py -v
 
   wheel-without-rust:
     name: wheel without CUDA (Python runtime only)
