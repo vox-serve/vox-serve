@@ -30,7 +30,8 @@ Adding one touches no scheduler, worker or engine code:
 The shortest complete example is Orpheus (Llama-3.2-3B with the SNAC codec), whose whole program is shown
 in :ref:`step 2 <adding-a-model:2. the program>`. The other programs cover multi-codebook models
 (``zonos``, ``higgs_tts``), depth transformers (``csm``, ``qwen3_tts``), flow-matching codecs (``cosyvoice2``,
-``chatterbox``), audio input (``step_audio_2``, ``glm_voice``) and input streaming (``qwen3_tts``).
+``chatterbox``), voice cloning (``chatterbox``, ``cosyvoice3``), audio input (``step_audio_2``, ``glm_voice``)
+and input streaming (``qwen3_tts``).
 
 How a program runs
 ------------------
@@ -216,7 +217,8 @@ servers' ``/generate`` form handling (``vox_serve/launch.py`` and ``rust/src/ser
 with a 400 response carrying that message. Never wait in ``preprocess`` for a resource that running
 requests release (a voice slot, feature-pool rows): the Python runtime builds prompts on its scheduler
 thread, the thread that releases them. Raise ``ResourceBusyError`` (``vox_serve/rt/prompt.py``) instead;
-the request then stays queued and its prompt is built again on a later step.
+the request then stays queued and its prompt is built again on a later step. ``VoiceSlots`` there keeps an
+LRU of reference voices encoded into a program's slots this way (Chatterbox).
 
 The Python runtime always calls ``preprocess``. The Rust runtime uses the builder named in ``meta``:
 

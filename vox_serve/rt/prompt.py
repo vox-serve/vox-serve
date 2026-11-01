@@ -5,11 +5,12 @@ the Rust runtime too when ``meta["prompt_builder"]`` is ``python``. Models serve
 also have a Rust prompt builder (``rust/src/models``) that must produce the same rows.
 """
 
+import hashlib
 import struct
 import threading
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 TOKEN_AUDIO, TOKEN_STOP, TOKEN_OTHER = 0, 1, 2
 
@@ -85,6 +86,83 @@ class FeatureLease:
 
     def __del__(self):
         self.release()
+
+
+class VoiceSlots:
+    """An LRU of reference voices encoded into a program's voice slots, for prompts built in Python; slot 0
+    holds the default voice. A request holds its voice (``hold``, kept as ``Prompt.hold``) until it finishes,
+    and a slot is only re-encoded once nothing holds its voice. ``get`` never waits for one: it raises
+    ``ResourceBusyError`` while every slot is held. (Rust prompt builders keep slots of their own.)"""
+
+    class Voice:
+        def __init__(self, slot: int, data: Any = None):
+            self.slot, self.data, self.users = slot, data, 0
+
+    class _Use:
+        def __init__(self, voice: "VoiceSlots.Voice", lock: threading.Lock):
+            self.voice, self._lock = voice, lock
+            with lock:
+                voice.users += 1
+
+        def __del__(self):
+            with self._lock:
+                self.voice.users -= 1
+
+    def __init__(self, n: int, default: Any = None):
+        # Per slot: (content key, voice, last use) or None.
+        self._slots: List[Optional[Tuple[str, "VoiceSlots.Voice", int]]] = [None] * max(1, n)
+        self._slots[0] = ("", VoiceSlots.Voice(0, default), 0)
+        self._clock = 0
+        self._lock = threading.Lock()
+        self._encode_lock = threading.Lock()
+
+    def default(self) -> "VoiceSlots.Voice":
+        return self._slots[0][1]
+
+    def hold(self, voice: "VoiceSlots.Voice") -> Any:
+        return VoiceSlots._Use(voice, self._lock)
+
+    def _lookup(self, key: str) -> Optional["VoiceSlots.Voice"]:
+        self._clock += 1
+        for i, e in enumerate(self._slots):
+            if i > 0 and e is not None and e[0] == key:
+                self._slots[i] = (key, e[1], self._clock)
+                return e[1]
+        return None
+
+    def _reserve(self) -> Optional[int]:
+        free = [i for i in range(1, len(self._slots)) if self._slots[i] is None]
+        if free:
+            return free[0]
+        idle = [i for i in range(1, len(self._slots)) if self._slots[i][1].users == 0]
+        if not idle:
+            return None
+        i = min(idle, key=lambda i: self._slots[i][2])
+        self._slots[i] = None
+        return i
+
+    def get(self, path: str, encode: Callable[[int], Any]) -> "VoiceSlots.Voice":
+        """The voice of reference clip ``path``; on a miss, ``encode(slot)`` writes it into a free slot."""
+        with open(path, "rb") as fh:
+            key = hashlib.sha1(fh.read()).hexdigest()
+        with self._lock:
+            v = self._lookup(key)
+        if v is not None:
+            return v
+        if len(self._slots) < 2:
+            raise ValueError("reference audio needs a voice slot (n_voices >= 2)")
+        with self._encode_lock:
+            with self._lock:
+                v = self._lookup(key)
+                if v is not None:
+                    return v
+                slot = self._reserve()
+            if slot is None:
+                raise ResourceBusyError(f"all {len(self._slots) - 1} voice slots are in use by running requests")
+            v = VoiceSlots.Voice(slot, encode(slot))
+            with self._lock:
+                self._slots[slot] = (key, v, self._clock)
+            return v
 
 
 @lru_cache(maxsize=None)
