@@ -522,9 +522,10 @@ vox-serve<span class="w"> </span>--runtime<span class="w"> </span>python<span cl
 </section>
 <section id="checks">
 <h2>Checks<a class="headerlink" href="#checks" title="Link to this heading">#</a></h2>
-<p>Python:</p>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>ruff<span class="w"> </span>format<span class="w"> </span>.
+<p>Python, with the ruff version CI uses (pinned in the <code class="docutils literal notranslate"><span class="pre">lint</span></code> dependency group of <code class="docutils literal notranslate"><span class="pre">pyproject.toml</span></code>):</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>pip<span class="w"> </span>install<span class="w"> </span>--group<span class="w"> </span>lint<span class="w">        </span><span class="c1"># or: uv pip install --group lint</span>
 ruff<span class="w"> </span>check<span class="w"> </span>.
+ruff<span class="w"> </span>format<span class="w"> </span>.<span class="w">                   </span><span class="c1"># not enforced by CI yet; format the files you change</span>
 </pre></div>
 </div>
 <p>Rust (formatting settings in <code class="docutils literal notranslate"><span class="pre">rust/rustfmt.toml</span></code>):</p>
@@ -562,7 +563,9 @@ tests in <code class="docutils literal notranslate"><span class="pre">rust/src/s
 </section>
 <section id="continuous-integration">
 <h2>Continuous integration<a class="headerlink" href="#continuous-integration" title="Link to this heading">#</a></h2>
-<p>CI runs on CPU-only GitHub runners:</p>
+<p>CI runs on CPU-only GitHub runners, for pull requests (including those from forks; GitHub asks a
+maintainer to approve runs for first-time contributors) and pushes to <code class="docutils literal notranslate"><span class="pre">main</span></code>. Pushing again to a pull
+request cancels its previous run.</p>
 <ul class="simple">
 <li><p><code class="docutils literal notranslate"><span class="pre">.github/workflows/ci.yml</span></code>: <code class="docutils literal notranslate"><span class="pre">ruff</span> <span class="pre">check</span></code>, and <code class="docutils literal notranslate"><span class="pre">pytest</span> <span class="pre">tests</span></code> with CPU-only PyTorch (the prompt
 parity test is skipped there).</p></li>
@@ -588,7 +591,8 @@ every Python version from 3.12. Run it locally (Docker or Podman) with
 <span class="pre">.github/scripts/build-dists.sh</span> <span class="pre">dist</span></code>.</p></li>
 <li><p><code class="docutils literal notranslate"><span class="pre">.github/workflows/publish.yml</span></code>: on a published GitHub release, builds the distributions with
 <code class="docutils literal notranslate"><span class="pre">dists.yml</span></code> and uploads them to PyPI (trusted publishing).</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">.github/workflows/docs.yml</span></code>: builds and publishes this documentation (pushes to <code class="docutils literal notranslate"><span class="pre">main</span></code>).</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">.github/workflows/docs.yml</span></code>: builds this documentation for pull requests, and builds and publishes it
+for pushes to <code class="docutils literal notranslate"><span class="pre">main</span></code>.</p></li>
 </ul>
 <p>There is no GPU test suite. Validate changes that touch the GPU path by serving with both runtimes:</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>localhost:8000/generate<span class="w"> </span>-F<span class="w"> </span><span class="s2">"text=Hello world"</span><span class="w"> </span>-F<span class="w"> </span><span class="s2">"streaming=true"</span><span class="w"> </span>-o<span class="w"> </span>out.wav
