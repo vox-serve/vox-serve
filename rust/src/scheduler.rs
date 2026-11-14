@@ -35,6 +35,9 @@ pub struct Submit {
     pub tx: UnboundedSender<Event>,
     /// Text tokens arriving after submission (input streaming); closing the channel ends the text.
     pub text_rx: Option<Receiver<Vec<i32>>>,
+    /// Text arriving after submission for models that read it in turns (`Model::turn_stream`); closing
+    /// the channel ends the text.
+    pub turn_rx: Option<Receiver<String>>,
 }
 
 /// Text still to be fed to an input-streaming request's decode rows.
@@ -76,6 +79,124 @@ impl TextIn {
     }
 }
 
+/// Text of an interleaved input-streaming request not yet given to the model. It is taken as the next
+/// turn once the current turn's audio has ended.
+struct TurnIn {
+    rx: Receiver<String>,
+    buf: String,
+    complete: bool,
+    /// Turns appended after the prompt's.
+    turn: i64,
+}
+
+impl TurnIn {
+    fn poll(&mut self) {
+        loop {
+            match self.rx.try_recv() {
+                Ok(t) => self.buf.push_str(&t),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.complete = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    /// The text is complete and all of it has been taken.
+    fn finished(&self) -> bool {
+        self.complete && self.buf.trim().is_empty()
+    }
+
+    /// The next turn's text, if there is enough (see `turn_cut`); all of it once the text is complete.
+    fn take(&mut self, min_words: usize, max_words: usize) -> Option<String> {
+        if self.complete {
+            let t = std::mem::take(&mut self.buf);
+            return (!t.trim().is_empty()).then_some(t);
+        }
+        let cut = turn_cut(&self.buf, min_words, max_words)?;
+        Some(self.buf.drain(..cut).collect())
+    }
+}
+
+/// Byte length of the text a turn may take from `buf` while more may follow (see `TurnIn::take`): up to
+/// the last clause boundary (`.,!?;:` before whitespace, or CJK punctuation) with at least `min_words`
+/// words before it; without one, up to the last word boundary once `max_words` complete words are buffered
+/// (a run-on sentence); otherwise nothing yet. Turn boundaries cost a short pause, so they go where speech
+/// pauses anyway.
+pub(crate) fn turn_cut(buf: &str, min_words: usize, max_words: usize) -> Option<usize> {
+    let cjk = |c: char| matches!(c, '。' | '！' | '？' | '，' | '、' | '；' | '：');
+    let clause = |c: char| matches!(c, '.' | ',' | '!' | '?' | ';' | ':') || cjk(c);
+    let chars: Vec<(usize, char)> = buf.char_indices().collect();
+    let words_before = |at: usize| buf[..at].split_whitespace().count();
+    // A run-on cut avoids ending the turn on a word that leads into the next one ("...take the | bus").
+    let leads_on = |at: usize| {
+        let last = buf[..at].split_whitespace().last().unwrap_or("").to_lowercase();
+        matches!(
+            last.as_str(),
+            "a" | "an"
+                | "the"
+                | "to"
+                | "of"
+                | "in"
+                | "on"
+                | "at"
+                | "for"
+                | "with"
+                | "from"
+                | "by"
+                | "and"
+                | "or"
+                | "but"
+                | "if"
+                | "that"
+                | "my"
+                | "your"
+                | "our"
+                | "their"
+                | "his"
+                | "her"
+                | "its"
+                | "is"
+                | "are"
+                | "was"
+                | "were"
+                | "be"
+                | "will"
+                | "would"
+                | "can"
+                | "could"
+                | "should"
+                | "very"
+                | "this"
+        )
+    };
+    let mut clause_cut = None;
+    let mut word_cut = None;
+    for (k, &(i, c)) in chars.iter().enumerate() {
+        if c.is_whitespace() {
+            if i > 0 && !chars[k - 1].1.is_whitespace() && !leads_on(i) {
+                word_cut = Some(i);
+            }
+            // Punctuation (and closing quotes / brackets) right before this whitespace.
+            let mut j = k;
+            while j > 0 && matches!(chars[j - 1].1, '"' | '\'' | ')' | ']' | '”' | '’') {
+                j -= 1;
+            }
+            if j > 0 && clause(chars[j - 1].1) {
+                clause_cut = Some(i);
+            }
+        } else if cjk(c) {
+            clause_cut = Some(i + c.len_utf8());
+            word_cut = clause_cut;
+        }
+    }
+    if let Some(at) = clause_cut.filter(|&at| words_before(at) >= min_words || buf[..at].chars().any(cjk)) {
+        return Some(at);
+    }
+    word_cut.filter(|&at| words_before(at) >= max_words)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum Policy {
     /// `input_streaming`: the Python runtime's name; every Rust policy serves input streaming.
@@ -112,6 +233,21 @@ struct Req {
     sampling: SamplingParams,
     seed: i64,
     text_in: Option<TextIn>,
+    turns: Option<TurnIn>,
+    /// Interleaved input streaming: the current turn's audio has ended and the request waits for text
+    /// (it keeps its slot and KV cache).
+    awaiting: bool,
+    /// The next turn's rows (`prompt`) are ready to prefill at `prefill_start`.
+    turn_ready: bool,
+    /// First position of the rows `prompt` holds (0 for the request's prompt, `next_pos` for a turn).
+    prefill_start: usize,
+    /// `steps` when the current turn started: the program's step counts from the turn's first audio row.
+    turn_step0: i32,
+    /// First audio row of the current turn's end rows (EOC in codebook 0 and the rows finishing the
+    /// delayed codebooks). Provisional while another turn may follow: its first rows overlay them.
+    tail_from: Option<usize>,
+    /// The previous turn's end rows that the current turn's first rows overlay.
+    merge_at: Option<usize>,
 
     slot: Option<i32>,
     /// Detokenizer state slot (stateful codecs only); held until the request finishes.
@@ -602,6 +738,13 @@ impl Scheduler {
             sampling: s.sampling,
             seed: s.seed as i64,
             text_in: s.text_rx.map(|rx| TextIn { rx, queue: VecDeque::new(), complete: false, eos_sent: false }),
+            turns: s.turn_rx.map(|rx| TurnIn { rx, buf: String::new(), complete: false, turn: 0 }),
+            awaiting: false,
+            turn_ready: false,
+            prefill_start: 0,
+            turn_step0: 0,
+            tail_from: None,
+            merge_at: None,
             slot: None,
             dt_slot: None,
             pages: Vec::new(),
@@ -632,7 +775,11 @@ impl Scheduler {
             if let Some(t) = r.text_in.as_mut() {
                 t.poll();
             }
+            if let Some(t) = r.turns.as_mut() {
+                t.poll();
+            }
         }
+        self.advance_turns();
         if self.cfg.v2.enabled {
             return self.step_async(t0);
         }
@@ -1167,6 +1314,62 @@ impl Scheduler {
         (chunks, completions)
     }
 
+    /// Interleaved input streaming: requests waiting for text either end (the text is complete) or
+    /// stage their next turn's rows for a prefill at the end of their KV cache.
+    fn advance_turns(&mut self) {
+        let Some(spec) = self.model.turn_stream() else { return };
+        let c = self.c;
+        let model = self.model.clone();
+        let mut done = Vec::new();
+        for (i, r) in self.reqs.iter_mut().enumerate() {
+            if !r.awaiting {
+                continue;
+            }
+            let t = r.turns.as_mut().expect("awaiting requests stream text in turns");
+            if t.finished() {
+                r.finish_reason = "stop_id_encountered";
+                done.push(i);
+                continue;
+            }
+            let Some(text) = t.take(spec.min_words, spec.max_words) else { continue };
+            match model.turn_rows(&text) {
+                Ok(p) if r.next_pos + p.tokens.len() / c + 1 < self.max_context => {
+                    t.turn += 1;
+                    tracing::debug!(request_id = %r.id, turn = t.turn, pos = r.next_pos, text = %text.trim(), "input streaming: next turn");
+                    r.prompt_len = p.tokens.len() / c;
+                    r.prompt = p.tokens;
+                    r.prompt_mask = p.mask;
+                    r.prefill_start = r.next_pos;
+                    r.turn_step0 = r.steps;
+                    r.awaiting = false;
+                    r.turn_ready = true;
+                }
+                Ok(_) => {
+                    tracing::warn!(request_id = %r.id, "input streaming: context full, dropping the rest of the text");
+                    r.finish_reason = "max_context_reached";
+                    done.push(i);
+                }
+                Err(e) => {
+                    let _ = r.tx.send(Event::Error(e.to_string()));
+                    r.finish_reason = "error";
+                    done.push(i);
+                }
+            }
+        }
+        for i in done {
+            let r = &mut self.reqs[i];
+            // The last turn's end rows are final: the audio ends here.
+            r.awaiting = false;
+            r.done_lm = true;
+            r.merge_at = None;
+            r.n_frames = r.audio.len() / c;
+            if let Some(s) = r.slot.take() {
+                self.free_slots.push(s);
+            }
+            self.free_pages.append(&mut r.pages);
+        }
+    }
+
     fn drop_disconnected(&mut self) {
         let mut i = 0;
         while i < self.reqs.len() {
@@ -1327,8 +1530,14 @@ impl Scheduler {
 
         let now = Instant::now();
         let is_deadline = self.cfg.policy == Policy::Deadline;
-        let decodable =
-            |r: &Req| r.slot.is_some() && !r.done_lm && r.steps > 0 && r.text_in.as_ref().is_none_or(TextIn::ready);
+        let decodable = |r: &Req| {
+            r.slot.is_some()
+                && !r.done_lm
+                && r.steps > 0
+                && !r.awaiting
+                && !r.turn_ready
+                && r.text_in.as_ref().is_none_or(TextIn::ready)
+        };
         let mut decode_order = Vec::new();
         let mut min_slack = f64::INFINITY;
         if is_deadline {
@@ -1368,11 +1577,17 @@ impl Scheduler {
                 break;
             }
             let r = &self.reqs[i];
-            if r.slot.is_some() || r.done_lm {
+            if r.done_lm || (r.slot.is_some() && !r.turn_ready) {
                 continue;
             }
             if rows + r.prompt_len > max_rows {
                 break;
+            }
+            if r.turn_ready {
+                // A later turn: the request holds its slot and KV pages.
+                rows += r.prompt_len;
+                picked.push(i);
+                continue;
             }
             let n_pages = kv_pages_needed(r.prompt_len, self.model.max_tokens(), self.max_context, self.page_size);
             let free_dt = self.free_dt_slots.as_ref().map(Vec::len);
@@ -1397,8 +1612,14 @@ impl Scheduler {
 
         // Decodes: pressing first (online), then the rest.
         let room = |picked: &Vec<usize>, rows: usize| picked.len() < self.max_bs && (n_prefill == 0 || rows < max_rows);
-        let decodable =
-            |r: &Req| r.slot.is_some() && !r.done_lm && r.steps > 0 && r.text_in.as_ref().is_none_or(TextIn::ready);
+        let decodable = |r: &Req| {
+            r.slot.is_some()
+                && !r.done_lm
+                && r.steps > 0
+                && !r.awaiting
+                && !r.turn_ready
+                && r.text_in.as_ref().is_none_or(TextIn::ready)
+        };
         if is_deadline {
             for i in decode_order {
                 if !room(&picked, rows) {
@@ -1471,7 +1692,7 @@ impl Scheduler {
                 _ => None,
             };
             let r = &self.reqs[ri];
-            let (start, len) = if prefill { (0, r.prompt_len) } else { (r.next_pos, 1) };
+            let (start, len) = if prefill { (r.prefill_start, r.prompt_len) } else { (r.next_pos, 1) };
             {
                 let tok = inp.get_mut(f.tok);
                 if prefill {
@@ -1520,8 +1741,11 @@ impl Scheduler {
             inp.get_mut(f.top_p)[e] = s.top_p;
             inp.get_mut(f.min_p)[e] = s.min_p;
             inp.get_mut(f.rep_pen)[e] = s.repetition_penalty;
-            inp.get_mut(f.seed)[e] = r.seed;
-            inp.get_mut(f.step)[e] = r.steps;
+            // Later turns: the step counts from the turn's first audio row (the delay pattern restarts),
+            // with a fresh random stream.
+            let turn = r.turns.as_ref().map_or(0, |t| t.turn);
+            inp.get_mut(f.seed)[e] = r.seed ^ turn.wrapping_mul(0x9E37_79B9_7F4A_7C15_u64 as i64);
+            inp.get_mut(f.step)[e] = r.steps - r.turn_step0;
             row += len;
         }
 
@@ -1714,27 +1938,54 @@ impl Scheduler {
         let kinds = self.engine.outputs.get(self.f.out_kind);
         let max_tokens = self.model.max_tokens();
         let preseed = self.model.audio_preseed_frames();
+        let turn_spec = self.model.turn_stream();
         let mut done = Vec::new();
         for (e, &ri) in b.reqs.iter().enumerate() {
             let tok = &out[e * c..(e + 1) * c];
             let r = &mut self.reqs[ri];
-            r.next_pos = if e < b.n_prefill { r.prompt_len } else { r.next_pos + 1 };
+            r.next_pos = if e < b.n_prefill { r.prefill_start + r.prompt_len } else { r.next_pos + 1 };
             if e < b.n_prefill {
                 r.features = None;
+                r.turn_ready = false;
             }
+            let turn_step = r.steps - r.turn_step0;
             r.steps += 1;
             match TokenKind::from_code(kinds[e]) {
                 TokenKind::Audio => {
-                    if r.n_frames == 0 && preseed > 0 {
+                    if r.audio.is_empty() && preseed > 0 {
                         r.audio.resize(preseed * c, 0);
-                        r.n_frames = preseed;
                     }
-                    r.audio.extend_from_slice(tok);
-                    r.n_frames += 1;
+                    match (turn_spec, r.merge_at) {
+                        (Some(spec), Some(base)) if (turn_step as usize) < spec.tail_rows => {
+                            // A later turn's first rows: their leading codebooks (the rest are BOC) complete
+                            // the previous turn's end rows, whose trailing codebooks hold its last frames.
+                            let s = turn_step as usize;
+                            let at = (base + s) * c;
+                            r.audio[at..=at + s.min(c - 1)].copy_from_slice(&tok[..=s.min(c - 1)]);
+                            if s + 1 == spec.tail_rows {
+                                r.merge_at = None;
+                            }
+                        }
+                        _ => {
+                            r.merge_at = None;
+                            r.audio.extend_from_slice(tok);
+                            if let Some(spec) = turn_spec.filter(|_| r.turns.is_some()) {
+                                if r.tail_from.is_none() && turn_step >= spec.min_eoc_step && tok[0] == spec.eoc {
+                                    r.tail_from = Some(r.audio.len() / c - 1);
+                                }
+                            }
+                        }
+                    }
                 }
                 TokenKind::Stop => {
-                    r.done_lm = true;
-                    r.finish_reason = "stop_id_encountered";
+                    if r.turns.as_ref().is_some_and(|t| !t.finished()) {
+                        // The turn's audio has ended, the text has not: wait for the next turn.
+                        r.awaiting = true;
+                        r.merge_at = r.tail_from.take();
+                    } else {
+                        r.done_lm = true;
+                        r.finish_reason = "stop_id_encountered";
+                    }
                 }
                 TokenKind::Other => {}
             }
@@ -1745,7 +1996,11 @@ impl Scheduler {
                 r.done_lm = true;
                 r.finish_reason = "max_context_reached";
             }
+            // Audio rows the codec may decode: not the end rows of a turn another one may follow.
+            let rows = r.audio.len() / c;
+            r.n_frames = if r.done_lm { rows } else { r.tail_from.or(r.merge_at).unwrap_or(rows) };
             if r.done_lm {
+                r.awaiting = false;
                 done.push(ri);
             }
         }
@@ -2104,6 +2359,40 @@ mod tests {
         assert!(offline_may_decode([(true, true), (false, false)].into_iter()), "waiting requests do not block");
         assert!(!offline_may_decode([(true, false), (true, true)].into_iter()), "a generating request blocks");
         assert!(offline_may_decode(std::iter::empty()));
+    }
+
+    #[test]
+    fn turn_text() {
+        // Clause boundaries with >= 3 words before them; the last one wins.
+        assert_eq!(turn_cut("Welcome back to the", 3, 10), None);
+        assert_eq!(turn_cut("Welcome back to the show. Today we", 3, 10), Some("Welcome back to the show.".len()));
+        assert_eq!(turn_cut("Hi. Welcome back, my friend. Today", 3, 10), Some("Hi. Welcome back, my friend.".len()));
+        assert_eq!(turn_cut("Hi. Wel", 3, 10), None);
+        assert_eq!(turn_cut("He said \"stop.\" Then", 2, 10), Some("He said \"stop.\"".len()));
+        // No whitespace after the period: not a boundary.
+        assert_eq!(turn_cut("It costs 3.5 dollars", 1, 10), None);
+        // Run-on text: the last word boundary once 10 complete words are buffered.
+        let run_on = "one two three four five six seven eight nine ten elev";
+        assert_eq!(turn_cut(run_on, 3, 10), Some(run_on.len() - " elev".len()));
+        assert_eq!(turn_cut("one two three four five six seven eight nine te", 3, 10), None);
+        let lead = "The quickest way to get to the station is to take the bu";
+        assert_eq!(turn_cut(lead, 3, 10), Some("The quickest way to get to the station is to take".len()));
+        assert_eq!(turn_cut("你好。今天", 3, 10), Some("你好。".len()));
+        assert_eq!(turn_cut("   ", 1, 10), None);
+
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut t = TurnIn { rx, buf: String::new(), complete: false, turn: 0 };
+        tx.send("One two three, four fi".into()).unwrap();
+        t.poll();
+        assert_eq!(t.take(3, 10), Some("One two three,".into()));
+        tx.send("ve".into()).unwrap();
+        t.poll();
+        assert_eq!(t.take(3, 10), None);
+        drop(tx);
+        t.poll();
+        assert!(!t.finished());
+        assert_eq!(t.take(3, 10), Some(" four five".into()));
+        assert!(t.finished());
     }
 
     #[test]

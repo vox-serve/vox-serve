@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Input streaming for Higgs Audio v3 TTS** (Rust runtime): text sent while audio is generated is appended
+  as the model's next turn (`<|text|> chunk <|audio|>`) in the same request and KV cache
+
 ## [0.2.0] - 2026-11-01
 
 VoxServe v2: a Rust serving runtime and spatial GPU splitting by the urgency of audio work. See the

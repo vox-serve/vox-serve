@@ -414,6 +414,11 @@ class HiggsTTSProgram(LMProgram):
             "preseed_frames": self.preseed,
             "audio_len_in_row": True,
             "chunk_samples": CORE * HOP,
+            # Input streaming (Rust runtime): the model's multi-turn layout, ``<|text|> chunk <|audio|> [audio]``
+            # repeated in one sequence. Text arriving during a turn's audio becomes the next turn, appended once
+            # that audio has ended (EOC in codebook 0, then N_CB - 1 rows finishing the delayed codebooks).
+            "turn_stream": {"eoc": EOC, "min_eoc_step": N_CB, "tail_rows": N_CB - 1,
+                            "min_words": 3, "max_words": 10},
             "sampling": {
                 "temperature": 0.8,
                 "top_k": 50,

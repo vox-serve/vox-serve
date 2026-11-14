@@ -31,7 +31,7 @@ The shortest complete example is Orpheus (Llama-3.2-3B with the SNAC codec), who
 in :ref:`step 2 <adding-a-model:2. the program>`. The other programs cover multi-codebook models
 (``zonos``, ``higgs_tts``), depth transformers (``csm``, ``qwen3_tts``), flow-matching codecs (``cosyvoice2``,
 ``chatterbox``), voice cloning (``chatterbox``, ``cosyvoice3``), audio input (``step_audio_2``, ``glm_voice``),
-input streaming (``qwen3_tts``) and a codec that decodes the LM's hidden states, carried to it in the token rows
+input streaming (``qwen3_tts``; in turns: ``higgs_tts``) and a codec that decodes the LM's hidden states, carried to it in the token rows
 (``xtts``).
 
 How a program runs
@@ -154,6 +154,9 @@ Optional pieces (look at the programs named for examples):
      - Audio input: encoded audio rows that prompts reference through the input mask (``step_audio_2``).
    * - ``tokenize_stream_text``, ``preprocess_streaming`` + ``meta["text_stream"]``
      - Input streaming: text arriving while audio is generated (``qwen3_tts``).
+   * - ``turn_rows`` + ``meta["turn_stream"]``
+     - Input streaming for models that read text in turns (``higgs_tts``): text arriving during a turn's audio is
+       prefilled as the next turn once that audio has ended, in the same request and KV cache.
    * - ``supports_urgent_lane = True``
      - The codec can run on a second lane at the same time (no shared scratch state between calls).
    * - ``decode_head`` / ``decode_depth`` (``supports_depth_split``), ``backbone_range``

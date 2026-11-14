@@ -136,4 +136,19 @@ impl PromptBuilder for HiggsTts {
         text_row(self.audio, &mut tokens, &mut mask);
         Ok(Prompt { tokens, mask: Some(mask), features: None, hold: None })
     }
+
+    /// `<|text|> text <|audio|>`: a later turn of an input-streaming request, after the previous turn's
+    /// audio (the model's multi-turn layout: each turn's audio a delay pattern closed by its EOC rows).
+    fn turn_rows(&self, text: &str) -> Result<Prompt> {
+        let mut tokens = Vec::new();
+        let mut mask = Vec::new();
+        let ids = std::iter::once(self.text).chain(self.encode_text(text.trim())?).chain(std::iter::once(self.audio));
+        for id in ids {
+            tokens.push(id);
+            tokens.extend_from_slice(&[0; C - 1]);
+            mask.push(self.text_kind);
+            mask.extend_from_slice(&[0; C - 1]);
+        }
+        Ok(Prompt { tokens, mask: Some(mask), features: None, hold: None })
+    }
 }
