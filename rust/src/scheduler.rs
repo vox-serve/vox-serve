@@ -120,10 +120,11 @@ impl TurnIn {
 }
 
 /// Byte length of the text a turn may take from `buf` while more may follow (see `TurnIn::take`): up to
-/// the last clause boundary (`.,!?;:` before whitespace, or CJK punctuation) with at least `min_words`
-/// words before it; without one, up to the last word boundary once `max_words` complete words are buffered
-/// (a run-on sentence); otherwise nothing yet. Turn boundaries cost a short pause, so they go where speech
-/// pauses anyway.
+/// the last clause boundary (`.,!?;:` before whitespace or at the end, or CJK punctuation) with at least
+/// `min_words` words before it (2 for a sentence end); without one, up to the last word boundary once
+/// `max_words` complete words are buffered (a run-on sentence); otherwise nothing yet. A turn that ends
+/// mid-phrase often makes the model add a word at its end or garble the next turn's first one, so the
+/// run-on cut is a last resort.
 pub(crate) fn turn_cut(buf: &str, min_words: usize, max_words: usize) -> Option<usize> {
     let cjk = |c: char| matches!(c, '。' | '！' | '？' | '，' | '、' | '；' | '：');
     let clause = |c: char| matches!(c, '.' | ',' | '!' | '?' | ';' | ':') || cjk(c);
@@ -173,9 +174,13 @@ pub(crate) fn turn_cut(buf: &str, min_words: usize, max_words: usize) -> Option<
     };
     let mut clause_cut = None;
     let mut word_cut = None;
-    for (k, &(i, c)) in chars.iter().enumerate() {
+    // The end of the buffer ends a clause too ("...take the bus." before `/end` arrives), unless the
+    // mark may be part of a number still arriving ("3." of "3.5", "1," of "1,000").
+    for k in 0..=chars.len() {
+        let at_end = k == chars.len();
+        let (i, c) = if at_end { (buf.len(), ' ') } else { chars[k] };
         if c.is_whitespace() {
-            if i > 0 && !chars[k - 1].1.is_whitespace() && !leads_on(i) {
+            if !at_end && i > 0 && !chars[k - 1].1.is_whitespace() && !leads_on(i) {
                 word_cut = Some(i);
             }
             // Punctuation (and closing quotes / brackets) right before this whitespace.
@@ -183,7 +188,11 @@ pub(crate) fn turn_cut(buf: &str, min_words: usize, max_words: usize) -> Option<
             while j > 0 && matches!(chars[j - 1].1, '"' | '\'' | ')' | ']' | '”' | '’') {
                 j -= 1;
             }
-            if j > 0 && clause(chars[j - 1].1) {
+            let mark = if j > 0 { chars[j - 1].1 } else { ' ' };
+            let in_number = at_end && matches!(mark, '.' | ',') && j > 1 && chars[j - 2].1.is_ascii_digit();
+            // A sentence may be short ("Great question!"); a clause inside one needs `min_words`.
+            let need = if matches!(mark, '.' | '!' | '?') { min_words.min(SENTENCE_MIN_WORDS) } else { min_words };
+            if clause(mark) && !in_number && words_before(i) >= need {
                 clause_cut = Some(i);
             }
         } else if cjk(c) {
@@ -191,11 +200,11 @@ pub(crate) fn turn_cut(buf: &str, min_words: usize, max_words: usize) -> Option<
             word_cut = clause_cut;
         }
     }
-    if let Some(at) = clause_cut.filter(|&at| words_before(at) >= min_words || buf[..at].chars().any(cjk)) {
-        return Some(at);
-    }
-    word_cut.filter(|&at| words_before(at) >= max_words)
+    clause_cut.or(word_cut.filter(|&at| words_before(at) >= max_words))
 }
+
+/// Words a turn ending a sentence needs (see `turn_cut`).
+const SENTENCE_MIN_WORDS: usize = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum Policy {
@@ -263,8 +272,8 @@ struct Req {
     /// Audio frames, flattened `[n_frames, C]`.
     audio: Vec<i32>,
     n_frames: usize,
-    /// Start index of the last scheduled detokenization chunk.
-    last_detok: Option<usize>,
+    /// Where the next detokenization chunk starts.
+    dc: DetokCursor,
 
     received: Instant,
     /// Estimated client playback end; rebased when a late chunk arrives.
@@ -277,9 +286,106 @@ struct Req {
     pressing: bool,
 }
 
+/// Where a request's next detokenization chunk starts. Chunks start `step` rows apart; each decodes a
+/// window and emits the `step` frames after its first `left` (codec context), up to the end of the audio.
+#[derive(Clone, Copy, Debug, Default)]
+struct DetokCursor {
+    /// Start of the last scheduled chunk.
+    last: Option<usize>,
+    /// Start of the next chunk after a flush (overrides `last + step`).
+    at: Option<usize>,
+    /// While a request waits for text (input streaming in turns), the codec decodes the turn's audio to
+    /// its end as if the request ended there, so its last words play instead of waiting for the next
+    /// turn's look-ahead.
+    flush: Option<Flush>,
+}
+
+/// A turn's audio decoded to its end while the request waits for text (see `DetokCursor::flush`).
+#[derive(Clone, Copy, Debug)]
+struct Flush {
+    /// Audio rows through the turn's end rows (the codec emits the frames before them, as at a request's end).
+    rows: usize,
+    /// Chunk start once the next turn's rows arrive: the codec's left context before the first frame
+    /// the flush did not emit.
+    resume: usize,
+    /// The chunk that emits the turn's last frames has been scheduled.
+    scheduled: bool,
+}
+
+impl DetokCursor {
+    fn next(&self, step: usize) -> usize {
+        self.at.unwrap_or_else(|| self.last.map_or(0, |i| i + step))
+    }
+
+    /// The turn's audio ends at frame `base` (its end rows reach `rows`); decode it to the end unless
+    /// it already is. Chunks emit from `left` frames into their window.
+    fn start_flush(&mut self, base: usize, rows: usize, left: usize, step: usize) {
+        if base > left && self.next(step) < base - left {
+            self.flush = Some(Flush { rows, resume: base - left, scheduled: false });
+        }
+    }
+
+    /// `(rows, ended)` the codec may decode, given the request's: a flushing turn's through its end
+    /// rows. `None` once the flush is scheduled and the request waits for the next turn's rows.
+    fn view(&self, n_frames: usize, done_lm: bool) -> Option<(usize, bool)> {
+        match self.flush {
+            Some(f) if f.scheduled => None,
+            Some(f) => Some((f.rows, true)),
+            None => Some((n_frames, done_lm)),
+        }
+    }
+
+    /// Records a scheduled chunk (in start order).
+    fn mark(&mut self, start: usize, step: usize) {
+        if self.flush.is_some_and(|f| f.scheduled) {
+            // A trailing window of the flush (as at a request's end) emits nothing: decoding resumes at
+            // `at` once the next turn's rows arrive.
+            return;
+        }
+        self.last = Some(match self.at.take() {
+            Some(_) => start,
+            None => self.last.map_or(start, |x| x.max(start)),
+        });
+        // The chunk whose emitted frames reach the turn's end completes the flush. Resuming after an
+        // earlier one instead would skip the frames it emitted past its `step`.
+        if let Some(f) = self.flush.as_mut().filter(|f| !f.scheduled && start + step >= f.resume) {
+            f.scheduled = true;
+            self.at = Some(f.resume);
+        }
+    }
+}
+
 impl Req {
     fn next_detok(&self, step: usize) -> usize {
-        self.last_detok.map_or(0, |i| i + step)
+        self.dc.next(step)
+    }
+
+    fn detok_view(&self) -> Option<(usize, bool)> {
+        self.dc.view(self.n_frames, self.done_lm)
+    }
+
+    fn detok_ready(&self, step: usize, iv: usize) -> DetokReady {
+        match self.detok_view() {
+            // A flush never completes the request: its turn may be followed by another.
+            Some((n, _)) if self.dc.flush.is_some() => {
+                if self.next_detok(step) < n {
+                    DetokReady::Chunk
+                } else {
+                    DetokReady::Wait
+                }
+            }
+            Some((n, ended)) => detok_ready(self.slot.is_some(), ended, self.next_detok(step), n, iv),
+            None => DetokReady::Wait,
+        }
+    }
+
+    /// Rows a chunk launched now reads.
+    fn detok_rows(&self) -> usize {
+        self.dc.flush.map_or(self.n_frames, |f| f.rows)
+    }
+
+    fn mark_detok(&mut self, start: usize, step: usize) {
+        self.dc.mark(start, step);
     }
 }
 
@@ -754,7 +860,7 @@ impl Scheduler {
             finish_reason: "unknown",
             audio: Vec::new(),
             n_frames: 0,
-            last_detok: None,
+            dc: DetokCursor::default(),
             received: Instant::now(),
             playback_end: None,
             emitted_next: 0,
@@ -1094,7 +1200,11 @@ impl Scheduler {
                     return false;
                 }
                 let next = r.next_detok(st);
-                let ready = if r.done_lm { next < r.n_frames } else { next + iv <= r.n_frames };
+                let ready = match r.detok_view() {
+                    Some((n, true)) => next < n,
+                    Some((n, false)) => next + iv <= n,
+                    None => false,
+                };
                 ready && self.is_urgent(i, now)
             })
             .collect();
@@ -1108,8 +1218,7 @@ impl Scheduler {
         for (row, &i) in cand.iter().enumerate() {
             let start = self.reqs[i].next_detok(st);
             chunks.push(DetokChunk { req: i, start, row });
-            let r = &mut self.reqs[i];
-            r.last_detok = Some(r.last_detok.map_or(start, |x| x.max(start)));
+            self.reqs[i].mark_detok(start, st);
         }
         chunks
     }
@@ -1267,7 +1376,7 @@ impl Scheduler {
             if self.chunk_in_flight(r.key) {
                 continue;
             }
-            match detok_ready(r.slot.is_some(), r.done_lm, r.next_detok(st), r.n_frames, iv) {
+            match r.detok_ready(st, iv) {
                 DetokReady::Chunk => cand.push(i),
                 DetokReady::Complete => completions.push(i),
                 DetokReady::Wait => {}
@@ -1308,8 +1417,7 @@ impl Scheduler {
         for (row, &i) in cand.iter().take(take).enumerate() {
             let start = self.reqs[i].next_detok(st);
             chunks.push(DetokChunk { req: i, start, row });
-            let r = &mut self.reqs[i];
-            r.last_detok = Some(r.last_detok.map_or(start, |x| x.max(start)));
+            self.reqs[i].mark_detok(start, st);
         }
         (chunks, completions)
     }
@@ -1343,6 +1451,7 @@ impl Scheduler {
                     r.turn_step0 = r.steps;
                     r.awaiting = false;
                     r.turn_ready = true;
+                    r.dc.flush = None;
                 }
                 Ok(_) => {
                     tracing::warn!(request_id = %r.id, "input streaming: context full, dropping the rest of the text");
@@ -1362,6 +1471,7 @@ impl Scheduler {
             r.awaiting = false;
             r.done_lm = true;
             r.merge_at = None;
+            r.dc.flush = None;
             r.n_frames = r.audio.len() / c;
             if let Some(s) = r.slot.take() {
                 self.free_slots.push(s);
@@ -1414,7 +1524,7 @@ impl Scheduler {
 
         let mut candidates = Vec::new();
         for (i, r) in self.reqs.iter().enumerate() {
-            match detok_ready(r.slot.is_some(), r.done_lm, r.next_detok(st), r.n_frames, iv) {
+            match r.detok_ready(st, iv) {
                 DetokReady::Chunk => candidates.push(i),
                 DetokReady::Complete => completions.push(i),
                 DetokReady::Wait => {}
@@ -1422,8 +1532,10 @@ impl Scheduler {
         }
 
         // Up to `budget` chunk start indices of request `r`.
-        let assign =
-            |r: &Req, budget: usize| chunk_starts(r.next_detok(st), r.n_frames, iv, st, r.done_lm, budget.min(per_req));
+        let assign = |r: &Req, budget: usize| match r.detok_view() {
+            Some((n, ended)) => chunk_starts(r.next_detok(st), n, iv, st, ended, budget.min(per_req)),
+            None => Vec::new(),
+        };
 
         match self.cfg.policy {
             Policy::Deadline => {
@@ -1468,8 +1580,9 @@ impl Scheduler {
                     .iter()
                     .map(|&i| {
                         let r = &self.reqs[i];
-                        let remaining = r.n_frames.saturating_sub(r.next_detok(st));
-                        (remaining / st + usize::from(r.done_lm && remaining > 0)).min(per_req)
+                        let (n, ended) = r.detok_view().unwrap_or((0, false));
+                        let remaining = n.saturating_sub(r.next_detok(st));
+                        (remaining / st + usize::from(ended && remaining > 0)).min(per_req)
                     })
                     .collect();
                 let assigned = online_budgets(counts, cap);
@@ -1493,8 +1606,7 @@ impl Scheduler {
         }
         for (k, ch) in chunks.iter_mut().enumerate() {
             ch.row = k;
-            let r = &mut self.reqs[ch.req];
-            r.last_detok = Some(r.last_detok.map_or(ch.start, |x| x.max(ch.start)));
+            self.reqs[ch.req].mark_detok(ch.start, st);
         }
         (chunks, completions)
     }
@@ -1822,7 +1934,7 @@ impl Scheduler {
                 let (len, last) = match chunks.get(k) {
                     Some(ch) => {
                         let r = &self.reqs[ch.req];
-                        let len = (ch.start + iv).min(r.n_frames) - ch.start;
+                        let len = (ch.start + iv).min(r.detok_rows()) - ch.start;
                         (len as i32, i32::from(final_chunk(r.done_lm, ch.start, r.n_frames, iv, st, true)))
                     }
                     None => (0, 0),
@@ -1849,7 +1961,7 @@ impl Scheduler {
         let dt = self.engine.lane_inputs(lane).get_mut(f_tok);
         for (k, ch) in chunks.iter().enumerate() {
             let r = &self.reqs[ch.req];
-            let end = (ch.start + iv).min(r.n_frames);
+            let end = (ch.start + iv).min(r.detok_rows());
             let dst = &mut dt[k * iv * c..(k + 1) * iv * c];
             let real = end - ch.start;
             dst[..real * c].copy_from_slice(&r.audio[ch.start * c..end * c]);
@@ -1876,7 +1988,7 @@ impl Scheduler {
         for ch in chunks {
             let k = ch.row;
             let r = &mut self.reqs[ch.req];
-            let real = (r.n_frames - ch.start).min(iv);
+            let real = r.detok_rows().saturating_sub(ch.start).min(iv);
             let (len, skip) = if self.audio_len_in_row {
                 ((audio[k * n + n - 1].max(0) as usize).min(n - 1), 0)
             } else {
@@ -1939,6 +2051,7 @@ impl Scheduler {
         let max_tokens = self.model.max_tokens();
         let preseed = self.model.audio_preseed_frames();
         let turn_spec = self.model.turn_stream();
+        let st = self.detok_step;
         let mut done = Vec::new();
         for (e, &ri) in b.reqs.iter().enumerate() {
             let tok = &out[e * c..(e + 1) * c];
@@ -1982,6 +2095,11 @@ impl Scheduler {
                         // The turn's audio has ended, the text has not: wait for the next turn.
                         r.awaiting = true;
                         r.merge_at = r.tail_from.take();
+                        let left = turn_spec.map_or(0, |t| t.resume_left);
+                        if let Some(base) = r.merge_at.filter(|_| left > 0) {
+                            r.dc.start_flush(base, r.audio.len() / c, left, st);
+                            tracing::debug!(request_id = %r.id, flush = ?r.dc.flush, "input streaming: waiting for text");
+                        }
                     } else {
                         r.done_lm = true;
                         r.finish_reason = "stop_id_encountered";
@@ -2001,6 +2119,7 @@ impl Scheduler {
             r.n_frames = if r.done_lm { rows } else { r.tail_from.or(r.merge_at).unwrap_or(rows) };
             if r.done_lm {
                 r.awaiting = false;
+                r.dc.flush = None;
                 done.push(ri);
             }
         }
@@ -2363,15 +2482,21 @@ mod tests {
 
     #[test]
     fn turn_text() {
-        // Clause boundaries with >= 3 words before them; the last one wins.
+        // Clause boundaries with >= 3 words before them (2 for a sentence end); the last one wins.
         assert_eq!(turn_cut("Welcome back to the", 3, 10), None);
         assert_eq!(turn_cut("Welcome back to the show. Today we", 3, 10), Some("Welcome back to the show.".len()));
         assert_eq!(turn_cut("Hi. Welcome back, my friend. Today", 3, 10), Some("Hi. Welcome back, my friend.".len()));
         assert_eq!(turn_cut("Hi. Wel", 3, 10), None);
+        assert_eq!(turn_cut("Great question! There are", 3, 10), Some("Great question!".len()));
+        assert_eq!(turn_cut("Sure, I", 3, 10), None);
         assert_eq!(turn_cut("He said \"stop.\" Then", 2, 10), Some("He said \"stop.\"".len()));
-        // No whitespace after the period: not a boundary.
+        // Inside a word or number: not a boundary.
         assert_eq!(turn_cut("It costs 3.5 dollars", 1, 10), None);
-        // Run-on text: the last word boundary once 10 complete words are buffered.
+        // At the end of the buffer: a boundary, unless a number may continue.
+        assert_eq!(turn_cut("It is to take the bus.", 3, 10), Some("It is to take the bus.".len()));
+        assert_eq!(turn_cut("It costs 3.", 3, 10), None);
+        assert_eq!(turn_cut("It costs about 1,", 3, 10), None);
+        // Run-on text: the last word boundary once `max_words` complete words are buffered.
         let run_on = "one two three four five six seven eight nine ten elev";
         assert_eq!(turn_cut(run_on, 3, 10), Some(run_on.len() - " elev".len()));
         assert_eq!(turn_cut("one two three four five six seven eight nine te", 3, 10), None);
@@ -2393,6 +2518,65 @@ mod tests {
         assert!(!t.finished());
         assert_eq!(t.take(3, 10), Some(" four five".into()));
         assert!(t.finished());
+    }
+
+    /// Input streaming in turns: whenever the next turn arrives during a flush (after any number of
+    /// its chunks), the frames the codec emits tile the audio exactly, with no gap and no repeat.
+    #[test]
+    fn detok_flush_tiles_frames() {
+        const LEFT: usize = 12; // context frames before a window's emitted frames
+        const ST: usize = 25; // chunk step == frames emitted per full window
+        const IV: usize = 52; // window rows
+        const TAIL: usize = 7; // end rows after a turn's last frame
+                               // Frames chunk `s` emits: `ST` after `LEFT`, or up to the audio's end (`n` rows, `ended`).
+        let emit = |s: usize, n: usize, ended: bool| {
+            let hi = if ended { (s + LEFT + ST).min(n - TAIL) } else { s + LEFT + ST };
+            (s + LEFT, hi.max(s + LEFT))
+        };
+        for b1 in [20, 37, 40, 51, 52, 60, 63, 64, 75, 77, 88, 99, 100, 101, 130] {
+            for gap in [8, 20, 33, 60, 95] {
+                for k1 in 0..4 {
+                    for k2 in 0..4 {
+                        // Turn ends: b1, b2 (another flush), b3 (the text ends).
+                        let ends = [(b1, Some(k1)), (b1 + gap, Some(k2)), (b1 + gap + 40, None)];
+                        let mut dc = DetokCursor::default();
+                        let mut out: Vec<(usize, usize)> = Vec::new();
+                        let mut run = |dc: &mut DetokCursor, n: usize, ended: bool, limit: usize| {
+                            let mut k = 0;
+                            while k < limit {
+                                let Some((rows, end)) = dc.view(n, ended) else { break };
+                                let s = dc.next(ST);
+                                let ready = if end { s < rows } else { s + IV <= rows };
+                                if !ready {
+                                    break;
+                                }
+                                out.push(emit(s, rows, end));
+                                dc.mark(s, ST);
+                                k += 1;
+                            }
+                        };
+                        for (base, flush) in ends {
+                            match flush {
+                                Some(k) => {
+                                    // Generating up to the turn's end: only full windows before its end rows.
+                                    run(&mut dc, base, false, usize::MAX);
+                                    dc.start_flush(base, base + TAIL, LEFT, ST);
+                                    run(&mut dc, base, false, k);
+                                    dc.flush = None; // the next turn's rows arrive
+                                }
+                                None => run(&mut dc, base + TAIL, true, usize::MAX),
+                            }
+                        }
+                        let mut at = LEFT;
+                        for &(lo, hi) in out.iter().filter(|(lo, hi)| hi > lo) {
+                            assert_eq!(lo, at, "b1={b1} gap={gap} k1={k1} k2={k2}: chunks {out:?}");
+                            at = hi;
+                        }
+                        assert_eq!(at, b1 + gap + 40, "b1={b1} gap={gap} k1={k1} k2={k2}: chunks {out:?}");
+                    }
+                }
+            }
+        }
     }
 
     #[test]

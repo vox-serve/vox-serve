@@ -465,9 +465,8 @@ fn begin_turns(state: &AppState, s: &mut Session, end: bool) -> Option<PendingTu
     let spec = state.model().turn_stream()?;
     let cut = if end {
         s.input.text.len()
-    } else if s.input.text.chars().count() < MIN_INITIAL_TEXT_CHARS {
-        return None;
     } else {
+        // The first turn starts at the first clause boundary, as later ones do (a short sentence is fine).
         turn_cut(&s.input.text, spec.min_words, spec.max_words)?
     };
     s.submitted = true;

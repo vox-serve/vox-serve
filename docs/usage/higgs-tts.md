@@ -24,10 +24,13 @@ runtime, and no scheduler flag.
 
 Higgs reads text in turns: the model's multi-turn layout `<|text|> chunk <|audio|> [audio] <|text|> chunk
 <|audio|> [audio] ...` in one sequence, so the voice and prosody carry over and earlier turns stay in the
-context. The request's first turn starts once about 20 characters have arrived; each later turn takes the text
-that arrived while the previous turn's audio was generated, up to its last clause boundary (`. , ! ? ; :`), or up
-to a word boundary for a run-on sentence of 10 or more words. A turn boundary costs a short pause, like a comma.
-When the text arrives more slowly than it is spoken, the audio waits for it.
+context. A turn ends at a clause boundary (`. , ! ? ; :`): the first one starts at the first boundary, and each
+later turn takes the text that arrived while the previous turn's audio was generated, up to its last boundary. A
+turn boundary costs a short pause, like a comma. Only a run-on sentence of 20 or more words without punctuation is
+cut at a word boundary, because a turn that ends mid-phrase can make the model add or swallow a word there.
+
+When the text arrives more slowly than it is spoken, the audio waits for it: the current turn plays to its end,
+and the next one starts when its clause is complete. Send text with its punctuation and spaces as they arrive.
 
 Every turn stays in the KV cache: a stream ends (`max_context_reached`) once text and audio fill
 `--max-context` (2048 rows by default, about 70 seconds of speech). Raise it for long streams; the model was

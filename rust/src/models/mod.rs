@@ -102,6 +102,10 @@ pub struct TurnStreamSpec {
     /// before it, else (a run-on sentence) up to a word boundary once `max_words` words are buffered.
     pub min_words: usize,
     pub max_words: usize,
+    /// Frames of codec context a detokenization chunk decodes before the first frame it emits. Nonzero:
+    /// while a request waits for text, its turn's audio is decoded to the end (instead of waiting for the
+    /// next turn's look-ahead), and decoding resumes this many frames before the next turn's first frame.
+    pub resume_left: usize,
 }
 
 /// What a sampled row is, as the program's graph classified it (`out_kind`; the codes are
@@ -250,7 +254,8 @@ pub fn load(meta: &Value, prompt_builder: Option<&str>) -> Result<Model> {
             min_eoc_step: f("min_eoc_step")? as i32,
             tail_rows: f("tail_rows")? as usize,
             min_words: tt["min_words"].as_u64().unwrap_or(3) as usize,
-            max_words: tt["max_words"].as_u64().unwrap_or(10) as usize,
+            max_words: tt["max_words"].as_u64().unwrap_or(20) as usize,
+            resume_left: tt["resume_left"].as_u64().unwrap_or(0) as usize,
         })
     } else {
         None
