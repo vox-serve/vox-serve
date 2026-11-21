@@ -57,7 +57,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
   <meta name="docsearch:version" content="0.2.0" />
-    <meta name="docbuild:last-update" content="Nov 01, 2026"/>
+    <meta name="docbuild:last-update" content="Nov 21, 2026"/>
   
     
     <script src="_static/searchtools.js"></script>
@@ -214,6 +214,7 @@
 <li class="toctree-l2"><a class="reference internal" href="usage/chatterbox.html">Chatterbox</a></li>
 <li class="toctree-l2"><a class="reference internal" href="usage/cosyvoice2.html">CosyVoice2</a></li>
 <li class="toctree-l2"><a class="reference internal" href="usage/qwen3-tts.html">Qwen3-TTS</a></li>
+<li class="toctree-l2"><a class="reference internal" href="usage/higgs-tts.html">Higgs Audio v3 TTS</a></li>
 <li class="toctree-l2"><a class="reference internal" href="usage/higgs-audio-v2.html">Higgs Audio v2</a></li>
 <li class="toctree-l2"><a class="reference internal" href="usage/vibevoice.html">VibeVoice-Realtime</a></li>
 <li class="toctree-l2"><a class="reference internal" href="usage/xtts.html">XTTS-v2</a></li>
@@ -530,7 +531,7 @@ Adding one touches no scheduler, worker or engine code:</p>
 in <a class="reference internal" href="#the-program"><span class="std std-ref">step 2</span></a>. The other programs cover multi-codebook models
 (<code class="docutils literal notranslate"><span class="pre">zonos</span></code>, <code class="docutils literal notranslate"><span class="pre">higgs_tts</span></code>), depth transformers (<code class="docutils literal notranslate"><span class="pre">csm</span></code>, <code class="docutils literal notranslate"><span class="pre">qwen3_tts</span></code>), flow-matching codecs (<code class="docutils literal notranslate"><span class="pre">cosyvoice2</span></code>,
 <code class="docutils literal notranslate"><span class="pre">chatterbox</span></code>), voice cloning (<code class="docutils literal notranslate"><span class="pre">chatterbox</span></code>, <code class="docutils literal notranslate"><span class="pre">cosyvoice3</span></code>), audio input (<code class="docutils literal notranslate"><span class="pre">step_audio_2</span></code>, <code class="docutils literal notranslate"><span class="pre">glm_voice</span></code>),
-input streaming (<code class="docutils literal notranslate"><span class="pre">qwen3_tts</span></code>) and a codec that decodes the LM’s hidden states, carried to it in the token rows
+input streaming (<code class="docutils literal notranslate"><span class="pre">qwen3_tts</span></code>; in turns: <code class="docutils literal notranslate"><span class="pre">higgs_tts</span></code>) and a codec that decodes the LM’s hidden states, carried to it in the token rows
 (<code class="docutils literal notranslate"><span class="pre">xtts</span></code>).</p>
 <section id="how-a-program-runs">
 <h2>How a program runs<a class="headerlink" href="#how-a-program-runs" title="Link to this heading">#</a></h2>
@@ -734,14 +735,18 @@ its last chunk has been decoded.</p></td>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">tokenize_stream_text</span></code>, <code class="docutils literal notranslate"><span class="pre">preprocess_streaming</span></code> + <code class="docutils literal notranslate"><span class="pre">meta[&quot;text_stream&quot;]</span></code></p></td>
 <td><p>Input streaming: text arriving while audio is generated (<code class="docutils literal notranslate"><span class="pre">qwen3_tts</span></code>).</p></td>
 </tr>
-<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">supports_urgent_lane</span> <span class="pre">=</span> <span class="pre">True</span></code></p></td>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">turn_rows</span></code> + <code class="docutils literal notranslate"><span class="pre">meta[&quot;turn_stream&quot;]</span></code></p></td>
+<td><p>Input streaming for models that read text in turns (<code class="docutils literal notranslate"><span class="pre">higgs_tts</span></code>): text arriving during a turn’s audio is
+prefilled as the next turn once that audio has ended, in the same request and KV cache.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">supports_urgent_lane</span> <span class="pre">=</span> <span class="pre">True</span></code></p></td>
 <td><p>The codec can run on a second lane at the same time (no shared scratch state between calls).</p></td>
 </tr>
-<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">decode_head</span></code> / <code class="docutils literal notranslate"><span class="pre">decode_depth</span></code> (<code class="docutils literal notranslate"><span class="pre">supports_depth_split</span></code>), <code class="docutils literal notranslate"><span class="pre">backbone_range</span></code>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">decode_head</span></code> / <code class="docutils literal notranslate"><span class="pre">decode_depth</span></code> (<code class="docutils literal notranslate"><span class="pre">supports_depth_split</span></code>), <code class="docutils literal notranslate"><span class="pre">backbone_range</span></code>
 (<code class="docutils literal notranslate"><span class="pre">supports_layer_split</span></code>)</p></td>
 <td><p>The LM step can be captured in segments (<code class="docutils literal notranslate"><span class="pre">--lm-segments</span></code>).</p></td>
 </tr>
-<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">fuse_lm_modules()</span></code>, <code class="docutils literal notranslate"><span class="pre">fused_stack_spec()</span></code>, <code class="docutils literal notranslate"><span class="pre">compile_detok_targets()</span></code></p></td>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">fuse_lm_modules()</span></code>, <code class="docutils literal notranslate"><span class="pre">fused_stack_spec()</span></code>, <code class="docutils literal notranslate"><span class="pre">compile_detok_targets()</span></code></p></td>
 <td><p>Kernel fusion with <code class="docutils literal notranslate"><span class="pre">--fuse-lm</span></code>, <code class="docutils literal notranslate"><span class="pre">--fuse-layers</span></code> and <code class="docutils literal notranslate"><span class="pre">--compile-detok</span></code> (<code class="docutils literal notranslate"><span class="pre">vox_serve/fusion/</span></code>).</p></td>
 </tr>
 </tbody>
@@ -953,7 +958,7 @@ By VoxServe Team
   
   <div class="footer-item">
     <p class="last-updated">
-  Last updated on Nov 01, 2026.
+  Last updated on Nov 21, 2026.
   <br/>
 </p>
   </div>

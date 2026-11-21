@@ -53,12 +53,12 @@
     <script>DOCUMENTATION_OPTIONS.search_as_you_type = false;</script>
     <link rel="index" title="Index" href="../genindex.html" />
     <link rel="search" title="Search" href="../search.html" />
-    <link rel="next" title="Higgs Audio v2" href="higgs-audio-v2.html" />
+    <link rel="next" title="Higgs Audio v3 TTS" href="higgs-tts.html" />
     <link rel="prev" title="CosyVoice2" href="cosyvoice2.html" />
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
   <meta name="docsearch:version" content="0.2.0" />
-    <meta name="docbuild:last-update" content="Nov 01, 2026"/>
+    <meta name="docbuild:last-update" content="Nov 21, 2026"/>
   
     
     <script src="../_static/searchtools.js"></script>
@@ -215,6 +215,7 @@
 <li class="toctree-l2"><a class="reference internal" href="chatterbox.html">Chatterbox</a></li>
 <li class="toctree-l2"><a class="reference internal" href="cosyvoice2.html">CosyVoice2</a></li>
 <li class="toctree-l2 current active"><a class="current reference internal" href="#">Qwen3-TTS</a></li>
+<li class="toctree-l2"><a class="reference internal" href="higgs-tts.html">Higgs Audio v3 TTS</a></li>
 <li class="toctree-l2"><a class="reference internal" href="higgs-audio-v2.html">Higgs Audio v2</a></li>
 <li class="toctree-l2"><a class="reference internal" href="vibevoice.html">VibeVoice-Realtime</a></li>
 <li class="toctree-l2"><a class="reference internal" href="xtts.html">XTTS-v2</a></li>
@@ -509,7 +510,7 @@
 </div>
 <p>See the <a class="reference external" href="https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/blob/main/config.json">model config</a> for a list of speakers and languages supported.</p>
 <section id="base-model">
-<h3>2. Base Model<a class="headerlink" href="#base-model" title="Link to this heading">#</a></h3>
+<span id="2-base-model"></span><h3>2. Base Model<a class="headerlink" href="#base-model" title="Link to this heading">#</a></h3>
 <p>Clone any voice using a reference audio sample and its transcript.</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>vox-serve<span class="w"> </span>--model<span class="w"> </span>Qwen/Qwen3-TTS-12Hz-1.7B-Base<span class="w"> </span>--port<span class="w"> </span><span class="m">8000</span>
 </pre></div>
@@ -525,7 +526,7 @@
 <p>This mode uses in-context learning to adapt the model to the reference voice.</p>
 </section>
 <section id="voice-design-mode">
-<h3>3. Voice Design Mode<a class="headerlink" href="#voice-design-mode" title="Link to this heading">#</a></h3>
+<span id="3-voice-design-mode"></span><h3>3. Voice Design Mode<a class="headerlink" href="#voice-design-mode" title="Link to this heading">#</a></h3>
 <p>Generate voices based on natural language descriptions.</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>vox-serve<span class="w"> </span>--model<span class="w"> </span>Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign<span class="w"> </span>--port<span class="w"> </span><span class="m">8000</span>
 </pre></div>
@@ -571,11 +572,11 @@
       </div>
     </a>
     <a class="right-next"
-       href="higgs-audio-v2.html"
+       href="higgs-tts.html"
        title="next page">
       <div class="prev-next-info">
         <p class="prev-next-subtitle">next</p>
-        <p class="prev-next-title">Higgs Audio v2</p>
+        <p class="prev-next-title">Higgs Audio v3 TTS</p>
       </div>
       <i class="fa-solid fa-angle-right"></i>
     </a>
@@ -636,7 +637,7 @@ By VoxServe Team
   
   <div class="footer-item">
     <p class="last-updated">
-  Last updated on Nov 01, 2026.
+  Last updated on Nov 21, 2026.
   <br/>
 </p>
   </div>
