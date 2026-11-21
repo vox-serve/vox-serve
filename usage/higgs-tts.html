@@ -494,6 +494,11 @@ curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </spa
 <span class="w">  </span>-F<span class="w"> </span><span class="s2">"ref_text=Transcript of the reference clip."</span><span class="w"> </span>-o<span class="w"> </span>out.wav
 </pre></div>
 </div>
+<p>Voices used on every request can stay on the server: with <code class="docutils literal notranslate"><span class="pre">--voice-dir</span> <span class="pre">voices/</span></code>, holding <code class="docutils literal notranslate"><span class="pre">guide.wav</span></code> and its
+transcript <code class="docutils literal notranslate"><span class="pre">guide.txt</span></code>, a request picks the voice with <code class="docutils literal notranslate"><span class="pre">voice=guide</span></code> (also the <code class="docutils literal notranslate"><span class="pre">voice</span></code> of a WebSocket
+<code class="docutils literal notranslate"><span class="pre">session.config</span></code>) and uploads nothing. <code class="docutils literal notranslate"><span class="pre">ref_audio_path=sub/clip.wav</span></code> names any clip under the directory. The
+reference is prefilled on every request: about 70 ms of first-audio latency for a 17 s clip on Jetson Thor, so
+a shorter clip starts faster.</p>
 <p>Inline control tags (<code class="docutils literal notranslate"><span class="pre">&lt;|emotion:elation|&gt;</span></code>, <code class="docutils literal notranslate"><span class="pre">&lt;|prosody:pause|&gt;</span></code>, <code class="docutils literal notranslate"><span class="pre">&lt;|sfx:laughter|&gt;</span></code>, …) go in the text; see the
 model’s <code class="docutils literal notranslate"><span class="pre">PROMPTING.md</span></code>.</p>
 <section id="input-streaming">

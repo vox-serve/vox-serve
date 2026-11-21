@@ -605,6 +605,10 @@ steps pause (<code class="docutils literal notranslate"><span class="pre">0</spa
 </dd>
 <dt><code class="docutils literal notranslate"><span class="pre">--trace-dir</span></code></dt><dd><p>Write the GPU time of every graph launch and every scheduling decision as JSON lines.</p>
 </dd>
+<dt><code class="docutils literal notranslate"><span class="pre">--voice-dir</span> <span class="pre">DIR</span></code></dt><dd><p>Reference voices requests can name instead of uploading audio. <code class="docutils literal notranslate"><span class="pre">voice=&lt;name&gt;</span></code> uses <code class="docutils literal notranslate"><span class="pre">DIR/&lt;name&gt;.wav</span></code>
+(or <code class="docutils literal notranslate"><span class="pre">.flac</span></code>, <code class="docutils literal notranslate"><span class="pre">.mp3</span></code>, <code class="docutils literal notranslate"><span class="pre">.ogg</span></code>) with <code class="docutils literal notranslate"><span class="pre">DIR/&lt;name&gt;.txt</span></code> as its transcript, and <code class="docutils literal notranslate"><span class="pre">ref_audio_path</span></code> any
+audio file under <code class="docutils literal notranslate"><span class="pre">DIR</span></code>. Paths outside <code class="docutils literal notranslate"><span class="pre">DIR</span></code> are rejected.</p>
+</dd>
 <dt><code class="docutils literal notranslate"><span class="pre">--prompt-builder</span> <span class="pre">python|template</span></code></dt><dd><p>Build prompts with the program’s <code class="docutils literal notranslate"><span class="pre">preprocess</span></code> (or the template builder) instead of the model’s Rust
 prompt builder: for bringing up a model, or checking a Rust builder against Python
 (<a class="reference internal" href="adding-a-model.html"><span class="doc">Adding a Model</span></a>).</p>
