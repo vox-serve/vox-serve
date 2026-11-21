@@ -12,6 +12,12 @@ curl -X POST localhost:8000/generate -F "text=Hello world" -F "audio=@ref.wav" \
   -F "ref_text=Transcript of the reference clip." -o out.wav
 ```
 
+Voices used on every request can stay on the server: with `--voice-dir voices/`, holding `guide.wav` and its
+transcript `guide.txt`, a request picks the voice with `voice=guide` (also the `voice` of a WebSocket
+`session.config`) and uploads nothing. `ref_audio_path=sub/clip.wav` names any clip under the directory. The
+reference is prefilled on every request: about 70 ms of first-audio latency for a 17 s clip on Jetson Thor, so
+a shorter clip starts faster.
+
 Inline control tags (`<|emotion:elation|>`, `<|prosody:pause|>`, `<|sfx:laughter|>`, ...) go in the text; see the
 model's `PROMPTING.md`.
 

@@ -148,6 +148,11 @@ Rust runtime only
 ``--trace-dir``
   Write the GPU time of every graph launch and every scheduling decision as JSON lines.
 
+``--voice-dir DIR``
+  Reference voices requests can name instead of uploading audio. ``voice=<name>`` uses ``DIR/<name>.wav``
+  (or ``.flac``, ``.mp3``, ``.ogg``) with ``DIR/<name>.txt`` as its transcript, and ``ref_audio_path`` any
+  audio file under ``DIR``. Paths outside ``DIR`` are rejected.
+
 ``--prompt-builder python|template``
   Build prompts with the program's ``preprocess`` (or the template builder) instead of the model's Rust
   prompt builder: for bringing up a model, or checking a Rust builder against Python
