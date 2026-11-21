@@ -70,6 +70,44 @@ With the Rust runtime, once an engine has stopped (e.g. after a CUDA error) the 
 with ``{"status": "unhealthy", "failed_engines": [<rank>, ...]}`` until the server is restarted;
 requests are routed to the remaining engines, or get 503 when none is left.
 
+WebSocket /v1/audio/speech/stream
+---------------------------------
+
+Speech from text that arrives over time (e.g. from a text LLM), with the protocol of
+`sglang-omni's WebSocket speech streaming
+<https://sgl-project.github.io/sglang-omni/basic_usage/tts.html#websocket-speech-streaming>`_. Rust runtime
+only, for models that support input streaming (Qwen3-TTS, Higgs TTS). See the
+`example client <https://github.com/vox-serve/vox-serve/tree/main/examples/websocket_streaming>`_.
+
+Client messages (JSON text frames)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+- ``{"type": "session.config", "session": {...}}`` (first): ``voice``, ``language``, ``response_format``
+  (``"pcm"``, the default, or ``"wav"``), ``stream_audio`` (default ``false``; ``true`` needs ``"pcm"``),
+  ``split_granularity`` (``"clause"``, the default, or ``"sentence"``); and for voice cloning ``ref_audio`` (a
+  base64 data URL, ``data:audio/wav;base64,...``, sent once per session) and ``ref_text``. ``model`` is ignored.
+- ``{"type": "input.text", "text": "..."}``: more text; send it with its spaces and punctuation.
+- ``{"type": "input.commit"}``: ends the current segment. Its remaining text is spoken even without a final
+  boundary, and the session stays open for the next segment.
+- ``{"type": "input.done"}``: commits, and closes the session once all audio is sent.
+
+Server messages
+^^^^^^^^^^^^^^^
+
+- ``session.configured``: the settings, with the output ``sample_rate``.
+- Per segment, in order: ``audio.start`` (``segment_index``, ``sample_rate``, ``format``), the audio as binary
+  frames, ``audio.done``, and ``input.committed`` (``segment_index``, ``segment_sentences``,
+  ``total_sentences``). Audio is 16-bit little-endian mono PCM; with ``stream_audio`` it is sent as it is
+  generated, otherwise as one frame per segment (a WAV file with ``"wav"``). An empty commit gets only
+  ``input.committed``.
+- ``session.done`` after ``input.done``; ``error`` (``message``) for invalid messages or a failed segment. An
+  invalid ``session.config`` closes the session.
+
+Each segment is one input-streaming request: the next segment starts generating as soon as its text arrives,
+and its audio follows the previous segment's. ``split_granularity`` sets the smallest piece of text the model
+reads: a clause, or a sentence (for turn-based models such as Higgs TTS, whole sentences per turn). Closing the
+connection cancels its requests.
+
 Python API
 ==========
 

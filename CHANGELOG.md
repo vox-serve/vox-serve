@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Input streaming for Higgs Audio v3 TTS** (Rust runtime): text sent while audio is generated is appended
   as the model's next turn (`<|text|> chunk <|audio|>`) in the same request and KV cache
+- **WebSocket speech streaming** (Rust runtime): `/v1/audio/speech/stream` with sglang-omni's protocol
+  (`session.config`, `input.text`, `input.commit`, `input.done`), for every model with input streaming; each
+  committed segment is one request, with clause or sentence granularity and optional reference audio per session
 
 ## [0.2.0] - 2026-11-01
 

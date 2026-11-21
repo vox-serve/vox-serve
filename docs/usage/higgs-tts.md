@@ -32,6 +32,12 @@ cut at a word boundary, because a turn that ends mid-phrase can make the model a
 When the text arrives more slowly than it is spoken, the audio waits for it: the current turn plays to its end,
 and the next one starts when its clause is complete. Send text with its punctuation and spaces as they arrive.
 
+The same streaming is available over WebSocket at `/v1/audio/speech/stream`, with sglang-omni's protocol
+(`session.config`, `input.text`, `input.commit`, `input.done`; see the [API reference](../api.rst) and the
+[example client](https://github.com/vox-serve/vox-serve/tree/main/examples/websocket_streaming)). Each commit
+starts a new request, so a long conversation does not fill the context, and `split_granularity: "sentence"`
+makes every turn a whole sentence.
+
 Every turn stays in the KV cache: a stream ends (`max_context_reached`) once text and audio fill
 `--max-context` (2048 rows by default, about 70 seconds of speech). Raise it for long streams; the model was
 trained with 8192.
