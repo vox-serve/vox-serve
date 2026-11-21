@@ -17,3 +17,4 @@ mod server;
 mod spec;
 mod v2;
 mod wav;
+mod ws;

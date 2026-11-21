@@ -1,5 +1,5 @@
 //! HTTP API compatible with `vox_serve/launch.py` (`/generate`, `/generate/stream/...`,
-//! `/v1/audio/speech`, `/health`).
+//! `/v1/audio/speech`, `/health`), and the WebSocket API `/v1/audio/speech/stream` (see `ws.rs`).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -22,7 +22,7 @@ use crate::models::{GenerateInput, Model};
 use crate::scheduler::{turn_cut, Event, Submit};
 use crate::wav;
 
-const TIMEOUT: Duration = Duration::from_secs(600);
+pub(crate) const TIMEOUT: Duration = Duration::from_secs(600);
 /// Input streaming: text buffered before the prompt is built (as in `scheduler/input_streaming.py`).
 const MIN_INITIAL_TEXT_CHARS: usize = 20;
 /// Largest request body: multipart uploads and `/v1/audio/speech` JSON with base64 reference audio
@@ -30,7 +30,7 @@ const MIN_INITIAL_TEXT_CHARS: usize = 20;
 /// limit). 100 MiB is about 10 minutes of 44.1 kHz stereo 16-bit audio.
 const MAX_BODY_BYTES: usize = 100 << 20;
 /// A request whose event channel closed without `Done`: its engine's scheduler loop has stopped.
-const ENGINE_STOPPED: &str = "Engine stopped before the request finished";
+pub(crate) const ENGINE_STOPPED: &str = "Engine stopped before the request finished";
 
 /// One engine (data-parallel replica): its scheduler queue and model logic (whose hooks and
 /// feature pool belong to that engine).
@@ -68,7 +68,7 @@ impl AppState {
     }
 
     /// Model logic for engine-independent work (tokenization, sample rate).
-    fn model(&self) -> &Arc<Model> {
+    pub(crate) fn model(&self) -> &Arc<Model> {
         &self.ranks[0].model
     }
 
@@ -83,6 +83,11 @@ impl AppState {
             .map(|k| &self.ranks[(start + k) % n])
             .filter(|r| !r.dead.load(Ordering::Relaxed))
             .min_by_key(|r| r.load.load(Ordering::Relaxed) + r.tx.len())
+    }
+
+    /// Where uploaded reference audio is written.
+    pub(crate) fn upload_dir(&self) -> &std::path::Path {
+        &self.upload_dir
     }
 
     /// Ranks whose engine has stopped.
@@ -111,7 +116,7 @@ pub struct Session {
 }
 
 /// A prompt to build (outside the session lock: it may call Python hooks) and submit.
-struct PendingStream {
+pub(crate) struct PendingStream {
     input: GenerateInput,
     first: i32,
     events: UnboundedSender<Event>,
@@ -119,13 +124,13 @@ struct PendingStream {
 }
 
 /// Turn-based models: the first turn's prompt (the request's text is that turn's) and the rest of the text.
-struct PendingTurns {
+pub(crate) struct PendingTurns {
     input: GenerateInput,
     events: UnboundedSender<Event>,
     turn_rx: crossbeam_channel::Receiver<String>,
 }
 
-enum Pending {
+pub(crate) enum Pending {
     Tokens(PendingStream),
     Turns(PendingTurns),
 }
@@ -139,6 +144,7 @@ pub fn router(state: AppState) -> Router {
         .route("/generate/stream/{rid}/audio", get(stream_audio))
         .route("/generate/stream/{rid}/end", post(stream_end))
         .route("/v1/audio/speech", post(speech))
+        .route("/v1/audio/speech/stream", get(crate::ws::speech_stream))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(tower_http::cors::CorsLayer::permissive())
         .with_state(state)
@@ -146,6 +152,24 @@ pub fn router(state: AppState) -> Router {
 
 fn error(status: StatusCode, msg: impl Into<String>) -> Response {
     (status, Json(json!({"detail": msg.into()}))).into_response()
+}
+
+/// An error of the input-streaming core, shared by the HTTP and WebSocket APIs (which report it as an
+/// HTTP error response or an `error` event).
+#[derive(Debug)]
+pub(crate) struct ApiError {
+    pub status: StatusCode,
+    pub msg: String,
+}
+
+pub(crate) fn api_error(status: StatusCode, msg: impl Into<String>) -> ApiError {
+    ApiError { status, msg: msg.into() }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        error(self.status, self.msg)
+    }
 }
 
 fn no_engine() -> Response {
@@ -292,7 +316,7 @@ async fn parse_form(state: &AppState, req: Request) -> Result<Form, Response> {
             if data.is_empty() {
                 continue;
             }
-            form.audio_path = Some(save_upload(state, &fname, &data).await?);
+            form.audio_path = Some(save_upload(state, &fname, &data).await.map_err(IntoResponse::into_response)?);
             continue;
         }
         let value = field.text().await.map_err(|e| bad(&e))?;
@@ -302,10 +326,10 @@ async fn parse_form(state: &AppState, req: Request) -> Result<Form, Response> {
 }
 
 /// Writes uploaded audio to the upload directory (removed after the request timeout).
-async fn save_upload(state: &AppState, name: &str, data: &[u8]) -> Result<String, Response> {
+async fn save_upload(state: &AppState, name: &str, data: &[u8]) -> Result<String, ApiError> {
     let path = state.upload_dir.join(format!("{}_{name}", uuid::Uuid::new_v4()));
     if let Err(e) = tokio::fs::write(&path, data).await {
-        return Err(error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()));
+        return Err(api_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()));
     }
     let p = path.clone();
     tokio::spawn(async move {
@@ -366,6 +390,14 @@ struct SpeechRequest {
     ref_text: Option<String>,
 }
 
+/// The bytes of reference audio given as a base64 data URL (`data:audio/wav;base64,...`).
+pub(crate) fn decode_data_url(url: &str) -> Result<Vec<u8>, ApiError> {
+    let Some(b64) = url.strip_prefix("data:").and_then(|u| u.split_once(";base64,")).map(|(_, d)| d) else {
+        return Err(api_error(StatusCode::BAD_REQUEST, "ref_audio must be a base64 data URL"));
+    };
+    base64::decode(b64.trim()).map_err(|e| api_error(StatusCode::BAD_REQUEST, format!("ref_audio: {e}")))
+}
+
 async fn speech(State(state): State<AppState>, Json(req): Json<SpeechRequest>) -> Response {
     let mut kwargs = Map::new();
     kwargs.insert("voice".into(), req.voice.map(Value::String).unwrap_or(Value::Null));
@@ -377,16 +409,13 @@ async fn speech(State(state): State<AppState>, Json(req): Json<SpeechRequest>) -
     }
     let audio_path = match req.ref_audio.as_deref() {
         Some(url) => {
-            let Some(b64) = url.strip_prefix("data:").and_then(|u| u.split_once(";base64,")).map(|(_, d)| d) else {
-                return error(StatusCode::BAD_REQUEST, "ref_audio must be a base64 data URL");
-            };
-            let data = match base64::decode(b64.trim()) {
+            let data = match decode_data_url(url) {
                 Ok(d) => d,
-                Err(e) => return error(StatusCode::BAD_REQUEST, format!("ref_audio: {e}")),
+                Err(e) => return e.into_response(),
             };
             match save_upload(&state, "ref_audio", &data).await {
                 Ok(p) => Some(p),
-                Err(r) => return r,
+                Err(e) => return e.into_response(),
             }
         }
         None => None,
@@ -407,8 +436,38 @@ async fn speech(State(state): State<AppState>, Json(req): Json<SpeechRequest>) -
 
 // ---- input streaming --------------------------------------------------------------------------
 
+impl Session {
+    /// A session whose request is submitted once enough text has arrived (see `feed`).
+    pub(crate) fn new(input: GenerateInput) -> Self {
+        let (tx, rx) = unbounded_channel();
+        let (text_tx, text_rx) = crossbeam_channel::unbounded();
+        let (turn_tx, turn_rx) = crossbeam_channel::unbounded();
+        Session {
+            input,
+            events_tx: Some(tx),
+            events_rx: Some(rx),
+            text_tx: Some(text_tx),
+            text_rx: Some(text_rx),
+            turn_tx: Some(turn_tx),
+            turn_rx: Some(turn_rx),
+            submitted: false,
+            ended: false,
+        }
+    }
+
+    /// The request's events (audio, then `Done` or `Error`); `None` once taken.
+    pub(crate) fn take_events(&mut self) -> Option<UnboundedReceiver<Event>> {
+        self.events_rx.take()
+    }
+}
+
+/// Whether the model serves input streaming.
+pub(crate) fn streams_input(model: &Model) -> bool {
+    model.text_stream().is_some() || model.turn_stream().is_some()
+}
+
 async fn stream_start(State(state): State<AppState>, req: Request) -> Response {
-    if state.model().text_stream().is_none() && state.model().turn_stream().is_none() {
+    if !streams_input(state.model()) {
         return error(StatusCode::BAD_REQUEST, "input streaming is not supported by this model");
     }
     let form = match parse_form(&state, req).await {
@@ -416,20 +475,8 @@ async fn stream_start(State(state): State<AppState>, req: Request) -> Response {
         Err(r) => return r,
     };
     let id = uuid::Uuid::new_v4().to_string();
-    let (tx, rx) = unbounded_channel();
-    let (text_tx, text_rx) = crossbeam_channel::unbounded();
-    let (turn_tx, turn_rx) = crossbeam_channel::unbounded();
-    let session = Session {
-        input: GenerateInput { text: String::new(), audio_path: form.audio_path, model_kwargs: form.kwargs },
-        events_tx: Some(tx),
-        events_rx: Some(rx),
-        text_tx: Some(text_tx),
-        text_rx: Some(text_rx),
-        turn_tx: Some(turn_tx),
-        turn_rx: Some(turn_rx),
-        submitted: false,
-        ended: false,
-    };
+    let session =
+        Session::new(GenerateInput { text: String::new(), audio_path: form.audio_path, model_kwargs: form.kwargs });
     state.sessions.lock().unwrap().insert(id.clone(), session);
     // Abandoned sessions (and the requests they feed) are dropped after the request timeout.
     let (sessions, rid) = (state.sessions.clone(), id.clone());
@@ -440,12 +487,60 @@ async fn stream_start(State(state): State<AppState>, req: Request) -> Response {
     Json(json!({"request_id": id})).into_response()
 }
 
+/// Adds text to a session: buffered until the prompt can be built (then returned to `launch`), and
+/// passed on to the running request after that.
+pub(crate) fn feed(state: &AppState, s: &mut Session, text: String) -> Result<Option<Pending>, ApiError> {
+    if text.is_empty() {
+        return Ok(None);
+    }
+    if state.model().turn_stream().is_some() {
+        if s.submitted {
+            if let Some(tx) = &s.turn_tx {
+                let _ = tx.send(text);
+            }
+            return Ok(None);
+        }
+        s.input.text.push_str(&text);
+        return Ok(begin_turns(state, s, false).map(Pending::Turns));
+    }
+    if !s.submitted {
+        s.input.text.push_str(&text);
+        if s.input.text.chars().count() < MIN_INITIAL_TEXT_CHARS {
+            return Ok(None);
+        }
+        return Ok(begin_submission(state, s)?.map(Pending::Tokens));
+    }
+    let tokens =
+        state.model().tokenize_stream_text(&text).map_err(|e| api_error(StatusCode::BAD_REQUEST, e.to_string()))?;
+    if let Some(tx) = &s.text_tx {
+        let _ = tx.send(tokens);
+    }
+    Ok(None)
+}
+
+/// Ends a session's text: submits the request if it has not been yet (returned to `launch`).
+pub(crate) fn finish(state: &AppState, s: &mut Session) -> Result<Option<Pending>, ApiError> {
+    if s.ended {
+        return Ok(None);
+    }
+    s.ended = true;
+    let p = if s.submitted {
+        None
+    } else if state.model().turn_stream().is_some() {
+        begin_turns(state, s, true).map(Pending::Turns)
+    } else {
+        begin_submission(state, s)?.map(Pending::Tokens)
+    };
+    s.text_tx = None;
+    s.turn_tx = None;
+    Ok(p)
+}
+
 /// Called with the session locked once the prompt can be built: tokenizes the buffered text, queues
 /// all but its first token, and hands out what the prompt needs.
-#[allow(clippy::result_large_err)] // the error is the HTTP response itself
-fn begin_submission(state: &AppState, s: &mut Session) -> Result<Option<PendingStream>, Response> {
+fn begin_submission(state: &AppState, s: &mut Session) -> Result<Option<PendingStream>, ApiError> {
     let tokens = (state.model().tokenize_stream_text(&s.input.text))
-        .map_err(|e| error(StatusCode::BAD_REQUEST, e.to_string()))?;
+        .map_err(|e| api_error(StatusCode::BAD_REQUEST, e.to_string()))?;
     s.submitted = true;
     let events = s.events_tx.take().expect("unsubmitted session has an event sender");
     let Some((&first, rest)) = tokens.split_first() else {
@@ -483,27 +578,33 @@ fn begin_turns(state: &AppState, s: &mut Session, end: bool) -> Option<PendingTu
     Some(PendingTurns { input: s.input.clone(), events, turn_rx })
 }
 
-async fn launch(state: &AppState, p: Pending) -> Result<(), Response> {
-    match p {
+/// Builds and submits the prompt of a session's request. A failure is also sent to the request's
+/// event stream, so whoever reads the audio learns why it ended.
+pub(crate) async fn launch(state: &AppState, p: Pending) -> Result<(), ApiError> {
+    let events = match &p {
+        Pending::Tokens(p) => p.events.clone(),
+        Pending::Turns(p) => p.events.clone(),
+    };
+    let r = match p {
         Pending::Tokens(p) => launch_stream(state, p).await,
         Pending::Turns(p) => launch_turns(state, p).await,
+    };
+    if let Err(e) = &r {
+        let _ = events.send(Event::Error(e.msg.clone()));
     }
+    r
 }
 
-async fn launch_turns(state: &AppState, p: PendingTurns) -> Result<(), Response> {
-    let Some(rank) = state.pick() else { return Err(no_engine()) };
+async fn launch_turns(state: &AppState, p: PendingTurns) -> Result<(), ApiError> {
+    let Some(rank) = state.pick() else {
+        return Err(api_error(StatusCode::SERVICE_UNAVAILABLE, "No engine available (see the server log)"));
+    };
     let model = rank.model.clone();
     let input = p.input;
     let prompt = tokio::task::spawn_blocking(move || model.preprocess(&input))
         .await
-        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let prompt = match prompt {
-        Ok(v) => v,
-        Err(e) => {
-            let _ = p.events.send(Event::Error(e.to_string()));
-            return Err(error(StatusCode::BAD_REQUEST, e.to_string()));
-        }
-    };
+        .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let prompt = prompt.map_err(|e| api_error(StatusCode::BAD_REQUEST, e.to_string()))?;
     let sub = Submit {
         id: uuid::Uuid::new_v4().to_string(),
         prompt,
@@ -514,27 +615,30 @@ async fn launch_turns(state: &AppState, p: PendingTurns) -> Result<(), Response>
         text_rx: None,
         turn_rx: Some(p.turn_rx),
     };
+    try_submit(rank, sub)
+}
+
+/// Queues a request on its engine (`launch` reports a failure on the request's event stream).
+fn try_submit(rank: &Rank, sub: Submit) -> Result<(), ApiError> {
     match rank.tx.try_send(sub) {
         Ok(()) => Ok(()),
-        Err(TrySendError::Full(_)) => Err(error(StatusCode::TOO_MANY_REQUESTS, "Server busy; please retry shortly")),
-        Err(TrySendError::Disconnected(_)) => Err(error(StatusCode::SERVICE_UNAVAILABLE, "Server not ready")),
+        Err(TrySendError::Full(_)) => {
+            Err(api_error(StatusCode::TOO_MANY_REQUESTS, "Server busy; please retry shortly"))
+        }
+        Err(TrySendError::Disconnected(_)) => Err(api_error(StatusCode::SERVICE_UNAVAILABLE, "Server not ready")),
     }
 }
 
-async fn launch_stream(state: &AppState, p: PendingStream) -> Result<(), Response> {
-    let Some(rank) = state.pick() else { return Err(no_engine()) };
+async fn launch_stream(state: &AppState, p: PendingStream) -> Result<(), ApiError> {
+    let Some(rank) = state.pick() else {
+        return Err(api_error(StatusCode::SERVICE_UNAVAILABLE, "No engine available (see the server log)"));
+    };
     let model = rank.model.clone();
     let (input, first) = (p.input, p.first);
     let prompt = tokio::task::spawn_blocking(move || model.preprocess_streaming(&input, first))
         .await
-        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let prompt = match prompt {
-        Ok(v) => v,
-        Err(e) => {
-            let _ = p.events.send(Event::Error(e.to_string()));
-            return Err(error(StatusCode::BAD_REQUEST, e.to_string()));
-        }
-    };
+        .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let prompt = prompt.map_err(|e| api_error(StatusCode::BAD_REQUEST, e.to_string()))?;
     let sub = Submit {
         id: uuid::Uuid::new_v4().to_string(),
         prompt,
@@ -545,11 +649,7 @@ async fn launch_stream(state: &AppState, p: PendingStream) -> Result<(), Respons
         text_rx: Some(p.text_rx),
         turn_rx: None,
     };
-    match rank.tx.try_send(sub) {
-        Ok(()) => Ok(()),
-        Err(TrySendError::Full(_)) => Err(error(StatusCode::TOO_MANY_REQUESTS, "Server busy; please retry shortly")),
-        Err(TrySendError::Disconnected(_)) => Err(error(StatusCode::SERVICE_UNAVAILABLE, "Server not ready")),
-    }
+    try_submit(rank, sub)
 }
 
 async fn stream_text(State(state): State<AppState>, Path(rid): Path<String>, req: Request) -> Response {
@@ -568,43 +668,14 @@ async fn stream_text(State(state): State<AppState>, Path(rid): Path<String>, req
         if s.ended {
             return error(StatusCode::BAD_REQUEST, format!("Request {rid} already completed"));
         }
-        if text.is_empty() {
-            None
-        } else if state.model().turn_stream().is_some() {
-            if s.submitted {
-                if let Some(tx) = &s.turn_tx {
-                    let _ = tx.send(text);
-                }
-                None
-            } else {
-                s.input.text.push_str(&text);
-                begin_turns(&state, s, false).map(Pending::Turns)
-            }
-        } else if !s.submitted {
-            s.input.text.push_str(&text);
-            if s.input.text.chars().count() < MIN_INITIAL_TEXT_CHARS {
-                None
-            } else {
-                match begin_submission(&state, s) {
-                    Ok(p) => p.map(Pending::Tokens),
-                    Err(r) => return r,
-                }
-            }
-        } else {
-            match state.model().tokenize_stream_text(&text) {
-                Ok(t) => {
-                    if let Some(tx) = &s.text_tx {
-                        let _ = tx.send(t);
-                    }
-                    None
-                }
-                Err(e) => return error(StatusCode::BAD_REQUEST, e.to_string()),
-            }
+        match feed(&state, s, text) {
+            Ok(p) => p,
+            Err(e) => return e.into_response(),
         }
     };
     if let Some(p) = pending {
-        if let Err(r) = launch(&state, p).await {
-            return r;
+        if let Err(e) = launch(&state, p).await {
+            return e.into_response();
         }
     }
     Json(json!({"status": "accepted", "request_id": rid})).into_response()
@@ -616,28 +687,14 @@ async fn stream_end(State(state): State<AppState>, Path(rid): Path<String>) -> R
         let Some(s) = sessions.get_mut(&rid) else {
             return error(StatusCode::NOT_FOUND, format!("Request {rid} not found"));
         };
-        if s.ended {
-            None
-        } else {
-            s.ended = true;
-            let p = if s.submitted {
-                None
-            } else if state.model().turn_stream().is_some() {
-                begin_turns(&state, s, true).map(Pending::Turns)
-            } else {
-                match begin_submission(&state, s) {
-                    Ok(p) => p.map(Pending::Tokens),
-                    Err(r) => return r,
-                }
-            };
-            s.text_tx = None;
-            s.turn_tx = None;
-            p
+        match finish(&state, s) {
+            Ok(p) => p,
+            Err(e) => return e.into_response(),
         }
     };
     if let Some(p) = pending {
-        if let Err(r) = launch(&state, p).await {
-            return r;
+        if let Err(e) = launch(&state, p).await {
+            return e.into_response();
         }
     }
     Json(json!({"status": "completed", "request_id": rid})).into_response()

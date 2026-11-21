@@ -126,8 +126,17 @@ impl TurnIn {
 /// mid-phrase often makes the model add a word at its end or garble the next turn's first one, so the
 /// run-on cut is a last resort.
 pub(crate) fn turn_cut(buf: &str, min_words: usize, max_words: usize) -> Option<usize> {
-    let cjk = |c: char| matches!(c, '。' | '！' | '？' | '，' | '、' | '；' | '：');
-    let clause = |c: char| matches!(c, '.' | ',' | '!' | '?' | ';' | ':') || cjk(c);
+    text_cut(buf, min_words, max_words, false)
+}
+
+/// `turn_cut` at sentence ends only (`.!?` and `。！？`), with the same run-on fallback.
+pub(crate) fn sentence_cut(buf: &str, min_words: usize, max_words: usize) -> Option<usize> {
+    text_cut(buf, min_words, max_words, true)
+}
+
+fn text_cut(buf: &str, min_words: usize, max_words: usize, sentences: bool) -> Option<usize> {
+    let cjk = |c: char| matches!(c, '。' | '！' | '？') || (!sentences && matches!(c, '，' | '、' | '；' | '：'));
+    let clause = |c: char| matches!(c, '.' | '!' | '?') || (!sentences && matches!(c, ',' | ';' | ':')) || cjk(c);
     let chars: Vec<(usize, char)> = buf.char_indices().collect();
     let words_before = |at: usize| buf[..at].split_whitespace().count();
     // A run-on cut avoids ending the turn on a word that leads into the next one ("...take the | bus").
