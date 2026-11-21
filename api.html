@@ -482,6 +482,11 @@
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#id1">Response</a></li>
 </ul>
 </li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#websocket-v1-audio-speech-stream">WebSocket /v1/audio/speech/stream</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#client-messages-json-text-frames">Client messages (JSON text frames)</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#server-messages">Server messages</a></li>
+</ul>
+</li>
 </ul>
 </li>
 <li class="toc-h1 nav-item toc-entry"><a class="reference internal nav-link" href="#python-api">Python API</a><ul class="pst-show_toc_level nav section-nav flex-column">
@@ -589,6 +594,43 @@ server answers <code class="docutils literal notranslate"><span class="pre">429<
 <p>With the Rust runtime, once an engine has stopped (e.g. after a CUDA error) the endpoint returns 503
 with <code class="docutils literal notranslate"><span class="pre">{&quot;status&quot;:</span> <span class="pre">&quot;unhealthy&quot;,</span> <span class="pre">&quot;failed_engines&quot;:</span> <span class="pre">[&lt;rank&gt;,</span> <span class="pre">...]}</span></code> until the server is restarted;
 requests are routed to the remaining engines, or get 503 when none is left.</p>
+</section>
+</section>
+<section id="websocket-v1-audio-speech-stream">
+<h2>WebSocket /v1/audio/speech/stream<a class="headerlink" href="#websocket-v1-audio-speech-stream" title="Link to this heading">#</a></h2>
+<p>Speech from text that arrives over time (e.g. from a text LLM), with the protocol of
+<a class="reference external" href="https://sgl-project.github.io/sglang-omni/basic_usage/tts.html#websocket-speech-streaming">sglang-omni’s WebSocket speech streaming</a>. Rust runtime
+only, for models that support input streaming (Qwen3-TTS, Higgs TTS). See the
+<a class="reference external" href="https://github.com/vox-serve/vox-serve/tree/main/examples/websocket_streaming">example client</a>.</p>
+<section id="client-messages-json-text-frames">
+<h3>Client messages (JSON text frames)<a class="headerlink" href="#client-messages-json-text-frames" title="Link to this heading">#</a></h3>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">{&quot;type&quot;:</span> <span class="pre">&quot;session.config&quot;,</span> <span class="pre">&quot;session&quot;:</span> <span class="pre">{...}}</span></code> (first): <code class="docutils literal notranslate"><span class="pre">voice</span></code>, <code class="docutils literal notranslate"><span class="pre">language</span></code>, <code class="docutils literal notranslate"><span class="pre">response_format</span></code>
+(<code class="docutils literal notranslate"><span class="pre">&quot;pcm&quot;</span></code>, the default, or <code class="docutils literal notranslate"><span class="pre">&quot;wav&quot;</span></code>), <code class="docutils literal notranslate"><span class="pre">stream_audio</span></code> (default <code class="docutils literal notranslate"><span class="pre">false</span></code>; <code class="docutils literal notranslate"><span class="pre">true</span></code> needs <code class="docutils literal notranslate"><span class="pre">&quot;pcm&quot;</span></code>),
+<code class="docutils literal notranslate"><span class="pre">split_granularity</span></code> (<code class="docutils literal notranslate"><span class="pre">&quot;clause&quot;</span></code>, the default, or <code class="docutils literal notranslate"><span class="pre">&quot;sentence&quot;</span></code>); and for voice cloning <code class="docutils literal notranslate"><span class="pre">ref_audio</span></code> (a
+base64 data URL, <code class="docutils literal notranslate"><span class="pre">data:audio/wav;base64,...</span></code>, sent once per session) and <code class="docutils literal notranslate"><span class="pre">ref_text</span></code>. <code class="docutils literal notranslate"><span class="pre">model</span></code> is ignored.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">{&quot;type&quot;:</span> <span class="pre">&quot;input.text&quot;,</span> <span class="pre">&quot;text&quot;:</span> <span class="pre">&quot;...&quot;}</span></code>: more text; send it with its spaces and punctuation.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">{&quot;type&quot;:</span> <span class="pre">&quot;input.commit&quot;}</span></code>: ends the current segment. Its remaining text is spoken even without a final
+boundary, and the session stays open for the next segment.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">{&quot;type&quot;:</span> <span class="pre">&quot;input.done&quot;}</span></code>: commits, and closes the session once all audio is sent.</p></li>
+</ul>
+</section>
+<section id="server-messages">
+<h3>Server messages<a class="headerlink" href="#server-messages" title="Link to this heading">#</a></h3>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">session.configured</span></code>: the settings, with the output <code class="docutils literal notranslate"><span class="pre">sample_rate</span></code>.</p></li>
+<li><p>Per segment, in order: <code class="docutils literal notranslate"><span class="pre">audio.start</span></code> (<code class="docutils literal notranslate"><span class="pre">segment_index</span></code>, <code class="docutils literal notranslate"><span class="pre">sample_rate</span></code>, <code class="docutils literal notranslate"><span class="pre">format</span></code>), the audio as binary
+frames, <code class="docutils literal notranslate"><span class="pre">audio.done</span></code>, and <code class="docutils literal notranslate"><span class="pre">input.committed</span></code> (<code class="docutils literal notranslate"><span class="pre">segment_index</span></code>, <code class="docutils literal notranslate"><span class="pre">segment_sentences</span></code>,
+<code class="docutils literal notranslate"><span class="pre">total_sentences</span></code>). Audio is 16-bit little-endian mono PCM; with <code class="docutils literal notranslate"><span class="pre">stream_audio</span></code> it is sent as it is
+generated, otherwise as one frame per segment (a WAV file with <code class="docutils literal notranslate"><span class="pre">&quot;wav&quot;</span></code>). An empty commit gets only
+<code class="docutils literal notranslate"><span class="pre">input.committed</span></code>.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">session.done</span></code> after <code class="docutils literal notranslate"><span class="pre">input.done</span></code>; <code class="docutils literal notranslate"><span class="pre">error</span></code> (<code class="docutils literal notranslate"><span class="pre">message</span></code>) for invalid messages or a failed segment. An
+invalid <code class="docutils literal notranslate"><span class="pre">session.config</span></code> closes the session.</p></li>
+</ul>
+<p>Each segment is one input-streaming request: the next segment starts generating as soon as its text arrives,
+and its audio follows the previous segment’s. <code class="docutils literal notranslate"><span class="pre">split_granularity</span></code> sets the smallest piece of text the model
+reads: a clause, or a sentence (for turn-based models such as Higgs TTS, whole sentences per turn). Closing the
+connection cancels its requests.</p>
 </section>
 </section>
 </section>
@@ -1044,6 +1086,11 @@ LM graph; the default classifies codebook 0 by <code class="docutils literal not
 </li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#get-health">GET /health</a><ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#id1">Response</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#websocket-v1-audio-speech-stream">WebSocket /v1/audio/speech/stream</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#client-messages-json-text-frames">Client messages (JSON text frames)</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#server-messages">Server messages</a></li>
 </ul>
 </li>
 </ul>

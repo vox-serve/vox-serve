@@ -509,6 +509,11 @@ turn boundary costs a short pause, like a comma. Only a run-on sentence of 20 or
 cut at a word boundary, because a turn that ends mid-phrase can make the model add or swallow a word there.</p>
 <p>When the text arrives more slowly than it is spoken, the audio waits for it: the current turn plays to its end,
 and the next one starts when its clause is complete. Send text with its punctuation and spaces as they arrive.</p>
+<p>The same streaming is available over WebSocket at <code class="docutils literal notranslate"><span class="pre">/v1/audio/speech/stream</span></code>, with sglang-omni’s protocol
+(<code class="docutils literal notranslate"><span class="pre">session.config</span></code>, <code class="docutils literal notranslate"><span class="pre">input.text</span></code>, <code class="docutils literal notranslate"><span class="pre">input.commit</span></code>, <code class="docutils literal notranslate"><span class="pre">input.done</span></code>; see the <a class="reference internal" href="../api.html"><span class="std std-doc">API reference</span></a> and the
+<a class="reference external" href="https://github.com/vox-serve/vox-serve/tree/main/examples/websocket_streaming">example client</a>). Each commit
+starts a new request, so a long conversation does not fill the context, and <code class="docutils literal notranslate"><span class="pre">split_granularity:</span> <span class="pre">&quot;sentence&quot;</span></code>
+makes every turn a whole sentence.</p>
 <p>Every turn stays in the KV cache: a stream ends (<code class="docutils literal notranslate"><span class="pre">max_context_reached</span></code>) once text and audio fill
 <code class="docutils literal notranslate"><span class="pre">--max-context</span></code> (2048 rows by default, about 70 seconds of speech). Raise it for long streams; the model was
 trained with 8192.</p>
