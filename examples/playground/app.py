@@ -10,6 +10,7 @@ from typing import List, Optional
 import aiohttp
 import uvicorn
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -47,6 +48,8 @@ class ServerStartRequest(BaseModel):
     model: str = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
     port: int = 12345
     cuda_devices: List[int] = [0]
+    runtime: str = "rust"
+    max_context: Optional[int] = None
 
     # Scheduler
     scheduler_type: str = "base"
@@ -54,8 +57,8 @@ class ServerStartRequest(BaseModel):
 
     # Batch and memory
     max_batch_size: int = 8
-    max_num_pages: int = 2048
-    page_size: int = 128
+    max_num_pages: Optional[int] = None  # None: the runtime's default
+    page_size: Optional[int] = None
 
     # Sampling parameters
     top_p: Optional[float] = None
@@ -91,6 +94,9 @@ class ServerStatusResponse(BaseModel):
     """Response for server status."""
 
     running: bool
+    ready: bool = False
+    runtime: Optional[str] = None
+    scheduler_type: Optional[str] = None
     model: Optional[str] = None
     port: Optional[int] = None
     cuda_devices: Optional[List[int]] = None
@@ -117,6 +123,8 @@ class ModelInfo(BaseModel):
     supports_speaker: bool = False
     supports_ref_text: bool = False
     supports_instruct: bool = False
+    # Input streaming that needs the Rust runtime (multi-turn text/audio interleaving, e.g. Higgs TTS)
+    rust_only_streaming: bool = False
 
 
 class ModelsResponse(BaseModel):
@@ -176,6 +184,14 @@ async def list_models():
             supports_language=True,
             supports_instruct=True,
         ),
+        # Higgs TTS: voice cloning with reference audio + ref_text; input streaming on the Rust runtime
+        ModelInfo(
+            id="bosonai/higgs-tts-3-4b",
+            name="bosonai/higgs-tts-3-4b",
+            supports_audio_input=True,
+            supports_ref_text=True,
+            rust_only_streaming=True,
+        ),
         # Standard models
         ModelInfo(
             id="canopylabs/orpheus-3b-0.1-ft",
@@ -224,6 +240,8 @@ async def start_server(request: ServerStartRequest):
         model=request.model,
         port=request.port,
         cuda_devices=request.cuda_devices,
+        runtime=request.runtime,
+        max_context=request.max_context,
         scheduler_type=request.scheduler_type,
         async_scheduling=request.async_scheduling,
         max_batch_size=request.max_batch_size,
@@ -246,7 +264,8 @@ async def start_server(request: ServerStartRequest):
         log_level=request.log_level,
         detokenize_interval=request.detokenize_interval,
     )
-    success, message = server_manager.start(config)
+    # Off the event loop, so logs and status stay available while the model loads.
+    success, message = await run_in_threadpool(server_manager.start, config)
     return ServerStartResponse(success=success, message=message)
 
 
@@ -263,6 +282,9 @@ async def server_status():
     status = server_manager.get_status()
     return ServerStatusResponse(
         running=status.running,
+        ready=status.ready,
+        runtime=status.runtime,
+        scheduler_type=status.scheduler_type,
         model=status.model,
         port=status.port,
         cuda_devices=status.cuda_devices,
@@ -379,7 +401,7 @@ async def generate_audio(
 
 
 # ============================================================================
-# Input Streaming Endpoints (for LLM Chat mode)
+# Input Streaming Endpoints (for the Stream Text and LLM Chat modes)
 # ============================================================================
 
 
@@ -400,8 +422,10 @@ class InputStreamStartResponse(BaseModel):
 async def input_stream_start(
     speaker: Optional[str] = Form(None),
     language: Optional[str] = Form(None),
+    ref_text: Optional[str] = Form(None),
+    audio: Optional[UploadFile] = File(None),
 ):
-    """Start an input streaming request to the VoxServe server."""
+    """Start an input streaming request to the VoxServe server (optionally with a reference voice)."""
     status = server_manager.get_status()
     if not status.running:
         raise HTTPException(status_code=400, detail="Server is not running")
@@ -410,12 +434,21 @@ async def input_stream_start(
 
     # Build form data only if we have parameters (matching input_streaming.py)
     form_data = None
-    if speaker or language:
+    if speaker or language or ref_text or audio:
         form_data = aiohttp.FormData()
         if speaker:
             form_data.add_field("speaker", speaker)
         if language:
             form_data.add_field("language", language)
+        if ref_text:
+            form_data.add_field("ref_text", ref_text)
+        if audio:
+            form_data.add_field(
+                "audio",
+                await audio.read(),
+                filename=audio.filename,
+                content_type=audio.content_type or "audio/wav",
+            )
 
     async with aiohttp.ClientSession() as session:
         async with session.post(voxserve_url, data=form_data) as response:

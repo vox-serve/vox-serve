@@ -6,11 +6,16 @@
 let serverRunning = false;
 let serverPort = 8000;
 let serverSchedulerType = 'base';
+let serverRuntime = 'rust';
 let modelCapabilities = {};
 let audioPlayer = null;
 let llmAudioContext = null;
 let logPollingInterval = null;
 let lastLogCount = 0;
+
+// Stream Text state
+let streamAbortController = null;
+let streamAudioContext = null;
 
 // LLM Chat state
 let chatMessages = [];
@@ -21,6 +26,9 @@ let llmAbortController = null;
 const elements = {
     // Server controls - Basic
     modelSelect: document.getElementById('model-select'),
+    runtimeSelect: document.getElementById('runtime-select'),
+    runtimeHint: document.getElementById('runtime-hint'),
+    maxContext: document.getElementById('max-context'),
     portInput: document.getElementById('port-input'),
     gpuCheckboxes: document.getElementById('gpu-checkboxes'),
     batchSize: document.getElementById('batch-size'),
@@ -93,6 +101,21 @@ const elements = {
     tabContents: document.querySelectorAll('.tab-content'),
     ttsSchedulerWarning: document.getElementById('tts-scheduler-warning'),
 
+    // Stream Text
+    streamTextInput: document.getElementById('stream-text-input'),
+    streamRate: document.getElementById('stream-rate'),
+    streamRateValue: document.getElementById('stream-rate-value'),
+    streamVoiceGroup: document.getElementById('stream-voice-group'),
+    streamAudioInput: document.getElementById('stream-audio-input'),
+    streamRefTextInput: document.getElementById('stream-ref-text-input'),
+    streamProgress: document.getElementById('stream-progress'),
+    streamPlaybackStatus: document.getElementById('stream-playback-status'),
+    streamTtfa: document.getElementById('stream-ttfa'),
+    streamStalls: document.getElementById('stream-stalls'),
+    streamDuration: document.getElementById('stream-duration'),
+    streamStartBtn: document.getElementById('stream-start-btn'),
+    streamStopBtn: document.getElementById('stream-stop-btn'),
+
     // LLM Chat
     llmUrl: document.getElementById('llm-url'),
     llmModel: document.getElementById('llm-model'),
@@ -138,6 +161,7 @@ async function init() {
     // Initial UI update
     updateModelParams();
     updateLLMModelParams();
+    updateRuntimeUI();
 }
 
 /**
@@ -197,7 +221,9 @@ function setupEventListeners() {
     elements.modelSelect.addEventListener('change', () => {
         updateModelParams();
         updateLLMModelParams();
+        updateRuntimeUI();
     });
+    elements.runtimeSelect.addEventListener('change', updateRuntimeUI);
 
     // Logs
     elements.clearLogsBtn.addEventListener('click', clearLogs);
@@ -226,6 +252,48 @@ function setupEventListeners() {
     });
     elements.chatStopBtn.addEventListener('click', stopLLMChat);
     elements.clearChatBtn.addEventListener('click', clearChatHistory);
+
+    // Stream Text
+    elements.streamStartBtn.addEventListener('click', streamText);
+    elements.streamStopBtn.addEventListener('click', stopStreamText);
+    elements.streamRate.addEventListener('input', () => {
+        elements.streamRateValue.textContent = elements.streamRate.value;
+    });
+}
+
+/**
+ * Enable only the server settings the selected runtime accepts.
+ * The Rust runtime rejects the Python-only flags (and `auto` would fall back to Python for them).
+ */
+function updateRuntimeUI() {
+    const runtime = elements.runtimeSelect.value;
+    const setEnabled = (selector, enabled) => {
+        document.querySelectorAll(selector).forEach(group => {
+            group.classList.toggle('runtime-disabled', !enabled);
+            group.querySelectorAll('input, select').forEach(el => { el.disabled = !enabled; });
+        });
+    };
+    setEnabled('.python-only', runtime === 'python');
+    setEnabled('.rust-only', runtime !== 'python');
+
+    const caps = modelCapabilities[elements.modelSelect.value] || {};
+    if (caps.rust_only_streaming && runtime === 'python') {
+        elements.runtimeHint.textContent = 'Input streaming (Stream Text, LLM Chat) for this model needs the Rust runtime.';
+    } else if (runtime === 'python') {
+        elements.runtimeHint.textContent = 'Input streaming needs the input_streaming scheduler on the Python runtime.';
+    } else {
+        elements.runtimeHint.textContent = 'Every scheduler serves both normal and input-streaming requests. '
+            + 'Async scheduling, repetition window, NVTX and disabling CUDA graphs are Python-only.';
+    }
+}
+
+/**
+ * Whether the running server serves input-streaming requests.
+ */
+function serverCanStream() {
+    if (!serverRunning) return false;
+    if (serverRuntime === 'python') return serverSchedulerType === 'input_streaming';
+    return true;
 }
 
 /**
@@ -246,6 +314,7 @@ function updateModelParams() {
 
     // Show/hide voice cloning section (audio + ref_text together)
     elements.audioUploadGroup.classList.toggle('hidden', !caps.supports_audio_input);
+    elements.streamVoiceGroup.classList.toggle('hidden', !caps.supports_audio_input);
 
     // Set detokenize interval to 1 for Qwen models, clear for others
     const isQwenModel = modelId.toLowerCase().includes('qwen');
@@ -284,6 +353,8 @@ async function startServer() {
         model: elements.modelSelect.value,
         port: parseInt(elements.portInput.value),
         cuda_devices: selectedGPUs,
+        runtime: elements.runtimeSelect.value,
+        max_context: elements.maxContext.value ? parseInt(elements.maxContext.value) : null,
         max_batch_size: parseInt(elements.batchSize.value),
 
         // Scheduler
@@ -292,8 +363,8 @@ async function startServer() {
         dp_size: parseInt(elements.dpSize.value),
 
         // Memory
-        max_num_pages: parseInt(elements.maxNumPages.value),
-        page_size: parseInt(elements.pageSize.value),
+        max_num_pages: elements.maxNumPages.value ? parseInt(elements.maxNumPages.value) : null,
+        page_size: elements.pageSize.value ? parseInt(elements.pageSize.value) : null,
 
         // Sampling
         top_p: elements.topP.value ? parseFloat(elements.topP.value) : null,
@@ -317,6 +388,10 @@ async function startServer() {
         detokenize_interval: elements.detokenizeInterval.value ? parseInt(elements.detokenizeInterval.value) : null,
     };
 
+    // Logs stream while the model loads (the start call returns once the server is ready)
+    elements.stopServerBtn.disabled = false;
+    startLogPolling();
+
     try {
         const response = await fetch('/api/server/start', {
             method: 'POST',
@@ -328,16 +403,14 @@ async function startServer() {
         if (result.success) {
             serverPort = config.port;
             serverSchedulerType = config.scheduler_type;
-            // Don't set serverRunning=true yet, wait for log confirmation
-            setStatus('Preparing...', '');
-            updateIndicator('starting');
-            elements.startServerBtn.disabled = true;
-            elements.stopServerBtn.disabled = false;
-            startLogPolling();
+            serverRuntime = config.runtime;
+            // The server answered /health: it is ready
+            onServerReady();
         } else {
             setStatus(result.message, 'error');
             updateIndicator('stopped');
             elements.startServerBtn.disabled = false;
+            elements.stopServerBtn.disabled = true;
         }
     } catch (error) {
         console.error('Failed to start server:', error);
@@ -363,8 +436,7 @@ async function stopServer() {
         updateIndicator('stopped');
         elements.startServerBtn.disabled = false;
         elements.stopServerBtn.disabled = true;
-        elements.generateBtn.disabled = true;
-        elements.ttsSchedulerWarning.classList.add('hidden');
+        updateSchedulerUI();
         stopLogPolling();
     } catch (error) {
         console.error('Failed to stop server:', error);
@@ -486,20 +558,23 @@ async function checkServerStatus() {
         const status = await response.json();
 
         if (status.running && !serverRunning) {
-            // Process is running but we haven't confirmed ready yet
-            // Keep showing "Preparing..." - wait for log confirmation
+            // Process is running (possibly started before this page loaded)
             serverPort = status.port;
+            serverRuntime = status.runtime || serverRuntime;
+            serverSchedulerType = status.scheduler_type || serverSchedulerType;
             elements.startServerBtn.disabled = true;
             elements.stopServerBtn.disabled = false;
             startLogPolling();
+            if (status.ready) {
+                onServerReady();
+            }
         } else if (!status.running && (serverRunning || elements.stopServerBtn.disabled === false)) {
             // Server stopped
             serverRunning = false;
             updateIndicator('stopped');
             elements.startServerBtn.disabled = false;
             elements.stopServerBtn.disabled = true;
-            elements.generateBtn.disabled = true;
-            elements.ttsSchedulerWarning.classList.add('hidden');
+            updateSchedulerUI();
             setStatus('Server stopped', '');
             stopLogPolling();
         } else if (serverRunning && status.uptime_seconds) {
@@ -546,8 +621,10 @@ function classifyLogLine(line) {
  * Check if log line indicates server is ready
  */
 function checkServerReady(line) {
-    // Pattern: "Scheduler (DP rank X/Y) started successfully with model: ..."
-    return line.includes('Scheduler') && line.includes('started successfully');
+    // Python runtime: "Scheduler (DP rank X/Y) started successfully with model: ..."
+    // Rust runtime: "listening on http://0.0.0.0:PORT"
+    return (line.includes('Scheduler') && line.includes('started successfully'))
+        || line.includes('listening on http');
 }
 
 /**
@@ -589,6 +666,7 @@ function appendLogs(logs) {
  * Called when server ready message is detected in logs
  */
 function onServerReady() {
+    if (serverRunning) return;
     serverRunning = true;
     updateIndicator('running');
     elements.startServerBtn.disabled = true;
@@ -604,11 +682,13 @@ function onServerReady() {
  * Update UI based on current scheduler type
  */
 function updateSchedulerUI() {
-    const isInputStreaming = serverSchedulerType === 'input_streaming';
+    // The Python runtime's input_streaming scheduler serves only input streaming; every Rust policy serves both.
+    const streamingOnly = serverRuntime === 'python' && serverSchedulerType === 'input_streaming';
 
-    // TTS mode: disabled when using input_streaming
-    elements.generateBtn.disabled = !serverRunning || isInputStreaming;
-    elements.ttsSchedulerWarning.classList.toggle('hidden', !serverRunning || !isInputStreaming);
+    // TTS mode: disabled when the server only serves input streaming
+    elements.generateBtn.disabled = !serverRunning || streamingOnly;
+    elements.ttsSchedulerWarning.classList.toggle('hidden', !serverRunning || !streamingOnly);
+    elements.streamStartBtn.disabled = !serverCanStream() || streamAbortController !== null;
 }
 
 /**
@@ -675,10 +755,10 @@ function switchTab(tabId) {
         content.classList.toggle('active', content.id === `${tabId}-tab`);
     });
 
-    // Auto-select appropriate scheduler type
-    if (tabId === 'tts') {
+    // Auto-select appropriate scheduler type (only the Python runtime needs a dedicated one for input streaming)
+    if (tabId === 'tts' || elements.runtimeSelect.value !== 'python') {
         elements.schedulerType.value = 'base';
-    } else if (tabId === 'llm-chat') {
+    } else {
         elements.schedulerType.value = 'input_streaming';
     }
 }
@@ -746,14 +826,73 @@ function escapeHtml(text) {
 }
 
 /**
+ * New playback state for streamAudioInBackground.
+ */
+function newAudioState(ctx, statusEl) {
+    return {
+        ctx,
+        statusEl,
+        buffer: new Uint8Array(0),
+        ttfaParsed: false,
+        wavHeaderParsed: false,
+        wavInfo: null,
+        nextPlayTime: ctx.currentTime,
+        isPlaying: false,
+        firstAudioAt: null,   // performance.now() when the first samples were scheduled
+        stallSeconds: 0,      // time playback ran dry after it started
+        audioSeconds: 0,
+        error: null,
+        done: false,
+    };
+}
+
+/**
+ * Schedule 16-bit PCM bytes for playback right after what is already queued.
+ */
+function playPcm(audioState, audioData) {
+    const ctx = audioState.ctx;
+    const info = audioState.wavInfo;
+    const pcmData = new Int16Array(audioData.buffer, audioData.byteOffset, audioData.length / 2);
+    const numSamples = pcmData.length / info.numChannels;
+    if (numSamples <= 0) return;
+
+    const audioBufferObj = ctx.createBuffer(info.numChannels, numSamples, info.sampleRate);
+    for (let channel = 0; channel < info.numChannels; channel++) {
+        const channelData = audioBufferObj.getChannelData(channel);
+        for (let i = 0; i < numSamples; i++) {
+            channelData[i] = pcmData[i * info.numChannels + channel] / 32768.0;
+        }
+    }
+
+    const source = ctx.createBufferSource();
+    source.buffer = audioBufferObj;
+    source.connect(ctx.destination);
+
+    // Playback ran dry: start now, and count the gap as a stall
+    if (audioState.nextPlayTime < ctx.currentTime) {
+        if (audioState.isPlaying) {
+            audioState.stallSeconds += ctx.currentTime - audioState.nextPlayTime;
+        }
+        audioState.nextPlayTime = ctx.currentTime;
+    }
+    source.start(audioState.nextPlayTime);
+    audioState.nextPlayTime += audioBufferObj.duration;
+    audioState.audioSeconds += audioBufferObj.duration;
+    if (audioState.firstAudioAt === null) {
+        audioState.firstAudioAt = performance.now();
+    }
+    audioState.isPlaying = true;
+}
+
+/**
  * Stream audio from the /audio endpoint in the background
  * Audio chunks are played as they arrive, concurrent with text sending
  */
 async function streamAudioInBackground(requestId, audioState, signal) {
     try {
         // Resume AudioContext if suspended (required by browsers)
-        if (llmAudioContext.state === 'suspended') {
-            await llmAudioContext.resume();
+        if (audioState.ctx.state === 'suspended') {
+            await audioState.ctx.resume();
         }
 
         const response = await fetch(`/api/input-stream/${requestId}/audio`, {
@@ -799,55 +938,16 @@ async function streamAudioInBackground(requestId, audioState, signal) {
                 };
                 audioState.wavHeaderParsed = true;
                 audioState.buffer = audioState.buffer.slice(44);
-                elements.llmPlaybackStatus.textContent = '▶️ Playing + Streaming';
+                audioState.statusEl.textContent = '▶️ Playing + Streaming';
             }
 
             // Process and play audio samples (with minimum buffer size)
             if (audioState.wavHeaderParsed && audioState.wavInfo) {
                 const sampleSize = audioState.wavInfo.bitsPerSample / 8;
-                const samplesInBuffer = audioState.buffer.length / sampleSize;
-
-                // Only play when we have enough samples
-                if (samplesInBuffer >= MIN_SAMPLES_TO_PLAY) {
+                if (audioState.buffer.length / sampleSize >= MIN_SAMPLES_TO_PLAY) {
                     const processableLength = Math.floor(audioState.buffer.length / sampleSize) * sampleSize;
-                    const audioData = audioState.buffer.slice(0, processableLength);
+                    playPcm(audioState, audioState.buffer.slice(0, processableLength));
                     audioState.buffer = audioState.buffer.slice(processableLength);
-
-                    // Convert to AudioBuffer and play
-                    const pcmData = new Int16Array(audioData.buffer, audioData.byteOffset, audioData.length / 2);
-                    const floatData = new Float32Array(pcmData.length);
-                    for (let i = 0; i < pcmData.length; i++) {
-                        floatData[i] = pcmData[i] / 32768.0;
-                    }
-
-                    const numSamples = floatData.length / audioState.wavInfo.numChannels;
-                    if (numSamples > 0) {
-                        const audioBufferObj = llmAudioContext.createBuffer(
-                            audioState.wavInfo.numChannels,
-                            numSamples,
-                            audioState.wavInfo.sampleRate
-                        );
-
-                        for (let channel = 0; channel < audioState.wavInfo.numChannels; channel++) {
-                            const channelData = audioBufferObj.getChannelData(channel);
-                            for (let i = 0; i < numSamples; i++) {
-                                channelData[i] = floatData[i * audioState.wavInfo.numChannels + channel];
-                            }
-                        }
-
-                        // Schedule playback
-                        const source = llmAudioContext.createBufferSource();
-                        source.buffer = audioBufferObj;
-                        source.connect(llmAudioContext.destination);
-
-                        // Update nextPlayTime based on current context time
-                        if (audioState.nextPlayTime < llmAudioContext.currentTime) {
-                            audioState.nextPlayTime = llmAudioContext.currentTime;
-                        }
-                        source.start(audioState.nextPlayTime);
-                        audioState.nextPlayTime += audioBufferObj.duration;
-                        audioState.isPlaying = true;
-                    }
                 }
             }
         }
@@ -857,41 +957,8 @@ async function streamAudioInBackground(requestId, audioState, signal) {
             const sampleSize = audioState.wavInfo.bitsPerSample / 8;
             const processableLength = Math.floor(audioState.buffer.length / sampleSize) * sampleSize;
             if (processableLength > 0) {
-                const audioData = audioState.buffer.slice(0, processableLength);
+                playPcm(audioState, audioState.buffer.slice(0, processableLength));
                 audioState.buffer = audioState.buffer.slice(processableLength);
-
-                const pcmData = new Int16Array(audioData.buffer, audioData.byteOffset, audioData.length / 2);
-                const floatData = new Float32Array(pcmData.length);
-                for (let i = 0; i < pcmData.length; i++) {
-                    floatData[i] = pcmData[i] / 32768.0;
-                }
-
-                const numSamples = floatData.length / audioState.wavInfo.numChannels;
-                if (numSamples > 0) {
-                    const audioBufferObj = llmAudioContext.createBuffer(
-                        audioState.wavInfo.numChannels,
-                        numSamples,
-                        audioState.wavInfo.sampleRate
-                    );
-
-                    for (let channel = 0; channel < audioState.wavInfo.numChannels; channel++) {
-                        const channelData = audioBufferObj.getChannelData(channel);
-                        for (let i = 0; i < numSamples; i++) {
-                            channelData[i] = floatData[i * audioState.wavInfo.numChannels + channel];
-                        }
-                    }
-
-                    const source = llmAudioContext.createBufferSource();
-                    source.buffer = audioBufferObj;
-                    source.connect(llmAudioContext.destination);
-
-                    if (audioState.nextPlayTime < llmAudioContext.currentTime) {
-                        audioState.nextPlayTime = llmAudioContext.currentTime;
-                    }
-                    source.start(audioState.nextPlayTime);
-                    audioState.nextPlayTime += audioBufferObj.duration;
-                    audioState.isPlaying = true;
-                }
             }
         }
     } catch (error) {
@@ -900,6 +967,149 @@ async function streamAudioInBackground(requestId, audioState, signal) {
             console.error('Audio streaming error:', error);
         }
     }
+}
+
+/**
+ * Stream Text: send the text word by word to the input-streaming API while playing the audio.
+ */
+async function streamText() {
+    const words = elements.streamTextInput.value.trim().split(/\s+/).filter(w => w);
+    if (words.length === 0) {
+        elements.streamPlaybackStatus.textContent = '❌ Enter some text';
+        return;
+    }
+    if (!serverCanStream()) {
+        elements.streamPlaybackStatus.textContent = '❌ Start a server that serves input streaming';
+        return;
+    }
+
+    streamAbortController = new AbortController();
+    const signal = streamAbortController.signal;
+    elements.streamStartBtn.disabled = true;
+    elements.streamStopBtn.disabled = false;
+    elements.streamTtfa.textContent = '-';
+    elements.streamStalls.textContent = '-';
+    elements.streamDuration.textContent = '-';
+
+    // Show the text with every word still pending
+    elements.streamProgress.innerHTML = '';
+    const spans = words.map(w => {
+        const span = document.createElement('span');
+        span.className = 'pending';
+        span.textContent = w + ' ';
+        elements.streamProgress.appendChild(span);
+        return span;
+    });
+
+    // A fresh context per run, so Stop can silence what is already scheduled
+    streamAudioContext = new (window.AudioContext || window.webkitAudioContext)();
+    const audioState = newAudioState(streamAudioContext, elements.streamPlaybackStatus);
+    let t0 = performance.now();
+    const metrics = setInterval(() => showStreamMetrics(audioState, t0), 200);
+
+    try {
+        const caps = modelCapabilities[elements.modelSelect.value] || {};
+        const startForm = new FormData();
+        const refAudio = elements.streamAudioInput.files[0];
+        if (caps.supports_audio_input && refAudio) {
+            startForm.append('audio', refAudio);
+            if (elements.streamRefTextInput.value) {
+                startForm.append('ref_text', elements.streamRefTextInput.value);
+            }
+        }
+
+        elements.streamPlaybackStatus.textContent = '⬇️ Starting...';
+        const startResponse = await fetch('/api/input-stream/start', { method: 'POST', body: startForm, signal });
+        if (!startResponse.ok) {
+            throw new Error(`Failed to start input stream: ${await startResponse.text()}`);
+        }
+        const { request_id } = await startResponse.json();
+
+        const audioPromise = streamAudioInBackground(request_id, audioState, signal);
+        elements.streamPlaybackStatus.textContent = '⬇️ Sending text';
+
+        t0 = performance.now();
+        for (let i = 0; i < words.length; i++) {
+            const response = await fetch(`/api/input-stream/${request_id}/text`, {
+                method: 'POST',
+                body: new URLSearchParams({ text: words[i] + ' ' }),
+                signal,
+            });
+            if (!response.ok) {
+                throw new Error(`Failed to send text: ${response.status} - ${await response.text()}`);
+            }
+            spans[i].className = 'sent';
+            // The slider can be moved while streaming
+            const delay = parseInt(elements.streamRate.value);
+            if (delay > 0 && i < words.length - 1) {
+                await new Promise(resolve => setTimeout(resolve, delay));
+            }
+        }
+
+        await fetch(`/api/input-stream/${request_id}/end`, { method: 'POST', signal });
+        await audioPromise;  // returns quietly when stopped
+        signal.throwIfAborted();
+        if (audioState.error) {
+            throw new Error(audioState.error);
+        }
+
+        // Wait for playback to finish (or Stop)
+        const remaining = audioState.nextPlayTime - audioState.ctx.currentTime;
+        if (remaining > 0) {
+            elements.streamPlaybackStatus.textContent = '▶️ Playing';
+            await new Promise(resolve => {
+                const timer = setTimeout(resolve, remaining * 1000);
+                signal.addEventListener('abort', () => { clearTimeout(timer); resolve(); });
+            });
+            signal.throwIfAborted();
+        }
+        elements.streamPlaybackStatus.textContent = '✅ Finished';
+    } catch (error) {
+        if (error.name === 'AbortError') {
+            elements.streamPlaybackStatus.textContent = '⏹️ Stopped';
+        } else {
+            console.error('Stream Text error:', error);
+            elements.streamPlaybackStatus.textContent = `❌ ${error.message}`;
+        }
+    } finally {
+        clearInterval(metrics);
+        showStreamMetrics(audioState, t0);
+        streamAbortController = null;
+        elements.streamStopBtn.disabled = true;
+        updateSchedulerUI();
+    }
+}
+
+/**
+ * First audio (from the first word sent), playback stalls, and audio received so far.
+ */
+function showStreamMetrics(audioState, t0) {
+    if (audioState.firstAudioAt !== null) {
+        elements.streamTtfa.textContent = `${Math.round(audioState.firstAudioAt - t0)}ms`;
+    }
+    let stalls = audioState.stallSeconds;
+    // Playback that ran dry while waiting for more audio counts too
+    if (audioState.isPlaying && !audioState.done && audioState.nextPlayTime < audioState.ctx.currentTime) {
+        stalls += audioState.ctx.currentTime - audioState.nextPlayTime;
+    }
+    if (audioState.isPlaying) {
+        elements.streamStalls.textContent = `${stalls.toFixed(2)}s`;
+        elements.streamDuration.textContent = `${audioState.audioSeconds.toFixed(1)}s`;
+    }
+}
+
+/**
+ * Stop Stream Text: cancel the requests and silence scheduled audio.
+ */
+function stopStreamText() {
+    if (streamAbortController) {
+        streamAbortController.abort();
+    }
+    if (streamAudioContext) {
+        streamAudioContext.close();
+        streamAudioContext = null;
+    }
+    elements.streamStopBtn.disabled = true;
 }
 
 /**
@@ -915,13 +1125,12 @@ async function sendChatMessage() {
         return;
     }
 
-    // Enforce input_streaming scheduler for LLM chat
     if (!serverRunning) {
-        alert('Please start the server first (with input_streaming scheduler)');
+        alert('Please start the server first');
         return;
     }
-    if (serverSchedulerType !== 'input_streaming') {
-        alert('LLM Chat requires input_streaming scheduler. Please restart the server with scheduler type set to "input_streaming".');
+    if (!serverCanStream()) {
+        alert('On the Python runtime, LLM Chat requires the input_streaming scheduler. Please restart the server with scheduler type set to "input_streaming", or use the Rust runtime.');
         return;
     }
 
@@ -947,16 +1156,7 @@ async function sendChatMessage() {
     }
 
     // Audio streaming state (shared with audio receiver)
-    const audioState = {
-        buffer: new Uint8Array(0),
-        ttfaParsed: false,
-        wavHeaderParsed: false,
-        wavInfo: null,
-        nextPlayTime: llmAudioContext.currentTime,
-        isPlaying: false,
-        error: null,
-        done: false,
-    };
+    const audioState = newAudioState(llmAudioContext, elements.llmPlaybackStatus);
 
     try {
         // Get model-specific params

@@ -1057,3 +1057,28 @@ input[type="file"]::file-selector-button:hover {
 .scheduler-warning.hidden {
     display: none;
 }
+
+/* Runtime-specific settings */
+.runtime-disabled {
+    opacity: 0.45;
+}
+
+/* Stream Text progress: words sent so far are highlighted */
+.stream-progress {
+    min-height: 1.5rem;
+    margin: 0.5rem 0;
+    line-height: 1.6;
+}
+
+.stream-progress .sent {
+    color: var(--text-primary);
+}
+
+.stream-progress .pending {
+    color: var(--text-muted);
+}
+
+#stream-rate {
+    width: 100%;
+    accent-color: var(--primary-color);
+}
