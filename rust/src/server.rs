@@ -19,7 +19,7 @@ use serde_json::{json, Map, Value};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 use crate::models::{GenerateInput, Model};
-use crate::scheduler::{Event, Submit};
+use crate::scheduler::{turn_cut, Event, Submit};
 use crate::wav;
 
 const TIMEOUT: Duration = Duration::from_secs(600);
@@ -103,6 +103,9 @@ pub struct Session {
     text_tx: Option<Sender<Vec<i32>>>,
     /// Moved into the submission.
     text_rx: Option<crossbeam_channel::Receiver<Vec<i32>>>,
+    /// Models that read text in turns (`Model::turn_stream`): text after the first turn's, as it arrives.
+    turn_tx: Option<Sender<String>>,
+    turn_rx: Option<crossbeam_channel::Receiver<String>>,
     submitted: bool,
     ended: bool,
 }
@@ -113,6 +116,18 @@ struct PendingStream {
     first: i32,
     events: UnboundedSender<Event>,
     text_rx: crossbeam_channel::Receiver<Vec<i32>>,
+}
+
+/// Turn-based models: the first turn's prompt (the request's text is that turn's) and the rest of the text.
+struct PendingTurns {
+    input: GenerateInput,
+    events: UnboundedSender<Event>,
+    turn_rx: crossbeam_channel::Receiver<String>,
+}
+
+enum Pending {
+    Tokens(PendingStream),
+    Turns(PendingTurns),
 }
 
 pub fn router(state: AppState) -> Router {
@@ -170,6 +185,7 @@ async fn submit(
         streaming,
         tx,
         text_rx: None,
+        turn_rx: None,
     };
     match rank.tx.try_send(s) {
         Ok(()) => Ok((id, rx)),
@@ -392,7 +408,7 @@ async fn speech(State(state): State<AppState>, Json(req): Json<SpeechRequest>) -
 // ---- input streaming --------------------------------------------------------------------------
 
 async fn stream_start(State(state): State<AppState>, req: Request) -> Response {
-    if state.model().text_stream().is_none() {
+    if state.model().text_stream().is_none() && state.model().turn_stream().is_none() {
         return error(StatusCode::BAD_REQUEST, "input streaming is not supported by this model");
     }
     let form = match parse_form(&state, req).await {
@@ -402,12 +418,15 @@ async fn stream_start(State(state): State<AppState>, req: Request) -> Response {
     let id = uuid::Uuid::new_v4().to_string();
     let (tx, rx) = unbounded_channel();
     let (text_tx, text_rx) = crossbeam_channel::unbounded();
+    let (turn_tx, turn_rx) = crossbeam_channel::unbounded();
     let session = Session {
         input: GenerateInput { text: String::new(), audio_path: form.audio_path, model_kwargs: form.kwargs },
         events_tx: Some(tx),
         events_rx: Some(rx),
         text_tx: Some(text_tx),
         text_rx: Some(text_rx),
+        turn_tx: Some(turn_tx),
+        turn_rx: Some(turn_rx),
         submitted: false,
         ended: false,
     };
@@ -440,6 +459,68 @@ fn begin_submission(state: &AppState, s: &mut Session) -> Result<Option<PendingS
     Ok(Some(PendingStream { input: s.input.clone(), first, events, text_rx }))
 }
 
+/// Turn-based models: once the buffered text holds a first turn (see `turn_cut`; all of it at the end),
+/// splits it off as the request's text and queues the rest.
+fn begin_turns(state: &AppState, s: &mut Session, end: bool) -> Option<PendingTurns> {
+    let spec = state.model().turn_stream()?;
+    let cut = if end {
+        s.input.text.len()
+    } else {
+        // The first turn starts at the first clause boundary, as later ones do (a short sentence is fine).
+        turn_cut(&s.input.text, spec.min_words, spec.max_words)?
+    };
+    s.submitted = true;
+    let events = s.events_tx.take().expect("unsubmitted session has an event sender");
+    let rest = s.input.text.split_off(cut);
+    if s.input.text.trim().is_empty() {
+        let _ = events.send(Event::Error("no text provided".into()));
+        return None;
+    }
+    if let Some(tx) = &s.turn_tx {
+        let _ = tx.send(rest);
+    }
+    let turn_rx = s.turn_rx.take().expect("unsubmitted session has a turn receiver");
+    Some(PendingTurns { input: s.input.clone(), events, turn_rx })
+}
+
+async fn launch(state: &AppState, p: Pending) -> Result<(), Response> {
+    match p {
+        Pending::Tokens(p) => launch_stream(state, p).await,
+        Pending::Turns(p) => launch_turns(state, p).await,
+    }
+}
+
+async fn launch_turns(state: &AppState, p: PendingTurns) -> Result<(), Response> {
+    let Some(rank) = state.pick() else { return Err(no_engine()) };
+    let model = rank.model.clone();
+    let input = p.input;
+    let prompt = tokio::task::spawn_blocking(move || model.preprocess(&input))
+        .await
+        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let prompt = match prompt {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = p.events.send(Event::Error(e.to_string()));
+            return Err(error(StatusCode::BAD_REQUEST, e.to_string()));
+        }
+    };
+    let sub = Submit {
+        id: uuid::Uuid::new_v4().to_string(),
+        prompt,
+        sampling: rank.model.default_sampling(),
+        seed: rand::random::<u32>() as u64,
+        streaming: true,
+        tx: p.events,
+        text_rx: None,
+        turn_rx: Some(p.turn_rx),
+    };
+    match rank.tx.try_send(sub) {
+        Ok(()) => Ok(()),
+        Err(TrySendError::Full(_)) => Err(error(StatusCode::TOO_MANY_REQUESTS, "Server busy; please retry shortly")),
+        Err(TrySendError::Disconnected(_)) => Err(error(StatusCode::SERVICE_UNAVAILABLE, "Server not ready")),
+    }
+}
+
 async fn launch_stream(state: &AppState, p: PendingStream) -> Result<(), Response> {
     let Some(rank) = state.pick() else { return Err(no_engine()) };
     let model = rank.model.clone();
@@ -462,6 +543,7 @@ async fn launch_stream(state: &AppState, p: PendingStream) -> Result<(), Respons
         streaming: true,
         tx: p.events,
         text_rx: Some(p.text_rx),
+        turn_rx: None,
     };
     match rank.tx.try_send(sub) {
         Ok(()) => Ok(()),
@@ -488,13 +570,23 @@ async fn stream_text(State(state): State<AppState>, Path(rid): Path<String>, req
         }
         if text.is_empty() {
             None
+        } else if state.model().turn_stream().is_some() {
+            if s.submitted {
+                if let Some(tx) = &s.turn_tx {
+                    let _ = tx.send(text);
+                }
+                None
+            } else {
+                s.input.text.push_str(&text);
+                begin_turns(&state, s, false).map(Pending::Turns)
+            }
         } else if !s.submitted {
             s.input.text.push_str(&text);
             if s.input.text.chars().count() < MIN_INITIAL_TEXT_CHARS {
                 None
             } else {
                 match begin_submission(&state, s) {
-                    Ok(p) => p,
+                    Ok(p) => p.map(Pending::Tokens),
                     Err(r) => return r,
                 }
             }
@@ -511,7 +603,7 @@ async fn stream_text(State(state): State<AppState>, Path(rid): Path<String>, req
         }
     };
     if let Some(p) = pending {
-        if let Err(r) = launch_stream(&state, p).await {
+        if let Err(r) = launch(&state, p).await {
             return r;
         }
     }
@@ -530,18 +622,21 @@ async fn stream_end(State(state): State<AppState>, Path(rid): Path<String>) -> R
             s.ended = true;
             let p = if s.submitted {
                 None
+            } else if state.model().turn_stream().is_some() {
+                begin_turns(&state, s, true).map(Pending::Turns)
             } else {
                 match begin_submission(&state, s) {
-                    Ok(p) => p,
+                    Ok(p) => p.map(Pending::Tokens),
                     Err(r) => return r,
                 }
             };
             s.text_tx = None;
+            s.turn_tx = None;
             p
         }
     };
     if let Some(p) = pending {
-        if let Err(r) = launch_stream(&state, p).await {
+        if let Err(r) = launch(&state, p).await {
             return r;
         }
     }

@@ -468,6 +468,7 @@ async fn bench(n: usize, args: &Args, ranks: Vec<server::Rank>) -> Result<()> {
             streaming: true,
             tx: etx,
             text_rx: None,
+            turn_rx: None,
         };
         let tx = ranks[i % ranks.len()].tx.clone();
         tokio::task::spawn_blocking(move || tx.send(s)).await??;

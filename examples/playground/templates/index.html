@@ -25,6 +25,7 @@
                 <!-- Tab Navigation -->
                 <div class="tab-nav">
                     <button class="tab-btn active" data-tab="tts">Text-to-Speech</button>
+                    <button class="tab-btn" data-tab="stream-text">Stream Text</button>
                     <button class="tab-btn" data-tab="llm-chat">LLM Chat</button>
                 </div>
 
@@ -106,6 +107,50 @@
                         </div>
                         <button id="generate-btn" class="btn btn-primary btn-large" disabled>Generate Audio</button>
                         <button id="stop-audio-btn" class="btn btn-secondary" disabled>Stop</button>
+                    </div>
+                </div>
+
+                <!-- Stream Text Tab: send text word by word through the input-streaming API -->
+                <div class="card tts-card tab-content" id="stream-text-tab">
+                    <small class="form-hint">
+                        Sends the text word by word to <code>/generate/stream/{start,text,end}</code>, as an LLM would,
+                        and plays the audio while the text is still arriving.
+                        Higgs TTS needs the Rust runtime and reads the text in clause-sized turns.
+                    </small>
+                    <div class="form-group">
+                        <label for="stream-text-input">Text to Stream</label>
+                        <textarea id="stream-text-input" rows="5" placeholder="Enter text here...">Sure, I can help with that. The quickest way to get to the station is to take the number twelve bus from the corner, then walk two blocks north. It usually takes about twenty minutes, unless there is traffic on the bridge.</textarea>
+                    </div>
+                    <div class="form-group">
+                        <label for="stream-rate">Text speed: <span id="stream-rate-value">50</span> ms per word</label>
+                        <input type="range" id="stream-rate" min="0" max="500" step="10" value="50">
+                    </div>
+
+                    <div id="stream-voice-group" class="voice-clone-group hidden">
+                        <label>Voice Cloning (optional)</label>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="stream-audio-input">Reference Audio</label>
+                                <input type="file" id="stream-audio-input" accept="audio/*">
+                            </div>
+                            <div class="form-group">
+                                <label for="stream-ref-text-input">Reference Text</label>
+                                <input type="text" id="stream-ref-text-input" placeholder="Transcript of the reference audio">
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="stream-progress" id="stream-progress"></div>
+
+                    <div class="generate-row">
+                        <div class="playback-info">
+                            <span id="stream-playback-status">⏸️ Idle</span>
+                            <span class="ttfa-display">First audio: <span id="stream-ttfa">-</span></span>
+                            <span class="ttfa-display">Stalls: <span id="stream-stalls">-</span></span>
+                            <span class="ttfa-display">Audio: <span id="stream-duration">-</span></span>
+                        </div>
+                        <button id="stream-start-btn" class="btn btn-primary btn-large" disabled>Stream</button>
+                        <button id="stream-stop-btn" class="btn btn-secondary" disabled>Stop</button>
                     </div>
                 </div>
 
@@ -203,6 +248,16 @@
                         </select>
                     </div>
 
+                    <div class="form-group">
+                        <label for="runtime-select">Runtime</label>
+                        <select id="runtime-select">
+                            <option value="rust" selected>rust</option>
+                            <option value="python">python</option>
+                            <option value="auto">auto (Rust, else Python)</option>
+                        </select>
+                        <small class="form-hint" id="runtime-hint"></small>
+                    </div>
+
                     <div class="form-row">
                         <div class="form-group">
                             <label for="port-input">Port</label>
@@ -230,12 +285,17 @@
                             <div class="form-row">
                                 <div class="form-group">
                                     <label for="max-num-pages">Max Num Pages</label>
-                                    <input type="number" id="max-num-pages" value="2048" min="1">
+                                    <input type="number" id="max-num-pages" min="1" placeholder="default">
                                 </div>
                                 <div class="form-group">
                                     <label for="page-size">Page Size</label>
-                                    <input type="number" id="page-size" value="128" min="1">
+                                    <input type="number" id="page-size" min="1" placeholder="default">
                                 </div>
+                            </div>
+                            <div class="form-group rust-only">
+                                <label for="max-context">Max Context (Rust)</label>
+                                <input type="number" id="max-context" min="256" step="256" placeholder="default (2048)">
+                                <small class="form-hint">Each streamed turn stays in context: 2048 tokens is about 60 s of Higgs speech.</small>
                             </div>
                         </div>
 
@@ -277,7 +337,7 @@
                                     <label for="repetition-penalty">Repetition Penalty</label>
                                     <input type="number" id="repetition-penalty" step="0.1" min="0" placeholder="default">
                                 </div>
-                                <div class="form-group">
+                                <div class="python-only form-group">
                                     <label for="repetition-window">Repetition Window</label>
                                     <input type="number" id="repetition-window" min="1" placeholder="default">
                                 </div>
@@ -297,7 +357,7 @@
                         <!-- Performance Settings -->
                         <div class="settings-group">
                             <h4>Performance</h4>
-                            <div class="form-group checkbox-inline">
+                            <div class="python-only form-group checkbox-inline">
                                 <input type="checkbox" id="cuda-graph" checked>
                                 <label for="cuda-graph">Enable CUDA Graph</label>
                             </div>
@@ -309,7 +369,7 @@
                                 <input type="checkbox" id="enable-torch-compile">
                                 <label for="enable-torch-compile">Enable torch.compile</label>
                             </div>
-                            <div class="form-group checkbox-inline">
+                            <div class="python-only form-group checkbox-inline">
                                 <input type="checkbox" id="enable-nvtx">
                                 <label for="enable-nvtx">Enable NVTX Profiling</label>
                             </div>
@@ -334,7 +394,7 @@
                                     <input type="number" id="dp-size" value="1" min="1">
                                 </div>
                             </div>
-                            <div class="form-group checkbox-inline">
+                            <div class="python-only form-group checkbox-inline">
                                 <input type="checkbox" id="async-scheduling">
                                 <label for="async-scheduling">Async Scheduling</label>
                             </div>

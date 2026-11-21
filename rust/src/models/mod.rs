@@ -85,6 +85,29 @@ pub struct TextStreamSpec {
     pub eos: i32,
 }
 
+/// Interleaved input streaming (`meta["turn_stream"]`), for models that read the text in turns:
+/// `[text chunk] [its audio] [text chunk] [its audio] ...` in one sequence (Higgs TTS). Text that arrives
+/// while a turn's audio is generated is appended as the next turn (rows from `PromptBuilder::turn_rows`,
+/// prefilled into the request's KV cache) once that audio has ended.
+#[derive(Debug, Clone, Copy)]
+pub struct TurnStreamSpec {
+    /// Codebook-0 code that ends a turn's audio (the delay pattern's end-of-codes)...
+    pub eoc: i32,
+    /// ...at a turn step of at least this (earlier ones are part of the delay ramp).
+    pub min_eoc_step: i32,
+    /// Rows after the EOC row that finish the turn's delayed codebooks. The next turn's first rows
+    /// overlay them (the two delay patterns are complementary), making the audio one continuous stream.
+    pub tail_rows: usize,
+    /// Text of a turn while more may follow: up to a clause boundary with at least `min_words` words
+    /// before it, else (a run-on sentence) up to a word boundary once `max_words` words are buffered.
+    pub min_words: usize,
+    pub max_words: usize,
+    /// Frames of codec context a detokenization chunk decodes before the first frame it emits. Nonzero:
+    /// while a request waits for text, its turn's audio is decoded to the end (instead of waiting for the
+    /// next turn's look-ahead), and decoding resumes this many frames before the next turn's first frame.
+    pub resume_left: usize,
+}
+
 /// What a sampled row is, as the program's graph classified it (`out_kind`; the codes are
 /// `TOKEN_AUDIO` / `TOKEN_STOP` / `TOKEN_OTHER` in `vox_serve/rt/prompt.py`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,6 +141,10 @@ pub trait PromptBuilder: Send + Sync {
     fn preprocess_streaming(&self, _input: &GenerateInput, _first: i32) -> Result<Prompt> {
         bail!("input streaming is not supported by this model")
     }
+    /// Interleaved input streaming: the rows of a later text turn (appended after the previous turn's audio).
+    fn turn_rows(&self, _text: &str) -> Result<Prompt> {
+        bail!("input streaming is not supported by this model")
+    }
 }
 
 /// A model as the scheduler sees it: constants from `meta` plus the prompt builder.
@@ -130,6 +157,7 @@ pub struct Model {
     decode_row: Option<Vec<i32>>,
     preseed: usize,
     text_stream: Option<TextStreamSpec>,
+    turn_stream: Option<TurnStreamSpec>,
     prompts: Box<dyn PromptBuilder>,
 }
 
@@ -174,6 +202,13 @@ impl Model {
     pub fn preprocess_streaming(&self, input: &GenerateInput, first: i32) -> Result<Prompt> {
         self.prompts.preprocess_streaming(input, first)
     }
+    /// Interleaved (turn-based) input streaming support.
+    pub fn turn_stream(&self) -> Option<TurnStreamSpec> {
+        self.turn_stream
+    }
+    pub fn turn_rows(&self, text: &str) -> Result<Prompt> {
+        self.prompts.turn_rows(text)
+    }
     /// Forces greedy decoding for every request (testing / parity checks).
     pub fn greedy(mut self) -> Self {
         self.sampling.temperature = 0.0;
@@ -211,6 +246,20 @@ pub fn load(meta: &Value, prompt_builder: Option<&str>) -> Result<Model> {
     } else {
         None
     };
+    let tt = &meta["turn_stream"];
+    let turn_stream = if tt.is_object() {
+        let f = |k: &str| tt[k].as_i64().ok_or_else(|| anyhow!("meta.turn_stream.{k} missing"));
+        Some(TurnStreamSpec {
+            eoc: f("eoc")? as i32,
+            min_eoc_step: f("min_eoc_step")? as i32,
+            tail_rows: f("tail_rows")? as usize,
+            min_words: tt["min_words"].as_u64().unwrap_or(3) as usize,
+            max_words: tt["max_words"].as_u64().unwrap_or(20) as usize,
+            resume_left: tt["resume_left"].as_u64().unwrap_or(0) as usize,
+        })
+    } else {
+        None
+    };
     Ok(Model {
         n_codebooks: int("n_codebooks")?,
         max_tokens: int("max_tokens")?,
@@ -220,6 +269,7 @@ pub fn load(meta: &Value, prompt_builder: Option<&str>) -> Result<Model> {
         decode_row: ids("decode_row"),
         preseed: meta["preseed_frames"].as_u64().unwrap_or(0) as usize,
         text_stream,
+        turn_stream,
         prompts,
     })
 }
