@@ -17,6 +17,10 @@ Parameters (multipart form)
 - ``text`` (string, required): Input prompt.
 - ``audio`` (file, optional): Input audio for STS-capable models. The Rust runtime accepts request
   bodies up to 100 MiB.
+- ``ref_audio_path`` (string, optional, Rust runtime): reference audio already on the server, a file under
+  ``--voice-dir`` (instead of uploading ``audio``). With ``--voice-dir``, ``voice=<name>`` selects the clip
+  ``<name>.wav`` there, with ``<name>.txt`` as its transcript (see :doc:`cli`). The same fields work for
+  ``/generate/stream/start``, ``/v1/audio/speech`` (JSON) and the WebSocket ``session.config``.
 - ``streaming`` (bool, optional, default ``true``):
   - ``true`` streams WAV chunks as they are produced.
   - ``false`` returns a single WAV file after completion.
@@ -85,7 +89,8 @@ Client messages (JSON text frames)
 - ``{"type": "session.config", "session": {...}}`` (first): ``voice``, ``language``, ``response_format``
   (``"pcm"``, the default, or ``"wav"``), ``stream_audio`` (default ``false``; ``true`` needs ``"pcm"``),
   ``split_granularity`` (``"clause"``, the default, or ``"sentence"``); and for voice cloning ``ref_audio`` (a
-  base64 data URL, ``data:audio/wav;base64,...``, sent once per session) and ``ref_text``. ``model`` is ignored.
+  base64 data URL, ``data:audio/wav;base64,...``, sent once per session) or ``ref_audio_path``, and
+  ``ref_text``. With ``--voice-dir``, ``voice`` can name a reference clip on the server. ``model`` is ignored.
 - ``{"type": "input.text", "text": "..."}``: more text; send it with its spaces and punctuation.
 - ``{"type": "input.commit"}``: ends the current segment. Its remaining text is spoken even without a final
   boundary, and the session stays open for the next segment.

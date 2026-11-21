@@ -147,6 +147,11 @@ pub struct Args {
     /// Write a per-launch GPU timing trace (JSON lines) into this directory.
     #[arg(long)]
     trace_dir: Option<PathBuf>,
+    /// Reference audio clips requests may name instead of uploading audio: `voice: "<name>"` uses
+    /// `<name>.wav` (or .flac, .mp3, .ogg) here, with `<name>.txt` as its transcript, and
+    /// `ref_audio_path` any audio file under this directory.
+    #[arg(long)]
+    voice_dir: Option<PathBuf>,
     /// Compile the LM forward pieces with torch.compile before capturing their CUDA graphs
     /// (slower startup; no effect on the per-step host work).
     #[arg(long)]
@@ -421,7 +426,11 @@ pub fn run(args: Args) -> Result<()> {
     } else {
         let upload_dir = std::env::temp_dir().join("vox_serve_audio/uploads");
         std::fs::create_dir_all(&upload_dir)?;
-        let state = server::AppState::new(ranks, upload_dir);
+        let mut state = server::AppState::new(ranks, upload_dir);
+        if let Some(dir) = &args.voice_dir {
+            state = state.with_voice_dir(dir)?;
+            info!("reference voices from {}", dir.display());
+        }
         let addr = format!("{}:{}", args.host, args.port);
         rt.block_on(async move {
             let listener = tokio::net::TcpListener::bind(&addr).await?;

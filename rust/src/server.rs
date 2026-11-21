@@ -59,12 +59,28 @@ pub struct AppState {
     ranks: Arc<Vec<Rank>>,
     next: Arc<AtomicUsize>,
     upload_dir: std::path::PathBuf,
+    /// `--voice-dir`, canonicalized.
+    voice_dir: Option<std::path::PathBuf>,
     sessions: Arc<Mutex<HashMap<String, Session>>>,
 }
 
 impl AppState {
     pub fn new(ranks: Vec<Rank>, upload_dir: std::path::PathBuf) -> Self {
-        Self { ranks: Arc::new(ranks), next: Default::default(), upload_dir, sessions: Default::default() }
+        Self {
+            ranks: Arc::new(ranks),
+            next: Default::default(),
+            upload_dir,
+            voice_dir: None,
+            sessions: Default::default(),
+        }
+    }
+
+    /// Lets requests name reference audio in `dir` (see `resolve_voice`).
+    pub fn with_voice_dir(mut self, dir: &std::path::Path) -> anyhow::Result<Self> {
+        let dir = dir.canonicalize().map_err(|e| anyhow::anyhow!("--voice-dir {}: {e}", dir.display()))?;
+        anyhow::ensure!(dir.is_dir(), "--voice-dir {} is not a directory", dir.display());
+        self.voice_dir = Some(dir);
+        Ok(self)
     }
 
     /// Model logic for engine-independent work (tokenization, sample rate).
@@ -350,7 +366,10 @@ async fn generate(State(state): State<AppState>, req: Request) -> Response {
     let Some(text) = text else {
         return error(StatusCode::UNPROCESSABLE_ENTITY, "field 'text' is required");
     };
-    let input = GenerateInput { text, audio_path, model_kwargs: kwargs };
+    let mut input = GenerateInput { text, audio_path, model_kwargs: kwargs };
+    if let Err(e) = resolve_voice(&state, &mut input, form.fields.get("ref_audio_path").map(String::as_str)) {
+        return e.into_response();
+    }
     let (id, rx) = match submit(&state, input, streaming).await {
         Ok(v) => v,
         Err(r) => return r,
@@ -388,6 +407,61 @@ struct SpeechRequest {
     /// Transcript of the reference audio.
     #[serde(default)]
     ref_text: Option<String>,
+    /// Reference audio file under `--voice-dir` (instead of `ref_audio`).
+    #[serde(default)]
+    ref_audio_path: Option<String>,
+}
+
+/// Audio extensions a named voice may have (see `resolve_voice`).
+const VOICE_EXTENSIONS: [&str; 4] = ["wav", "flac", "mp3", "ogg"];
+
+/// Reference audio a request names instead of uploading it (needs `--voice-dir`):
+/// - `ref_audio_path`: an audio file under the voice directory (relative to it, or absolute);
+/// - `voice: "<name>"` (when no reference audio is given): `<name>.wav` (or .flac, .mp3, .ogg) in the voice
+///   directory, if there is one; otherwise `voice` is left to the model (e.g. a preset speaker).
+///
+/// A transcript next to the clip (`<name>.txt`) becomes `ref_text` unless the request has one. Paths that
+/// leave the voice directory (`..`, symlinks out of it) are rejected.
+pub(crate) fn resolve_voice(
+    state: &AppState,
+    input: &mut GenerateInput,
+    ref_audio_path: Option<&str>,
+) -> Result<(), ApiError> {
+    let bad = |msg: String| Err(api_error(StatusCode::BAD_REQUEST, msg));
+    let clip = if let Some(p) = ref_audio_path.filter(|p| !p.is_empty()) {
+        let Some(dir) = &state.voice_dir else {
+            return bad("ref_audio_path needs the server to be started with --voice-dir".into());
+        };
+        if input.audio_path.is_some() {
+            return bad("give either reference audio or ref_audio_path, not both".into());
+        }
+        match dir.join(p).canonicalize() {
+            Ok(f) if f.starts_with(dir) && f.is_file() => f,
+            _ => return bad(format!("ref_audio_path {p:?} is not a file in the voice directory")),
+        }
+    } else {
+        let (Some(dir), None) = (&state.voice_dir, &input.audio_path) else { return Ok(()) };
+        let Some(Value::String(name)) = input.model_kwargs.get("voice") else { return Ok(()) };
+        // A plain file name: no separators or dot segments.
+        if name.is_empty() || name.contains(['/', '\\']) || name.starts_with('.') {
+            return Ok(());
+        }
+        let found = VOICE_EXTENSIONS
+            .iter()
+            .filter_map(|ext| dir.join(format!("{name}.{ext}")).canonicalize().ok())
+            .find(|f| f.starts_with(dir) && f.is_file());
+        let Some(f) = found else { return Ok(()) };
+        input.model_kwargs.remove("voice");
+        f
+    };
+    let has_text = matches!(input.model_kwargs.get("ref_text"), Some(Value::String(t)) if !t.trim().is_empty());
+    if !has_text {
+        if let Ok(t) = std::fs::read_to_string(clip.with_extension("txt")) {
+            input.model_kwargs.insert("ref_text".into(), Value::String(t.trim().to_string()));
+        }
+    }
+    input.audio_path = Some(clip.to_string_lossy().to_string());
+    Ok(())
 }
 
 /// The bytes of reference audio given as a base64 data URL (`data:audio/wav;base64,...`).
@@ -420,7 +494,10 @@ async fn speech(State(state): State<AppState>, Json(req): Json<SpeechRequest>) -
         }
         None => None,
     };
-    let input = GenerateInput { text: req.input, audio_path, model_kwargs: kwargs };
+    let mut input = GenerateInput { text: req.input, audio_path, model_kwargs: kwargs };
+    if let Err(e) = resolve_voice(&state, &mut input, req.ref_audio_path.as_deref()) {
+        return e.into_response();
+    }
     let (id, rx) = match submit(&state, input, true).await {
         Ok(v) => v,
         Err(r) => return r,
@@ -474,9 +551,12 @@ async fn stream_start(State(state): State<AppState>, req: Request) -> Response {
         Ok(f) => f,
         Err(r) => return r,
     };
+    let mut input = GenerateInput { text: String::new(), audio_path: form.audio_path, model_kwargs: form.kwargs };
+    if let Err(e) = resolve_voice(&state, &mut input, form.fields.get("ref_audio_path").map(String::as_str)) {
+        return e.into_response();
+    }
     let id = uuid::Uuid::new_v4().to_string();
-    let session =
-        Session::new(GenerateInput { text: String::new(), audio_path: form.audio_path, model_kwargs: form.kwargs });
+    let session = Session::new(input);
     state.sessions.lock().unwrap().insert(id.clone(), session);
     // Abandoned sessions (and the requests they feed) are dropped after the request timeout.
     let (sessions, rid) = (state.sessions.clone(), id.clone());
@@ -791,6 +871,67 @@ mod tests {
         assert!(state.pick().is_none());
         let r = submit(&state, GenerateInput::default(), false).await.unwrap_err();
         assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn voice_dir_paths() {
+        let root = std::env::temp_dir().join(format!("vox_voice_test_{}", uuid::Uuid::new_v4()));
+        let dir = root.join("voices");
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("guide.wav"), b"RIFF").unwrap();
+        std::fs::write(dir.join("guide.txt"), "Hello from the guide.\n").unwrap();
+        std::fs::write(dir.join("sub/other.flac"), b"fLaC").unwrap();
+        std::fs::write(root.join("secret.wav"), b"RIFF").unwrap();
+        std::os::unix::fs::symlink(root.join("secret.wav"), dir.join("link.wav")).unwrap();
+        let (r, _rx) = rank();
+        let plain = AppState::new(vec![r], std::env::temp_dir());
+        let (r, _rx) = rank();
+        let state = AppState::new(vec![r], std::env::temp_dir()).with_voice_dir(&dir).unwrap();
+        let canon = dir.canonicalize().unwrap();
+        let voice = |v: &str| GenerateInput {
+            model_kwargs: Map::from_iter([("voice".to_string(), Value::String(v.into()))]),
+            ..Default::default()
+        };
+
+        // A named voice: its clip and transcript; `voice` is consumed.
+        let mut input = voice("guide");
+        resolve_voice(&state, &mut input, None).unwrap();
+        assert_eq!(input.audio_path.as_deref(), Some(canon.join("guide.wav").to_str().unwrap()));
+        assert_eq!(input.model_kwargs["ref_text"], "Hello from the guide.");
+        assert!(!input.model_kwargs.contains_key("voice"));
+
+        // An explicit transcript wins; a preset speaker name without a clip is left to the model.
+        let mut input = voice("guide");
+        input.model_kwargs.insert("ref_text".into(), Value::String("Mine.".into()));
+        resolve_voice(&state, &mut input, None).unwrap();
+        assert_eq!(input.model_kwargs["ref_text"], "Mine.");
+        let mut input = voice("ryan");
+        resolve_voice(&state, &mut input, None).unwrap();
+        assert!(input.audio_path.is_none() && input.model_kwargs["voice"] == "ryan");
+        for name in ["../secret", "link"] {
+            let mut input = voice(name);
+            resolve_voice(&state, &mut input, None).unwrap();
+            assert!(input.audio_path.is_none(), "{name}");
+        }
+
+        // ref_audio_path: files under the directory only.
+        let mut input = GenerateInput::default();
+        resolve_voice(&state, &mut input, Some("sub/other.flac")).unwrap();
+        assert_eq!(input.audio_path.as_deref(), Some(canon.join("sub/other.flac").to_str().unwrap()));
+        assert!(!input.model_kwargs.contains_key("ref_text"));
+        let outside = root.join("secret.wav");
+        for p in ["../secret.wav", "link.wav", "sub", "missing.wav", outside.to_str().unwrap()] {
+            let e = resolve_voice(&state, &mut GenerateInput::default(), Some(p)).unwrap_err();
+            assert_eq!(e.status, StatusCode::BAD_REQUEST, "{p}");
+        }
+        let mut uploaded = GenerateInput { audio_path: Some("/tmp/upload.wav".into()), ..Default::default() };
+        assert!(resolve_voice(&state, &mut uploaded, Some("guide.wav")).is_err());
+        // Without --voice-dir: paths are refused and voices are left alone.
+        assert!(resolve_voice(&plain, &mut GenerateInput::default(), Some("guide.wav")).is_err());
+        let mut input = voice("guide");
+        resolve_voice(&plain, &mut input, None).unwrap();
+        assert!(input.audio_path.is_none());
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     fn app(upload_dir: &std::path::Path) -> (Router, crossbeam_channel::Receiver<Submit>) {

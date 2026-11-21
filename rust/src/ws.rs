@@ -6,7 +6,8 @@
 //! - `{"type": "session.config", "session": {...}}`, first: `voice`, `language`, `response_format`
 //!   (`"pcm"`, the default, or `"wav"`), `stream_audio` (default `false`), `split_granularity`
 //!   (`"clause"`, the default, or `"sentence"`), and vox-serve's `ref_audio` (a base64 data URL),
-//!   `ref_text`, `speaker`, `instruct`. `model` is ignored.
+//!   `ref_audio_path` (a file under `--voice-dir`), `ref_text`, `speaker`, `instruct`. With `--voice-dir`,
+//!   `voice` may name a reference clip there (see `server::resolve_voice`). `model` is ignored.
 //! - `{"type": "input.text", "text": "..."}`, any number of times.
 //! - `{"type": "input.commit"}`: ends the current segment's text (it is spoken in full, including text
 //!   after its last boundary); the socket stays open for the next segment.
@@ -38,8 +39,8 @@ use tokio::task::JoinHandle;
 use crate::models::GenerateInput;
 use crate::scheduler::{sentence_cut, Event};
 use crate::server::{
-    api_error, decode_data_url, feed, finish, launch, streams_input, ApiError, AppState, Pending, Session,
-    ENGINE_STOPPED, TIMEOUT,
+    api_error, decode_data_url, feed, finish, launch, resolve_voice, streams_input, ApiError, AppState, Pending,
+    Session, ENGINE_STOPPED, TIMEOUT,
 };
 use crate::wav;
 
@@ -71,6 +72,8 @@ struct SessionConfig {
     ref_audio: Option<String>,
     #[serde(default)]
     ref_text: Option<String>,
+    #[serde(default)]
+    ref_audio_path: Option<String>,
 }
 
 /// How segments' audio is sent.
@@ -237,11 +240,14 @@ impl Conn {
                 kwargs.insert(k.into(), Value::String(v.clone()));
             }
         }
-        let input = GenerateInput {
+        let mut input = GenerateInput {
             text: String::new(),
             audio_path: ref_audio.as_ref().map(|f| f.0.to_string_lossy().to_string()),
             model_kwargs: kwargs,
         };
+        if let Err(e) = resolve_voice(&self.state, &mut input, c.ref_audio_path.as_deref()) {
+            return fail(self, e.msg);
+        }
         let output = Output { stream_audio: c.stream_audio, wav, sample_rate: self.state.model().sample_rate() };
         let (jobs, jobs_rx) = unbounded_channel();
         let player = tokio::spawn(play(jobs_rx, self.out.clone(), output));

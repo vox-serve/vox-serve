@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **WebSocket speech streaming** (Rust runtime): `/v1/audio/speech/stream` with sglang-omni's protocol
   (`session.config`, `input.text`, `input.commit`, `input.done`), for every model with input streaming; each
   committed segment is one request, with clause or sentence granularity and optional reference audio per session
+- **Reference voices on the server** (Rust runtime): `--voice-dir` lets requests pick a reference clip by name
+  (`voice=<name>`, with `<name>.txt` as its transcript) or by path (`ref_audio_path`) instead of uploading audio,
+  in every API
 
 ## [0.2.0] - 2026-11-01
 
