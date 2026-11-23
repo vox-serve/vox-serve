@@ -21,6 +21,7 @@ _PROGRAMS = {
     "zai-org/glm-4-voice": ("glm_voice", "GLMVoiceProgram"),
     "higgs-tts": ("higgs_tts", "HiggsTTSProgram"),
     "bosonai/higgs-tts": ("higgs_tts", "HiggsTTSProgram"),
+    "higgs-audio-v3": ("higgs_tts", "HiggsTTSProgram"),  # e.g. cloud19/higgs-audio-v3-tts-4b-fp8
     "higgs-audio-v2": ("higgs_audio_v2", "HiggsAudioV2Program"),
     "bosonai/higgs-audio-v2": ("higgs_audio_v2", "HiggsAudioV2Program"),
     "qwen3-tts": ("qwen3_tts", "Qwen3TTSProgram"),

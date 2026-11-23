@@ -7,22 +7,29 @@ slice when called with the same input tensor. Module forwards stay untouched, so
 Llama / Qwen-style layer. A sibling called with a different input (or out of order) falls back to its
 own slice of the merged weight, so results never change, only the kernel count.
 
+FP8 linears (``vox_serve.quant.Fp8Linear``) merge the same way: their per-output-channel scales are
+concatenated with the weights.
+
 Runs before graph capture: the Python-level caching happens only while graphs are recorded.
 """
 
 from typing import List, Optional, Sequence, Tuple
 
 import torch
-import torch.nn.functional as F
 from torch import nn
+
+from ..quant import Fp8Linear, linear
 
 GROUPS: Tuple[Tuple[str, ...], ...] = (("q_proj", "k_proj", "v_proj"), ("gate_proj", "up_proj"))
 
 
 class _Group:
-    def __init__(self, weight: torch.Tensor, bias: Optional[torch.Tensor], splits: List[int]):
+    def __init__(
+        self, weight: torch.Tensor, bias: Optional[torch.Tensor], splits: List[int], scale: Optional[torch.Tensor]
+    ):
         self.weight = weight
         self.bias = bias
+        self.scale = scale  # FP8 per-output-channel scales (None: a bf16 / fp32 weight)
         self.splits = splits
         self.key: Optional[torch.Tensor] = None
         self.outs: Optional[Sequence[torch.Tensor]] = None
@@ -38,20 +45,21 @@ class MergedLinearMember(nn.Module):
         # Views into the merged weight: code that reads ``.weight`` keeps working.
         self.weight = nn.Parameter(group.weight[start : start + size], requires_grad=False)
         self.bias = None if group.bias is None else nn.Parameter(group.bias[start : start + size], requires_grad=False)
+        self.weight_scale = None if group.scale is None else group.scale[start : start + size]
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         g = self.group
         if torch.compiler.is_compiling():
-            return F.linear(x, self.weight, self.bias)
+            return linear(x, self.weight, self.bias, self.weight_scale)
         if self.idx == 0:
-            g.outs = F.linear(x, g.weight, g.bias).split(g.splits, dim=-1)
+            g.outs = linear(x, g.weight, g.bias, g.scale).split(g.splits, dim=-1)
             g.key = x
         if g.key is x:
             out = g.outs[self.idx]
             if self.idx == len(g.splits) - 1:
                 g.key = g.outs = None
             return out
-        return F.linear(x, self.weight, self.bias)
+        return linear(x, self.weight, self.bias, self.weight_scale)
 
     def extra_repr(self) -> str:
         return f"in={self.in_features}, out={self.out_features}, member {self.idx} of {len(self.group.splits)}"
@@ -63,7 +71,8 @@ def merge_projections(root: nn.Module, groups: Sequence[Sequence[str]] = GROUPS)
     for mod in list(root.modules()):
         for names in groups:
             lins = [getattr(mod, a, None) for a in names]
-            if not all(type(lin) is nn.Linear for lin in lins):
+            kind = type(lins[0])
+            if kind not in (nn.Linear, Fp8Linear) or not all(type(lin) is kind for lin in lins):
                 continue
             if len({(lin.in_features, lin.weight.dtype, lin.weight.device) for lin in lins}) != 1:
                 continue
@@ -72,8 +81,9 @@ def merge_projections(root: nn.Module, groups: Sequence[Sequence[str]] = GROUPS)
             with torch.no_grad():
                 weight = torch.cat([lin.weight for lin in lins], 0).contiguous()
                 bias = None if lins[0].bias is None else torch.cat([lin.bias for lin in lins], 0).contiguous()
+                scale = torch.cat([lin.weight_scale for lin in lins], 0) if kind is Fp8Linear else None
             splits = [lin.out_features for lin in lins]
-            group = _Group(weight, bias, splits)
+            group = _Group(weight, bias, splits, scale)
             start = 0
             for i, (a, size) in enumerate(zip(names, splits, strict=True)):
                 setattr(mod, a, MergedLinearMember(group, i, start, size))
