@@ -10,17 +10,19 @@ into them), so memory does not grow.
 Rounding follows the module path where it is observable: the q/k norm output is rounded to bf16 before
 RoPE, as two separate kernels would. The residual stream is bf16 as before; SiLU and the product are
 computed in fp32 and rounded once (the modules round after each).
+
+FP8 projections (``vox_serve.quant.Fp8Linear``) run as FP8 GEMMs with their per-channel scales.
 """
 
 from typing import List, Optional
 
 import flashinfer
 import torch
-import torch.nn.functional as F
 import triton
 import triton.language as tl
 from torch import nn
 
+from ..quant import Fp8Linear, linear
 from .projections import MergedLinearMember
 
 
@@ -122,23 +124,38 @@ def neox_cos_sin(max_pos: int, head_dim: int, theta: float, device) -> torch.Ten
     return torch.cat([freqs.cos(), freqs.sin()], dim=-1).to(device)
 
 
+def _scale(lin: nn.Module) -> Optional[torch.Tensor]:
+    """FP8 per-channel weight scale of a linear, or None."""
+    return lin.weight_scale if isinstance(lin, Fp8Linear) else None
+
+
 def _merged(mod: nn.Module, names) -> tuple:
-    """Concatenated weight (and bias) of sibling linears; the linears then hold views into it."""
+    """Concatenated weight (and bias, FP8 scale) of sibling linears; the linears then hold views into it."""
     lins = [getattr(mod, n) for n in names]
     if isinstance(lins[0], MergedLinearMember):  # already merged by --fuse-lm
         g = lins[0].group
-        return g.weight, g.bias
+        return g.weight, g.bias, g.scale
+    fp8 = isinstance(lins[0], Fp8Linear)
+    if any(isinstance(lin, Fp8Linear) != fp8 for lin in lins):
+        raise ValueError(f"cannot merge FP8 and non-FP8 projections {names}")
     with torch.no_grad():
         w = torch.cat([lin.weight for lin in lins], 0).contiguous()
         b = None if lins[0].bias is None else torch.cat([lin.bias for lin in lins], 0).contiguous()
+        s = torch.cat([lin.weight_scale for lin in lins], 0) if fp8 else None
     start = 0
     for lin in lins:
         size = lin.out_features
-        lin.weight = nn.Parameter(w[start : start + size], requires_grad=False)
-        if b is not None:
-            lin.bias = nn.Parameter(b[start : start + size], requires_grad=False)
+        if fp8:  # buffers, not parameters
+            lin.weight = w[start : start + size]
+            lin.weight_scale = s[start : start + size]
+            if b is not None:
+                lin.bias = b[start : start + size]
+        else:
+            lin.weight = nn.Parameter(w[start : start + size], requires_grad=False)
+            if b is not None:
+                lin.bias = nn.Parameter(b[start : start + size], requires_grad=False)
         start += size
-    return w, b
+    return w, b, s
 
 
 class FusedDecoderStack:
@@ -154,22 +171,26 @@ class FusedDecoderStack:
         self.layers = []
         for layer in layers:
             a, mlp = layer.self_attn, layer.mlp
-            qkv_w, qkv_b = _merged(a, ("q_proj", "k_proj", "v_proj"))
-            gu_w, _ = _merged(mlp, ("gate_proj", "up_proj"))
+            qkv_w, qkv_b, qkv_s = _merged(a, ("q_proj", "k_proj", "v_proj"))
+            gu_w, _, gu_s = _merged(mlp, ("gate_proj", "up_proj"))
             qn, kn = getattr(a, "q_norm", None), getattr(a, "k_norm", None)
             self.layers.append(
                 dict(
                     in_w=layer.input_layernorm.weight,
                     qkv_w=qkv_w,
                     qkv_b=qkv_b,
+                    qkv_s=qkv_s,
                     q_w=None if qn is None else qn.weight,
                     k_w=None if kn is None else kn.weight,
                     qk_eps=float(qn.variance_epsilon) if qn is not None else 0.0,
                     o_w=a.o_proj.weight,
                     o_b=a.o_proj.bias,
+                    o_s=_scale(a.o_proj),
                     post_w=layer.post_attention_layernorm.weight,
                     gu_w=gu_w,
+                    gu_s=gu_s,
                     down_w=mlp.down_proj.weight,
+                    down_s=_scale(mlp.down_proj),
                 )
             )
 
@@ -186,15 +207,16 @@ class FusedDecoderStack:
                 x = flashinfer.norm.rmsnorm(residual, w["in_w"], self.eps)
             else:
                 flashinfer.norm.fused_add_rmsnorm(x, residual, w["in_w"], self.eps)
-            qkv = F.linear(x, w["qkv_w"], w["qkv_b"])
+            qkv = linear(x, w["qkv_w"], w["qkv_b"], w["qkv_s"])
             q = qk_rope_kv(
                 qkv, pos, self.cos_sin, w["q_w"], w["k_w"], w["qk_eps"], kv_cache[li], page, off,
                 self.nq, self.nkv, self.hd,
             )  # fmt: skip
             o = attn.run(q, kv_cache[li]).reshape(n, -1)
-            x = F.linear(o, w["o_w"], w["o_b"])
+            x = linear(o, w["o_w"], w["o_b"], w["o_s"])
             flashinfer.norm.fused_add_rmsnorm(x, residual, w["post_w"], self.eps)
-            x = F.linear(flashinfer.activation.silu_and_mul(F.linear(x, w["gu_w"])), w["down_w"])
+            gu = linear(x, w["gu_w"], None, w["gu_s"])
+            x = linear(flashinfer.activation.silu_and_mul(gu), w["down_w"], None, w["down_s"])
         if l1 == len(self.layers):
             flashinfer.norm.fused_add_rmsnorm(x, residual, self.norm_w, self.eps)
             return x

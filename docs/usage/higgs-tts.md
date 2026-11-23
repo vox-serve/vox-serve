@@ -12,6 +12,16 @@ curl -X POST localhost:8000/generate -F "text=Hello world" -F "audio=@ref.wav" \
   -F "ref_text=Transcript of the reference clip." -o out.wav
 ```
 
+## FP8 weights
+
+`--model cloud19/higgs-audio-v3-tts-4b-fp8` serves an FP8 (e4m3) checkpoint: its `pytorch_model.bin` holds the
+backbone linears as torchao `float8_weight_only` tensors (per-output-channel scales), read without torchao or
+unpickling arbitrary code; embeddings, norms and the codec stay bf16. Activations are quantized per token and the
+GEMMs run on the FP8 tensor cores (`vox_serve/quant.py`). The weights take about half the memory, and decode
+steps are faster: on Jetson Thor at batch 1, about 20 ms per step with `--fuse-lm`, against about 31 ms in bf16.
+Without cuBLAS row-wise FP8 scaling (Thor), the scales are applied in a separate pass over the GEMM output, so
+large prefill batches are slower than in bf16. `--fuse-lm` and `--fuse-layers` merge the FP8 projections (with their scales) like bf16 ones.
+
 Voices used on every request can stay on the server: with `--voice-dir voices/`, holding `guide.wav` and its
 transcript `guide.txt`, a request picks the voice with `voice=guide` (also the `voice` of a WebSocket
 `session.config`) and uploads nothing. `ref_audio_path=sub/clip.wav` names any clip under the directory. The

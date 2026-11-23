@@ -128,7 +128,11 @@ class HiggsLM(nn.Module):
 
     @classmethod
     def from_checkpoint(cls, model_dir: str, device: torch.device, max_pos: int) -> "HiggsLM":
+        """``model.safetensors`` (bf16, e.g. ``bosonai/higgs-tts-3-4b``) or, when that file holds only the
+        codec, ``pytorch_model.bin`` with torchao FP8 linears (e.g. ``cloud19/higgs-audio-v3-tts-4b-fp8``)."""
         from safetensors import safe_open
+
+        from ...quant import Fp8Linear, Fp8Tensor, load_torchao_fp8, rowwise_supported
 
         tc = json.load(open(os.path.join(model_dir, "config.json")))["text_config"]
         cfg = SimpleNamespace(**tc)
@@ -139,13 +143,50 @@ class HiggsLM(nn.Module):
             "tied.embedding.text_embedding.weight": "text_embedding.weight",
             "tied.embedding.modality_embeddings.0.embedding.weight": "codebook_embedding.weight",
         }
-        state = {}
-        with safe_open(os.path.join(model_dir, "model.safetensors"), framework="pt", device=str(device)) as f:
-            for name in f.keys():
-                key = name[len("body.") :] if name.startswith("body.") else rename.get(name)
-                if key is not None:
-                    state[key] = f.get_tensor(name).to(torch.bfloat16)
+
+        def lm_key(name: str) -> Optional[str]:
+            return name[len("body.") :] if name.startswith("body.") else rename.get(name)
+
+        state: Dict[str, Any] = {}
+        st_path = os.path.join(model_dir, "model.safetensors")
+        with safe_open(st_path, framework="pt", device=str(device)) as f:
+            if any(n.startswith("body.") for n in f.keys()):
+                for name in f.keys():
+                    key = lm_key(name)
+                    if key is not None:
+                        state[key] = f.get_tensor(name).to(torch.bfloat16)
+        if not state:
+            bin_path = os.path.join(model_dir, "pytorch_model.bin")
+            if not os.path.exists(bin_path):
+                raise RuntimeError(f"{model_dir}: no LM weights in model.safetensors and no pytorch_model.bin")
+            for name, t in load_torchao_fp8(bin_path).items():
+                key = lm_key(name)
+                if key is None:
+                    continue
+                if isinstance(t, Fp8Tensor):
+                    state[key] = Fp8Tensor(t.data.to(device), t.scale.to(device))
+                else:
+                    state[key] = t.to(device=device, dtype=torch.bfloat16)
+
+        # Quantized weights replace their nn.Linear with an Fp8Linear (its weight + weight_scale buffers).
+        for key in [k for k, v in state.items() if isinstance(v, Fp8Tensor)]:
+            q = state.pop(key)
+            path = key[: -len(".weight")]
+            parent, attr = lm.get_submodule(path.rsplit(".", 1)[0]), path.rsplit(".", 1)[1]
+            lin = getattr(parent, attr)
+            if not isinstance(lin, nn.Linear) or lin.bias is not None or tuple(lin.weight.shape) != q.data.shape:
+                raise RuntimeError(f"FP8 weight {key} {tuple(q.data.shape)} does not match {lin}")
+            with torch.device("meta"):
+                setattr(parent, attr, Fp8Linear(lin.in_features, lin.out_features))
+            state[f"{path}.weight"], state[f"{path}.weight_scale"] = q.data, q.scale
         lm.load_state_dict(state, strict=True, assign=True)
+        n_fp8 = sum(isinstance(m, Fp8Linear) for m in lm.modules())
+        if n_fp8:
+            logger.info(
+                "Higgs LM: %d FP8 linears (%s scaling)",
+                n_fp8,
+                "row-wise" if rowwise_supported(device) else "tensor-wise GEMM + output rescale",
+            )
         lm.cos_sin = rope_cache(max_pos, cfg.head_dim, cfg.rope_theta).to(device)
         lm.config = cfg
         return lm.eval().requires_grad_(False)
